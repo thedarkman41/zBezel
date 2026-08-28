@@ -1,0 +1,147 @@
+import SwiftUI
+import AppKit
+
+/// The compact panel behind the menu bar item. Carries the controls worth
+/// reaching without opening a window; everything else lives in the full panel.
+struct MenuPanel: View {
+    @ObservedObject var controller: MonitorController
+    @Environment(\.openWindow) private var openWindow
+    @State private var showInstaller = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider().overlay(Theme.rule)
+
+            VStack(alignment: .leading, spacing: 14) {
+                if controller.monitorControlAvailable {
+                    FeatureSlider(code: 0x10, label: "Brightness", controller: controller)
+                    FeatureSlider(code: 0x12, label: "Contrast", controller: controller)
+                    inputRow
+                } else {
+                    unavailable
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+
+            Divider().overlay(Theme.rule)
+            actions
+        }
+        .frame(width: 320)
+        .background(Theme.canvas)
+        .task {
+            await controller.bootstrap()
+            await controller.refreshVisible()
+        }
+        .sheet(isPresented: $showInstaller) {
+            InstallerView(controller: controller)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "display")
+                .font(.system(size: 14))
+                .foregroundStyle(Theme.textPrimary)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(controller.targetName)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Theme.textPrimary)
+                Text(controller.transport.label)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.warning)
+            }
+            Spacer(minLength: 0)
+            if controller.isProbing || controller.isRefreshing {
+                ProgressView().controlSize(.small)
+            } else {
+                Button {
+                    Task<Void, Never> { await controller.probe() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.textSecond)
+                }
+                .buttonStyle(.plain)
+                .help("Re-read the monitor")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+    }
+
+    private var inputRow: some View {
+        let state = controller.features[VCP.inputSelect.code]
+        return Group {
+            if let state, state.readable, !state.choices.isEmpty {
+                HStack(spacing: 8) {
+                    Text("Input")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer(minLength: 6)
+                    StyledPicker(
+                        options: state.choices.map { (value: $0.value, label: $0.label) },
+                        selection: Binding(
+                            get: { state.current },
+                            set: { value in
+                                Task<Void, Never> {
+                                    await controller.set(code: VCP.inputSelect.code, value: value)
+                                }
+                            }),
+                        enabled: true)
+                }
+            }
+        }
+    }
+
+    private var unavailable: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(controller.link.headline)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.warning)
+            Text(controller.proxyDiagnostic
+                 ?? (controller.link.explanation.split(separator: "\n\n").first.map(String.init) ?? ""))
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecond)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var actions: some View {
+        VStack(spacing: 0) {
+            row("Open Full Panel", "macwindow") {
+                openWindow(id: "main")
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            row("Set Up a Control Proxy…", "arrow.down.circle") {
+                showInstaller = true
+                NSApp.activate(ignoringOtherApps: true)
+            }
+            row("Move Window to Primary Display", "rectangle.on.rectangle") {
+                WindowPlacement.centreFrontmostOnPrimary()
+            }
+            Divider().overlay(Theme.rule).padding(.vertical, 4)
+            row("Quit zBezel", "power") { NSApp.terminate(nil) }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
+    }
+
+    private func row(_ title: String, _ symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11))
+                    .frame(width: 16)
+                Text(title).font(.system(size: 12.5))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(Theme.textPrimary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
