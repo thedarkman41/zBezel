@@ -1,3 +1,22 @@
+## 0.1.2 — 2026-08-28
+
+shipit.sh: run the C# gate, and stamp the version the build actually carries
+
+Two bugs the script's own checks caught on its first run.
+
+The reachability probe ran `ssh <host> true`. The proxy host's SSH shell is
+PowerShell, which has no `true`, so the probe failed and every run reported the
+host unreachable and skipped compiling the agent — the one gate this machine
+cannot perform locally. It now probes with `exit 0`, which both shells accept,
+and reuses the multiplexed connection the app already maintains rather than
+paying a fresh handshake against an 8-second timeout.
+
+The gate built the app before the version bump, so the bundle carried the old
+number while the commit claimed the new one. The relaunch check compares the
+running bundle against the version being shipped and refused to agree, which is
+exactly what that check exists for. The script now rebuilds after the bump.
+
+
 ## 0.1.1 — 2026-08-28
 
 Add shipit.sh, and summarise what the first push contains

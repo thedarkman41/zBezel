@@ -113,17 +113,22 @@ fi
 echo "    clean"
 
 echo "  Windows agent under /warn:4 /warnaserror"
+# The proxy host's SSH shell is PowerShell, which has no `true` — probing with
+# it reports every reachable host as unreachable. `exit 0` works in both shells.
 PROXY_HOST="$(defaults read com.darkstar.zBezel proxyHost 2>/dev/null || true)"
 if [ -z "$PROXY_HOST" ]; then
     echo "    SKIPPED — no proxy host configured; C# was not compiled by this ship."
-elif ! ssh -o BatchMode=yes -o ConnectTimeout=8 "$PROXY_HOST" true 2>/dev/null; then
+elif ! ssh -o BatchMode=yes -o ConnectTimeout=20 -o ControlMaster=auto \
+        -o ControlPath="$HOME/.bezel-cm-$PROXY_HOST" -o ControlPersist=600 \
+        "$PROXY_HOST" 'exit 0' 2>/dev/null; then
     echo "    SKIPPED — $PROXY_HOST unreachable; C# was not compiled by this ship."
 else
     CSC='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-    scp -q -o BatchMode=yes "$REPO_DIR/Agent/BezelAgent.cs" "$PROXY_HOST:bezel/BezelAgent.check.cs"
-    CS_OUT="$(ssh -o BatchMode=yes "$PROXY_HOST" \
+    SSH_MUX=(-o BatchMode=yes -o ControlMaster=auto -o ControlPath="$HOME/.bezel-cm-$PROXY_HOST" -o ControlPersist=600)
+    scp -q "${SSH_MUX[@]}" "$REPO_DIR/Agent/BezelAgent.cs" "$PROXY_HOST:bezel/BezelAgent.check.cs"
+    CS_OUT="$(ssh "${SSH_MUX[@]}" "$PROXY_HOST" \
         "& '$CSC' /nologo /warn:4 /warnaserror /target:exe /out:\"\$HOME\\bezel\\BezelAgent.check.exe\" \"\$HOME\\bezel\\BezelAgent.check.cs\" 2>&1 | Out-String" 2>&1 || true)"
-    ssh -o BatchMode=yes "$PROXY_HOST" \
+    ssh "${SSH_MUX[@]}" "$PROXY_HOST" \
         'Remove-Item "$HOME\bezel\BezelAgent.check.cs","$HOME\bezel\BezelAgent.check.exe" -ErrorAction SilentlyContinue' 2>/dev/null || true
     if printf '%s' "$CS_OUT" | grep -qiE 'error|warning'; then
         printf '%s\n' "$CS_OUT" | head -12 | sed 's/^/    /'
@@ -145,6 +150,15 @@ if [ "$DO_BUMP" = "1" ]; then
 else
     NEXT="$(cat "$REPO_DIR/VERSION")"
     echo "  version held at $NEXT"
+fi
+
+# The gate built the app BEFORE the bump, so the bundle still carries the old
+# number. Rebuild so the artifact matches the version being committed — the
+# relaunch check below compares them and will refuse to agree otherwise.
+if [ "$DO_BUMP" = "1" ]; then
+    echo "  rebuilding so the bundle carries $NEXT"
+    "$REPO_DIR/Scripts/build-app.sh" >/dev/null 2>&1 || {
+        echo "  REFUSED: rebuild after version bump failed." >&2; exit 1; }
 fi
 
 say "changelog"
