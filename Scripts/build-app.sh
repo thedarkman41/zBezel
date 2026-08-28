@@ -5,6 +5,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 [[ -f "$REPO/Sources/BezelApp.swift" ]] || { echo "not the Bezel repo: $REPO" >&2; exit 1; }
 
+VERSION="$(cat "$REPO/VERSION" 2>/dev/null || echo 0.0.0)"
 APP="$REPO/build/zBezel.app"
 BIN="$APP/Contents/MacOS"
 RES="$APP/Contents/Resources"
@@ -41,7 +42,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>zBezel</string>
     <key>CFBundleDisplayName</key><string>zBezel</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.2</string>
+    <key>CFBundleShortVersionString</key><string>__VERSION__</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
@@ -49,6 +50,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 </dict>
 PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
+# Stamp the version from VERSION rather than carrying it in two places.
+/usr/bin/sed -i '' "s/__VERSION__/$VERSION/" "$APP/Contents/Info.plist"
 
 # The file-provider volume stamps com.apple.FinderInfo xattrs that break codesign;
 # strip before AND after signing. Use /usr/bin/xattr explicitly — conda's Python

@@ -1,7 +1,7 @@
 # zBezel — Code Enforcement Audit
 
-**Project:** `/Volumes/Faraday/Users/darkstar/Documents/GitHub/Bezel`
-**Standard:** `/Volumes/Faraday/Users/darkstar/Documents/GitHub/standards/standards/code-enforcement.md`
+**Project:** `<repo>`
+**Standard:** `<standards>/standards/code-enforcement.md`
 **Date:** 2026-08-28
 **Scope:** 20 Swift files, `Sources/ddc.c` / `ddc.h`, `Agent/BezelAgent.cs`, `Scripts/*.sh` — 6,246 lines total.
 
