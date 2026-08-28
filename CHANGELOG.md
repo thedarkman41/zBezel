@@ -2,6 +2,26 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.4 — 2026-08-28
+
+**Untrack the shipit.sh body file**
+
+CHANGES.txt is scratch input to shipit.sh, not repository content. Tracking it
+had two consequences, both visible on the very first run of the new script.
+
+Every commit carried a second copy of its own changelog entry, since the body
+file and the CHANGELOG.md entry are generated from the same text — that being
+the point of the design. And the worktree was left permanently dirty, because
+the script empties the file after committing so the next run cannot silently
+reuse the previous message; that emptying always landed after `git add`, so it
+was never the version that got committed.
+
+The archived copies shipit.sh leaves behind (.changes.<version>.txt) are now
+ignored too. They were untracked and unignored, which meant the next `git add
+-A` would have swept them into an unrelated commit.
+
+The durable record is CHANGELOG.md, which is unaffected.
+
 ## 0.1.3 — 2026-08-28
 
 **Rebuild shipit.sh from Clarinet's ship.sh**

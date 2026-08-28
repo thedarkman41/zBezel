@@ -12,3 +12,11 @@ build/
 *.p12
 .gh-token
 secrets/
+
+# The commit body file and its archives. This is scratch input to shipit.sh,
+# not repository content: its text lands in CHANGELOG.md, which is the durable
+# record. Tracking it meant every commit carried a second copy of its own
+# changelog entry and left the worktree permanently dirty, because shipit.sh
+# empties the file after use so the next run cannot silently reuse the message.
+CHANGES.txt
+.changes.*.txt
