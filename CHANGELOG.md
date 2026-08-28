@@ -2,6 +2,42 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.5 — 2026-08-28
+
+**Delete run-agent.ps1, closing ZBZ-S004**
+
+The script built a .bat by wrapping each argument in double quotes with no
+escaping, then registered a scheduled task to run it — so an argument
+containing a quote would close it and hand cmd.exe the rest, with &, | and
+%VAR% all live. It was never reachable: nothing invoked it, and all three
+grep hits were file-copy lists. The live path is install-service.ps1 into
+`BezelAgent.exe serve`, driven from the Mac through the `client` subcommand,
+whose arguments are allowlisted to alphanumerics plus -_. and would reject a
+quote outright.
+
+Unreachable is not a reason to keep shipping it. It was copied onto every
+proxy host by three separate sites, so the injection-shaped code sat on disk
+on each one waiting for something to call it. Shipping less is the fix.
+
+Removed from Scripts/build-app.sh, Scripts/deploy-agent.sh, and the `names`
+array in AgentInstaller.bundledAgentFiles(), which throws when a listed file
+is absent and would have failed the installer outright once the file was gone.
+
+NOTED, NOT FIXED
+
+While confirming nothing depended on it, one claim in the Code Enforcement
+audit turned out to be wrong. ZBZ-C0xx argued that a swallowed exception in
+Dispatch was acceptable because "in serve mode stderr is captured by the
+scheduled task's redirect in run-agent.ps1". It is not. Serve mode is started
+by install-service.ps1, which registers wscript.exe against start-hidden.vbs,
+and that does `shell.Run "<exe> serve", 0, False` — window hidden, nothing
+redirected anywhere. run-agent.ps1 was never in the serve path, so its
+redirect never applied to it.
+
+The practical consequence is that a swallowed exception in the running agent
+is invisible: no console, no log file, no event. That is a diagnosability gap
+in its own right and wants an agent-side log, which this commit does not add.
+
 ## 0.1.4 — 2026-08-28
 
 **Untrack the shipit.sh body file**

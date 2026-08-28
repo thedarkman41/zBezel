@@ -18,7 +18,6 @@ ssh "$HOST" 'New-Item -ItemType Directory -Force -Path "$HOME\bezel" | Out-Null'
 scp -q "$REPO/Agent/BezelAgent.cs" \
        "$REPO/Agent/start-hidden.vbs" \
        "$REPO/Agent/install-service.ps1" \
-       "$REPO/Agent/run-agent.ps1" \
        "$HOST:bezel/"
 
 echo "==> compiling on $HOST"

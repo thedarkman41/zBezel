@@ -499,7 +499,7 @@ final class AgentInstaller: ObservableObject {
     // MARK: Payload
 
     private func bundledAgentFiles() throws -> [URL] {
-        let names = ["BezelAgent.cs", "start-hidden.vbs", "install-service.ps1", "run-agent.ps1"]
+        let names = ["BezelAgent.cs", "start-hidden.vbs", "install-service.ps1"]
         guard let resources = Bundle.main.resourceURL else {
             throw InstallError(message: "The app bundle has no resources directory.")
         }

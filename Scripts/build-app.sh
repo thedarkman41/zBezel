@@ -29,7 +29,6 @@ mkdir -p "$RES/Agent"
 cp "$REPO/Agent/BezelAgent.cs" \
    "$REPO/Agent/start-hidden.vbs" \
    "$REPO/Agent/install-service.ps1" \
-   "$REPO/Agent/run-agent.ps1" \
    "$RES/Agent/"
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
