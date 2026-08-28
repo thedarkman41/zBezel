@@ -1,3 +1,47 @@
+# Changelog
+
+<!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
+
+## 0.1.3 — 2026-08-28
+
+**Rebuild shipit.sh from Clarinet's ship.sh**
+
+The previous shipit.sh was written from scratch for this repo and had picked
+up none of what Clarinet's ship.sh learned by failing. This replaces it with a
+faithful adaptation, keeping the ordering rules that script enforces:
+
+  * Validation never mutates. Every check that can refuse a commit now runs
+    strictly before the version bump. The secret scan in particular used to
+    run after it, so a rejected run burned a version number and left VERSION
+    dirty for the next one to trip over.
+  * The build runs before the commit, not after. A commit that does not
+    compile is the state every later bisect has to step over.
+  * The relaunch proves what is running. It compares the restarted process's
+    CFBundleShortVersionString against the version just shipped, so a stale
+    process still owning the menu bar is reported instead of assumed. zBezel
+    has no window at launch, so this is the only honest check available.
+  * The relaunch takes a mutex. Two sessions restarting the one app interleave
+    into a menu bar owned by a build neither of them thinks is running. The
+    lock lives beside the app's data rather than in the repo, so two checkouts
+    contend for it, and it is taken with mkdir because test-then-touch has a
+    window between the two halves.
+  * The changelog entry is generated from the same subject and body as the
+    commit message, and inserted with awk rather than sed, since body text
+    containing a backslash or ampersand is a sed replacement metacharacter.
+  * The relaunch happens before the push, not after. The push section returns
+    early when there is no origin, so ordering it first would mean a repo
+    without a remote never relaunches.
+
+Carried over from the previous version: the three-language gate. The Mac build
+compiles only the Swift, so gating on it alone would let the other two rot.
+ddc.c is checked under -Wall -Wextra because it is the one memory-unsafe file
+here and it parses bytes the monitor controls; BezelAgent.cs is compiled on the
+proxy host under /warn:4 /warnaserror, and says so out loud when that host is
+unreachable rather than passing a gate it never ran.
+
+Also adds the insertion marker to CHANGELOG.md, which the awk step requires and
+refuses to proceed without.
+
 ## 0.1.2 — 2026-08-28
 
 shipit.sh: run the C# gate, and stamp the version the build actually carries
