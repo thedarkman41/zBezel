@@ -2,6 +2,57 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.24 — 2026-08-29
+
+**A Mission Control Space that stands for the PC**
+
+Switch to it and the panel switches to the PC's input and hands over the
+keyboard and pointer; switch away and both come back. Its Mission Control
+thumbnail shows the PC's actual desktop.
+
+WHAT IS NOT POSSIBLE, AND WHAT IS
+
+There is no way to add an entry to Mission Control's Spaces strip. It is
+system-owned, no public API exposes it, and the private ones other tools use to
+manipulate Spaces still cannot insert something that is not a real Space.
+
+So this does not imitate one. It IS one: a full-screen window on the panel, and
+macOS mints a Space for any full-screen window. It therefore appears beside the
+real desktops, and responds to a click on the thumbnail, a swipe, or
+Control-arrow, because there is nothing special about it.
+
+That costs one concession. An LSUIElement accessory app cannot take a window
+full screen, and full screen is the entire mechanism, so the app becomes a
+regular one for as long as the Space exists and goes back to being an accessory
+when it closes.
+
+ENTERING TAKES THE KEYBOARD TOO, DELIBERATELY
+
+The two could have been separated. They should not be: switching the panel
+without handing over input would show the PC's screen while an invisible Mac
+pointer moved around on top of it, which is worse than doing either alone.
+
+THE THUMBNAIL, AND WHY NOT VIA THE CLIPBOARD
+
+The picture is a screenshot of the PC, refreshed once a minute and only while
+the Space is in the background — in front, the monitor has already switched and
+the real machine is on screen, so a picture of it would be invisible and a waste
+of the channel.
+
+It was suggested that the PC put the screenshot on its clipboard and let the
+existing sync carry it. The transport was the right instinct and is reused, but
+not the clipboard itself: that would overwrite the user's own clipboard every
+sixty seconds, which turns a useful feature into a hostile one. It travels as
+its own message type on the same channel instead — the clipboard connection, so
+a picture can never delay a pointer event however large it is.
+
+Sent small and lossy on purpose. A full 4K PNG is about 2MB for something drawn
+a couple of hundred pixels wide in a thumbnail; 1280 wide as JPEG measured 62KB,
+which makes once a minute free rather than merely affordable.
+
+The capture runs only while the KVM is armed, is held in memory, and is never
+written to disk.
+
 ## 0.1.23 — 2026-08-28
 
 **Look the doorway up live; a cached screen edge had drifted to mid-screen**

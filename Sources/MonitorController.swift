@@ -92,6 +92,8 @@ final class MonitorController: ObservableObject {
     // MARK: KVM
 
     private let kvm = KVMController()
+    private let pcSpace = PCSpace()
+    @Published private(set) var pcSpaceOpen = false
     @Published private(set) var kvmEnabled = false
     @Published private(set) var kvmControllingRemote = false
     @Published private(set) var kvmStatus = "off"
@@ -111,6 +113,18 @@ final class MonitorController: ObservableObject {
         }
         kvm.onNotice = { [weak self] note in
             Task { @MainActor in self?.kvmError = note }
+        }
+
+        // The Space and the KVM are one gesture: entering it switches the panel
+        // and hands over the keyboard and pointer together, because showing the
+        // PC's screen while an invisible Mac pointer moved over it would be
+        // worse than doing neither.
+        pcSpace.onEnter = { [weak self] in self?.kvm.takeControlForSpace() }
+        pcSpace.onLeave = { [weak self] in self?.kvm.releaseControlForSpace() }
+        pcSpace.onWantScreenshot = { [weak self] in self?.kvm.requestScreenshot() }
+        kvm.onScreenshot = { [weak self] data in
+            guard let image = NSImage(data: data) else { return }
+            self?.pcSpace.show(image)
         }
     }
 
@@ -261,6 +275,27 @@ final class MonitorController: ObservableObject {
         syncKVMState()
     }
 
+    /// Open or close the Space that stands for the PC.
+    func setPCSpace(_ on: Bool) {
+        guard on != pcSpace.isOpen else { return }
+        if on {
+            guard let id = selectedID, displays.contains(where: { $0.id == id }) else {
+                kvmError = "No external display is selected to put the Space on."
+                return
+            }
+            guard kvm.isEnabled else {
+                kvmError = "Switch on Control \(proxyHost) first — the Space hands over "
+                         + "the keyboard and pointer as well as the picture."
+                return
+            }
+            pcSpace.open(on: id, title: proxyHost.isEmpty ? "PC" : proxyHost)
+        } else {
+            pcSpace.close()
+        }
+        pcSpaceOpen = pcSpace.isOpen
+        UserDefaults.standard.set(pcSpaceOpen, forKey: "pcSpaceOpen")
+    }
+
     /// Unwind the KVM synchronously on the way out.
     ///
     /// Handing control over decouples the pointer from the mouse and hides the
@@ -268,6 +303,7 @@ final class MonitorController: ObservableObject {
     /// that moves nothing, so this cannot be left to an async Task that may not
     /// get a chance to run before the process goes.
     func shutdownKVM() {
+        pcSpace.close()
         kvm.disable()
     }
 

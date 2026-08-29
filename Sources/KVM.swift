@@ -403,6 +403,13 @@ final class KVMController {
         clipboard.send = { [weak self] line in self?.clipTransport.send(line) }
         clipboard.onNotice = { [weak self] note in self?.onNotice?(note) }
         clipTransport.onLine = { [weak self] line in
+            if line.hasPrefix("S ") {
+                let encoded = String(line.dropFirst(2))
+                if let data = Data(base64Encoded: encoded), !data.isEmpty {
+                    DispatchQueue.main.async { self?.onScreenshot?(data) }
+                }
+                return
+            }
             guard line.hasPrefix("C ") else { return }
             let parts = line.split(separator: " ", maxSplits: 2).map(String.init)
             guard parts.count == 3 else { return }
@@ -708,6 +715,32 @@ final class KVMController {
         }
         status = "armed — the panel's right edge crosses to \(host)"
         onChange?()
+    }
+
+    /// A picture of the far desktop arrived.
+    var onScreenshot: ((Data) -> Void)?
+
+    /// Ask for one. Rides the clipboard channel, so it cannot delay pointer
+    /// events however large it turns out to be.
+    func requestScreenshot(width: Int = 1280) {
+        guard isEnabled else { return }
+        clipTransport.send("SHOT \(width)")
+    }
+
+    /// Take control because the PC's Space came forward, rather than because the
+    /// pointer crossed an edge.
+    ///
+    /// Entering at the doorway's own edge rather than the middle, so the
+    /// remote pointer lands where it would have if the user had walked there.
+    func takeControlForSpace() {
+        guard isEnabled, side == .here else { return }
+        let doorway = portalBounds ?? macBounds
+        handOver(at: CGPoint(x: doorway.maxX - 1, y: doorway.midY), doorway: doorway)
+    }
+
+    func releaseControlForSpace() {
+        guard isEnabled, side == .there else { return }
+        handBack()
     }
 
     /// The remote desktop's size, so absolute positions mean the same thing at

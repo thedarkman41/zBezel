@@ -1256,6 +1256,59 @@ internal static class BezelAgent
         Log("clipboard: sent " + format + ", " + payload.Length + " bytes");
     }
 
+    // ---- Screen capture -----------------------------------------------
+    //
+    // A picture of this machine's desktop, sent to the Mac on request.
+    //
+    // It exists to fill a Mission Control thumbnail, nothing more: the moment
+    // the user is actually looking at that Space the monitor has switched to
+    // this machine and they are seeing it live, not the picture. So it is sent
+    // small and lossy — a full 4K PNG would be about 2MB for something rendered
+    // a couple of hundred pixels wide.
+    //
+    // Requested by the Mac rather than pushed on a timer here, so the cadence is
+    // decided by the side that knows whether anyone can see it.
+
+    private static void CaptureScreen(int maxWidth)
+    {
+        int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int w = GetSystemMetrics(SM_CXVIRTUALSCREEN), h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (w <= 0 || h <= 0) { Log("capture: virtual screen is degenerate"); return; }
+
+        using (var full = new System.Drawing.Bitmap(w, h))
+        {
+            using (var canvas = System.Drawing.Graphics.FromImage(full))
+                canvas.CopyFromScreen(x, y, 0, 0, new System.Drawing.Size(w, h));
+
+            int outWidth = Math.Min(maxWidth, w);
+            int outHeight = (int)((long)h * outWidth / w);
+            using (var small = new System.Drawing.Bitmap(full, outWidth, outHeight))
+            using (var buffer = new System.IO.MemoryStream())
+            {
+                System.Drawing.Imaging.ImageCodecInfo jpeg = null;
+                foreach (var codec in System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders())
+                    if (codec.MimeType == "image/jpeg") { jpeg = codec; break; }
+
+                if (jpeg == null)
+                {
+                    small.Save(buffer, System.Drawing.Imaging.ImageFormat.Png);
+                }
+                else
+                {
+                    var settings = new System.Drawing.Imaging.EncoderParameters(1);
+                    settings.Param[0] = new System.Drawing.Imaging.EncoderParameter(
+                        System.Drawing.Imaging.Encoder.Quality, 70L);
+                    small.Save(buffer, jpeg, settings);
+                    settings.Dispose();
+                }
+
+                byte[] bytes = buffer.ToArray();
+                SendBack("S " + Convert.ToBase64String(bytes));
+                Log("capture: sent " + outWidth + "x" + outHeight + ", " + bytes.Length + " bytes");
+            }
+        }
+    }
+
     /// Report what is on the clipboard of the interactive session.
     ///
     /// Needed because SSH lands in session 0, which has a clipboard of its own
@@ -1350,6 +1403,21 @@ internal static class BezelAgent
                         string line;
                         while ((line = reader.ReadLine()) != null)
                         {
+                            if (line.StartsWith("SHOT", StringComparison.Ordinal))
+                            {
+                                // Capture on the STA thread: it is the one that
+                                // already owns desktop access in this session.
+                                int width = 1280;
+                                var bits = line.Split(' ');
+                                if (bits.Length > 1) int.TryParse(bits[1], out width);
+                                int requested = width;
+                                ClipboardWork.Add(() =>
+                                {
+                                    try { CaptureScreen(requested); }
+                                    catch (Exception e) { Log("capture failed: " + e.Message); }
+                                });
+                                continue;
+                            }
                             if (!line.StartsWith("C ", StringComparison.Ordinal)) continue;
                             var parts = line.Split(new[] { ' ' }, 3);
                             if (parts.Length != 3) continue;
