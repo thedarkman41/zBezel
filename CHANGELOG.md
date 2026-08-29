@@ -2,6 +2,34 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.25 — 2026-08-29
+
+**Create the PC's Space without leaving the user standing in it**
+
+Switching the Space on dropped the user into it and left them to switch back out.
+
+Creating a full-screen Space always animates into it. There is no public way to
+mint one in the background, and the only alternative is private SkyLight calls,
+which is not a trade worth making for an animation. So the Space is created and
+then immediately stepped out of: one brief transition when the switch is flipped,
+after which it simply sits at the far right until it is chosen. macOS appends
+full-screen Spaces after the desktops, so it lands on the right by itself.
+
+Stepping back is a synthesised Control-Left, because switching Spaces has no
+public API either. Once, on creation, never again — every later entry is the user
+asking for it.
+
+The creation round trip also had to stop counting as real. Entering the new Space
+and leaving it again would otherwise read as a genuine enter followed by a
+genuine leave: control handed over and taken straight back, and the monitor
+switched to the PC and back, all for an animation nobody wanted. Space changes
+during creation now update the remembered state without acting on it, and the
+watch starts once the transition has settled.
+
+This does not deliver "it just appears there" — that was asked for and cannot be
+done from public API. It reduces it to a single blip at the moment the feature is
+switched on, which is the closest honest approximation.
+
 ## 0.1.24 — 2026-08-29
 
 **A Mission Control Space that stands for the PC**

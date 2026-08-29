@@ -88,9 +88,25 @@ final class PCSpace {
         self.window = window
         self.imageView = image
         self.label = caption
+        settling = true
 
         window.makeKeyAndOrderFront(nil)
         window.toggleFullScreen(nil)          // this is what creates the Space
+
+        // Creating a full-screen Space always animates INTO it. There is no
+        // public way to mint one in the background — the only alternative is
+        // private SkyLight calls, which is not a trade worth making for an
+        // animation. So go back to where the user was as soon as the transition
+        // finishes: they see one brief blip when they switch this on, and after
+        // that the Space simply sits at the far right until they choose it.
+        //
+        // macOS appends full-screen Spaces after the desktops, so it lands on
+        // the right on its own.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didEnterFullScreenNotification,
+            object: window, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.returnToPreviousSpace() }
+        }
 
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification,
@@ -119,9 +135,54 @@ final class PCSpace {
         }
         window = nil; imageView = nil; label = nil
         wasOnActiveSpace = false
+        hasBouncedBack = false
         NSApp.setActivationPolicy(.accessory)
         KVMLog.write("space: closed")
     }
+
+    /// Step back one Space, to undo the jump that creating this one forced.
+    ///
+    /// Synthesised Control-Left, because switching Spaces has no public API
+    /// either. Done once, immediately after creation, and never again — every
+    /// later entry into this Space is the user asking for it.
+    private func returnToPreviousSpace() {
+        guard !hasBouncedBack else { return }
+        hasBouncedBack = true
+
+        // Let the transition settle first; a key event delivered mid-animation
+        // is swallowed.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            let source = CGEventSource(stateID: .combinedSessionState)
+            let left: CGKeyCode = 0x7B          // kVK_LeftArrow
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: left, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: left, keyDown: false)
+            else { return }
+            down.flags = .maskControl
+            up.flags = .maskControl
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            KVMLog.write("space: created, stepped back to the previous Space")
+
+            // Only start acting on Space changes once the dust has settled.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                Task { @MainActor in
+                    self.settling = false
+                    KVMLog.write("space: now watching for real switches")
+                }
+            }
+        }
+    }
+
+    private var hasBouncedBack = false
+
+    /// True from creation until the bounce back has finished.
+    ///
+    /// Creating the Space enters it and the bounce leaves it again, which would
+    /// otherwise read as a genuine enter followed by a genuine leave: control
+    /// handed over and taken back, and the monitor switched to the PC and back,
+    /// all for an animation nobody asked for. The transitions still update the
+    /// remembered state, they just do not act on it.
+    private var settling = true
 
     // MARK: Entering and leaving
 
@@ -130,6 +191,10 @@ final class PCSpace {
         let now = window.isOnActiveSpace
         guard now != wasOnActiveSpace else { return }
         wasOnActiveSpace = now
+        if settling {
+            KVMLog.write("space: \(now ? "entered" : "left") while settling — ignored")
+            return
+        }
         KVMLog.write("space: \(now ? "entered" : "left")")
         if now { onEnter?() } else { onLeave?() }
     }
