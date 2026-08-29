@@ -2,6 +2,37 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.20 — 2026-08-28
+
+**Serialise the panel's input switching so a return crossing is not lost**
+
+Crossing back to the Mac often left the panel on USB-C. The code path was
+running every time — the log recorded "switching panel to the Mac input (0xf)"
+on each return — and the command reached the monitor. It simply did not survive.
+
+A DDC input switch is slow: the panel renegotiates the link and takes several
+seconds, during which reads report the transition rather than the destination. A
+direct write to DisplayPort read back as 0x11 (HDMI) and then, some seconds
+later, settled correctly — the switching was never broken, it was being trampled.
+
+Crossings are far quicker than that. The log has pairs 4 seconds apart and one
+1.6 seconds apart, so two switches were routinely in flight together and the
+panel ended up wherever the collision left it. Swift's actors make it worse
+still: calls awaiting an actor are not guaranteed to resume in the order they
+were made, so two writes issued a second apart could be applied backwards.
+
+Now one writer at a time, most recent request wins, and a reversal inside a
+500ms window asks for nothing at all — which is what changing your mind that
+quickly ought to mean. After each write the panel is given 2.5 seconds to finish
+before another is considered.
+
+NOTED, NOT CHANGED
+
+Auto Switch (0xE6) is on. It was briefly turned off while testing whether it was
+overriding the selection; it was not, and it has been put back as found. Worth
+knowing it exists: with it on, the panel may also change input on its own when
+the other machine wakes or sleeps, which would look like this feature acting up.
+
 ## 0.1.19 — 2026-08-28
 
 **Give the clipboard its own SSH channel, and raise the cap to 32MB**

@@ -145,8 +145,50 @@ final class MonitorController: ObservableObject {
         kvm.macInput = HPProfile.inputNames.first { $0.value == "DisplayPort"  }?.key ?? 0x0F
         kvm.pcInput  = HPProfile.inputNames.first { $0.value == "USB-C1 Video" }?.key ?? 0x13
         kvm.setMonitorInput = { [weak self] value in
-            Task { @MainActor in
-                await self?.set(code: VCP.inputSelect.code, value: value)
+            Task { @MainActor in self?.requestMonitorInput(value) }
+        }
+    }
+
+    private var desiredInput: UInt16?
+    private var lastRequestedInput: UInt16?
+    private var inputSwitchRunning = false
+
+    /// Ask the panel for an input, coalescing bursts and never overlapping.
+    ///
+    /// A DDC input switch is not instant — the panel renegotiates the link and
+    /// takes several seconds — and crossing the edge issues one of these each
+    /// way. Crossings 1.6 seconds apart therefore put two switches in flight at
+    /// once and the panel ended up wherever the collision left it, which looked
+    /// exactly like the return crossing failing to switch back at all.
+    ///
+    /// Swift actors make that worse: calls awaiting an actor are not guaranteed
+    /// to resume in the order they were made, so two writes issued a second
+    /// apart could be applied backwards.
+    ///
+    /// So: one writer at a time, the most recent request wins, and a reversal
+    /// inside the coalescing window asks for nothing at all — which is what
+    /// changing your mind that quickly should mean.
+    func requestMonitorInput(_ value: UInt16) {
+        desiredInput = value
+        guard !inputSwitchRunning else { return }
+        inputSwitchRunning = true
+
+        Task { @MainActor in
+            defer { inputSwitchRunning = false }
+            while true {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                guard let target = desiredInput else { return }
+                desiredInput = nil
+
+                if target == lastRequestedInput { continue }   // already going there
+                lastRequestedInput = target
+                await set(code: VCP.inputSelect.code, value: target)
+
+                // Let the panel finish. A write landing mid-renegotiation is
+                // simply lost, and the reads during it report the transition
+                // rather than the destination.
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                if desiredInput == nil { return }
             }
         }
     }
