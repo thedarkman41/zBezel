@@ -438,11 +438,13 @@ final class KVMController {
 
         // Fallback, kept on purpose: Control-Option-Command-Escape.
         //
-        // Not every keyboard reports fn. Apple's own do, but a third-party one
-        // may never set the flag, and the way that failure presents is the user
-        // holding the chord with no pointer and no keyboard and nothing
-        // happening — the one situation this mechanism exists to prevent. A
-        // second hatch costs one comparison.
+        // fn is confirmed working on the keyboard this was built against, so
+        // this is not covering a known failure. It covers an unknown one: not
+        // every keyboard reports fn at all, and the way that failure presents
+        // is the user holding the chord with no pointer, no keyboard and
+        // nothing happening — the one situation this mechanism exists to
+        // prevent, on the one day nobody is watching the log. A second hatch
+        // costs a comparison.
         if type == .keyDown,
            UInt16(event.getIntegerValueField(.keyboardEventKeycode)) == 0x35,
            event.flags.isSuperset(of: [.maskControl, .maskAlternate, .maskCommand]) {
@@ -451,15 +453,6 @@ final class KVMController {
             return nil
         }
 
-        // Diagnostic for the case above: the modifiers are held but fn is not
-        // being reported, so the intended chord can never fire on this keyboard.
-        if type == .flagsChanged,
-           event.flags.isSuperset(of: [.maskControl, .maskAlternate, .maskCommand]),
-           !event.flags.contains(.maskSecondaryFn) {
-            KVMLog.write("note: ctrl+opt+cmd seen without fn (flags=0x"
-                       + String(event.flags.rawValue, radix: 16)
-                       + ") — if you were holding fn, this keyboard does not report it")
-        }
 
         forward(type: type, event: event)
         return nil                              // swallowed: this Mac must not act on it

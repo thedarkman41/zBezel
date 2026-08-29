@@ -2,6 +2,20 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.11 — 2026-08-28
+
+**Drop the fn diagnostic; it was telling the opposite of the truth**
+
+The note that fired when Control-Option-Command appeared without fn was meant to
+identify a keyboard that does not report fn. In practice it fires 11ms before
+every successful chord, because pressing four modifiers is a sequence and fn is
+usually last. Left in, it would have filled the log with a message asserting the
+chord could not work, immediately above the line recording it working.
+
+The fn chord is confirmed on this keyboard. Control-Option-Command-Escape stays
+as a fallback: it is no longer covering a known failure, but an unknown one, on
+whatever day nobody is reading the log.
+
 ## 0.1.10 — 2026-08-28
 
 **Panic chord is now fn-Control-Option-Command**
