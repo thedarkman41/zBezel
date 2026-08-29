@@ -2,6 +2,30 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.15 — 2026-08-28
+
+**Fix PC-to-Mac clipboard: split incoming lines on bytes, not Characters**
+
+Nothing sent from the PC ever reached the Mac. The PC side was doing its job —
+its log recorded "clipboard: sent text, 23 bytes" — and the channel was plainly
+healthy, since pointer control was crossing back and forth over it at the time.
+
+The receiving end never assembled a single line. The far side is Console.WriteLine
+on Windows, which ends lines "\r\n", and in Swift "\r\n" is ONE Character rather
+than two: searching a String for "\n" therefore never matches it. Confirmed
+against the wire — the ready line arrives as 7d 0d 0a.
+
+The reason this took a second look is that it broke something already working.
+The ready handshake had been detected by a raw `contains` on each chunk, which
+never cared about line endings; introducing proper line buffering for clipboard
+payloads replaced that with a search that could not succeed. The symptom recorded
+in the log was "transport ready=false connected=true" beside a KVM that was
+visibly working — the handshake and the clipboard were failing for one reason,
+not two.
+
+Now buffered as Data and split on the 0x0A byte, with the carriage return
+trimmed. Grapheme clustering cannot apply to bytes, so any line ending works.
+
 ## 0.1.14 — 2026-08-28
 
 **Clipboard synchronisation between the Mac and the PC**

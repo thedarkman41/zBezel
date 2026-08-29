@@ -130,23 +130,29 @@ final class KVMTransport {
         // last stderr line as the reason if the channel dies.
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             guard let self else { return }
-            let chunk = String(decoding: handle.availableData, as: UTF8.self)
+            let chunk = handle.availableData
             guard !chunk.isEmpty else { return }
 
-            // Line-buffered: the far side now sends clipboard payloads back
-            // this way as well as the ready handshake, and a base64 image
-            // arrives in several reads. Only this handler touches the buffer.
-            self.stdoutBuffer += chunk
-            if self.stdoutBuffer.utf8.count > 8 * 1_048_576 {
-                // Something is sending unbounded garbage with no newline in it.
+            // Split on BYTES, not Characters.
+            //
+            // The far side is Console.WriteLine on Windows, so lines end "\r\n"
+            // — and in Swift "\r\n" is a single Character, so searching a String
+            // for "\n" never matches it. Every line silently failed to parse:
+            // the ready handshake stopped being seen and clipboard payloads were
+            // dropped, while the channel itself was working perfectly.
+            //
+            // Only this handler touches the buffer.
+            self.stdoutBuffer.append(chunk)
+            if self.stdoutBuffer.count > 8 * 1_048_576 {
                 KVMLog.write("transport: discarding an oversized unterminated reply")
-                self.stdoutBuffer = ""
+                self.stdoutBuffer.removeAll(keepingCapacity: false)
                 return
             }
-            while let newline = self.stdoutBuffer.firstIndex(of: "\n") {
-                let line = String(self.stdoutBuffer[..<newline])
+            while let newline = self.stdoutBuffer.firstIndex(of: 0x0A) {
+                let raw = self.stdoutBuffer[self.stdoutBuffer.startIndex..<newline]
+                self.stdoutBuffer.removeSubrange(self.stdoutBuffer.startIndex...newline)
+                let line = String(decoding: raw, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                self.stdoutBuffer.removeSubrange(...newline)
                 if line.contains("\"kvm\":\"ready\"") {
                     self.readyLock.lock()
                     self.readyFlag = true
@@ -164,7 +170,7 @@ final class KVMTransport {
     }
 
     private var sentCount = 0
-    private var stdoutBuffer = ""
+    private var stdoutBuffer = Data()
 
     /// A complete line received from the far side, other than the handshake.
     var onLine: ((String) -> Void)?
