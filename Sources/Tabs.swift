@@ -290,8 +290,13 @@ struct DisplayTab: View {
 
     var body: some View {
         CardGrid {
-            Card(title: "Brightness & Contrast", systemImage: "sun.max",
-                 help: "MCCS luminance (0x10) and contrast (0x12).") {
+            // The three image sliders in one card, and Panel promoted beside
+            // them. Split across two cards, Sharpness was a single slider in a
+            // card the height of two, and Power — three words and a row of
+            // buttons — sat next to the tallest card on the tab. Grouping what
+            // is adjusted together leaves the tall card paired with the tall one.
+            Card(title: "Image", systemImage: "sun.max",
+                 help: "MCCS luminance (0x10), contrast (0x12) and sharpness (0x87).") {
                 if controller.features[0x10]?.readable == true ||
                    controller.features[0x12]?.readable == true {
                     FeatureSlider(code: 0x10, label: "Brightness", controller: controller)
@@ -301,15 +306,32 @@ struct DisplayTab: View {
                     SliderRow(label: "Contrast", value: .constant(75), range: 0...100, enabled: false)
                     MonitorSideUnavailable(controller: controller)
                 }
-            }
-
-            Card(title: "Sharpness", systemImage: "triangle.righthalf.filled",
-                 help: "MCCS sharpness (0x87).") {
                 if controller.features[0x87]?.readable == true {
                     FeatureSlider(code: 0x87, label: "Sharpness", controller: controller)
                 } else {
                     SliderRow(label: "Sharpness", value: .constant(50), range: 0...100, enabled: false)
-                    MonitorSideUnavailable(controller: controller)
+                }
+            }
+
+            Card(title: "Panel", systemImage: "info.circle",
+                 help: "Read-only facts the monitor reports about itself.") {
+                if let edid = controller.selected?.edid {
+                    InfoRow("Model", edid.displayName)
+                    InfoRow("Manufacturer", edid.manufacturerID)
+                    InfoRow("Serial", edid.serialString ?? "—")
+                    InfoRow("Manufactured", "week \(edid.manufactureWeek), \(edid.manufactureYear)")
+                    InfoRow("Panel size", String(format: "%.1f″ diagonal", edid.diagonalInches))
+                    InfoRow("Connection", edid.digitalInterface)
+                    if let depth = edid.bitDepth { InfoRow("Bit depth", "\(depth) bits per colour") }
+                    if let preferred = edid.preferredTiming {
+                        InfoRow("Native timing", preferred.description)
+                    }
+                    if let hours = controller.features[0xC0], hours.readable {
+                        InfoRow("Backlight hours", String(hours.current))
+                    }
+                } else {
+                    Text("EDID unavailable.")
+                        .font(.system(size: 12)).foregroundStyle(Theme.textDim)
                 }
             }
 
@@ -345,27 +367,7 @@ struct DisplayTab: View {
                 }
             }
 
-            Card(title: "Panel", systemImage: "info.circle",
-                 help: "Read-only facts the monitor reports about itself.") {
-                if let edid = controller.selected?.edid {
-                    InfoRow("Model", edid.displayName)
-                    InfoRow("Manufacturer", edid.manufacturerID)
-                    InfoRow("Serial", edid.serialString ?? "—")
-                    InfoRow("Manufactured", "week \(edid.manufactureWeek), \(edid.manufactureYear)")
-                    InfoRow("Panel size", String(format: "%.1f″ diagonal", edid.diagonalInches))
-                    InfoRow("Connection", edid.digitalInterface)
-                    if let depth = edid.bitDepth { InfoRow("Bit depth", "\(depth) bits per colour") }
-                    if let preferred = edid.preferredTiming {
-                        InfoRow("Native timing", preferred.description)
-                    }
-                    if let hours = controller.features[0xC0], hours.readable {
-                        InfoRow("Backlight hours", String(hours.current))
-                    }
-                } else {
-                    Text("EDID unavailable.")
-                        .font(.system(size: 12)).foregroundStyle(Theme.textDim)
-                }
-            }
+
         }
     }
 }

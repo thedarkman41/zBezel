@@ -160,8 +160,15 @@ struct RootView: View {
 
     // MARK: Content
 
+    /// No ScrollView here, deliberately.
+    ///
+    /// This was the reason the window would not size itself: a scroll view is
+    /// content to be any height at all, so it reports a tiny ideal size, the
+    /// window shrinks to that and scrolls instead of growing. .contentSize
+    /// resizability cannot work against it — the window was sized to fit the
+    /// scroll view rather than to fit the tab.
     private var content: some View {
-        ScrollView {
+        Group {
             VStack(alignment: .leading, spacing: 16) {
                 if !controller.monitorControlAvailable && !controller.isProbing {
                     LinkBanner(report: controller.link,

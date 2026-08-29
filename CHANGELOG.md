@@ -2,6 +2,36 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.27 — 2026-08-29
+
+**Size the window to the tab, and group the Display tab's cards better**
+
+The window was still too short for its content, with a scrollbar down the side
+and the Panel card cut off mid-row.
+
+The cause was an outer ScrollView wrapping every tab. A scroll view is content to
+be any height at all, so it reports a tiny ideal size — the window sized itself to
+fit the scroll view rather than to fit the tab, and then scrolled. Asking for
+.contentSize resizability could never work against that: the content was, as far
+as the window was concerned, arbitrarily small. Removed, so each tab's real
+height drives the window.
+
+DISPLAY TAB
+
+Brightness, contrast and sharpness are now one Image card. Split in two,
+Sharpness was a single slider occupying a card the height of two, and Power —
+three words and a row of buttons — sat beside Panel, the tallest thing on the
+tab. Panel now pairs with the Image card and Power takes the short row beneath,
+so the column heights roughly match instead of one running twice the other.
+
+WORTH WATCHING
+
+With the outer scroll gone, a tab taller than the screen would produce a window
+taller than the screen rather than a scrollbar. The Advanced tab is the candidate
+— it lists every manufacturer code the panel declares, fourteen on this one. If
+it overflows, the fix is to bound that card the way the capabilities string
+already is, rather than to put the outer scroll back.
+
 ## 0.1.26 — 2026-08-29
 
 **Step out of the new Space by activating the previous app, not by faking a keypress**
