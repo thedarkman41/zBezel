@@ -2,6 +2,20 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.13 — 2026-08-28
+
+**Control switch reads green for on, amber for off**
+
+The stock macOS switch draws itself grey whenever its window is not the active
+one, and a menu bar popover is inactive most of the time — so the one control
+whose state matters at a glance was the one control refusing to show it.
+Whether the PC is currently holding the keyboard should not depend on which
+window happens to have focus.
+
+Replaced with a switch that draws its own colours: Theme.ok for on and
+Theme.warning for off, identical whether the popover is active or not, and
+dimmed when there is no proxy host to control.
+
 ## 0.1.12 — 2026-08-28
 
 **Park the Mac's pointer out of sight while the PC has control**

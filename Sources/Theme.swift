@@ -268,3 +268,42 @@ struct HoverDim: ViewModifier {
             .onHover { hovering = $0 }
     }
 }
+
+/// A switch that keeps its colour when the window is not the active one.
+///
+/// The stock macOS switch draws itself grey whenever its window is inactive,
+/// and a menu bar popover is inactive most of the time — so the one control
+/// whose state matters at a glance was the one control refusing to show it.
+/// Reading "is the PC holding my keyboard right now" should not depend on which
+/// window happens to have focus.
+///
+/// Green for on, amber for off, drawn the same either way.
+struct StatusToggleStyle: ToggleStyle {
+    var on: Color = Theme.ok
+    var off: Color = Theme.warning
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let height: CGFloat = 20
+        let width: CGFloat = 34
+        return Button {
+            configuration.isOn.toggle()
+        } label: {
+            ZStack(alignment: configuration.isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(configuration.isOn ? on : off)
+                Circle()
+                    .fill(Color.white)
+                    .shadow(color: .black.opacity(0.35), radius: 1, y: 0.5)
+                    .frame(width: height - 4, height: height - 4)
+                    .padding(.horizontal, 2)
+            }
+            .frame(width: width, height: height)
+            .opacity(isEnabled ? 1 : 0.35)
+            .animation(.easeInOut(duration: 0.15), value: configuration.isOn)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+}

@@ -122,8 +122,7 @@ struct MenuPanel: View {
                     get: { controller.kvmEnabled },
                     set: { on in Task<Void, Never> { await controller.setKVM(on) } }))
                     .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
+                    .toggleStyle(StatusToggleStyle())
                     .disabled(controller.proxyHost.isEmpty)
             }
             if let problem = controller.kvmError {
