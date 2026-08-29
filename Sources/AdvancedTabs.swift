@@ -213,9 +213,12 @@ struct LinkTab: View {
     @State private var showInstaller = false
 
     var body: some View {
+        // Two by two. The verdict used to run full width above a grid of three,
+        // which left half of the second row empty; now that it is a title and
+        // five rows it sits alongside the others instead of dwarfing them.
         VStack(alignment: .leading, spacing: 16) {
-            verdictCard
             CardGrid {
+                verdictCard
                 proxyCard
                 busCard
                 dpcdCard
@@ -306,31 +309,22 @@ struct LinkTab: View {
             ?? report.headline
         let symbol = (proxyHost != nil || report.monitorSideAvailable)
             ? "checkmark.seal" : "exclamationmark.triangle"
-        let blurb = proxyHost.map { host in
-            """
-            Every control here is live. Commands go over SSH to \(host), which has             the monitor on USB-C and an unobstructed AUX channel.
 
-            The checks below are this Mac's OWN DDC/CI path, which the dock blocks.             That is expected in this setup rather than a fault — it is the reason             the proxy is here.
-            """
-        } ?? report.explanation
-
-        return Card(title: title, systemImage: symbol, help: nil) {
-            Text(blurb)
-                .font(.system(size: 12.5))
-                .foregroundStyle(Theme.textSecond)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider().overlay(Theme.rule).padding(.vertical, 4)
-
-            if proxyHost != nil {
-                Text("This Mac's direct path")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Theme.textSecond)
-            }
-
+        // No prose. The title already says whether control works and the rows
+        // say which parts of the local path do; the paragraphs that used to sit
+        // here explained a problem that, with the proxy up, has no visible
+        // symptom on this screen. The detail worth keeping is which input the
+        // panel is actually showing, which is otherwise nowhere on this tab.
+        return Card(title: title, systemImage: symbol,
+                    help: proxyHost.map {
+                        "Controls are relayed over SSH to \($0), which has the monitor on "
+                        + "USB-C. The rows below are this Mac's own DDC/CI path, which the "
+                        + "dock blocks — expected here, and the reason the proxy exists."
+                    } ?? report.explanation) {
             CheckRow("IOFramebuffer matched", report.framebufferFound)
             CheckRow("I2C bus present", report.i2cBusCount > 0,
-                     detail: report.busType == 2 ? "DisplayPort AUX" : "native I2C")
+                     detail: controller.currentInputName
+                          ?? (report.busType == 2 ? "DisplayPort AUX" : "native I2C"))
             CheckRow("EDID readable over the bus", report.edidReadOK,
                      detail: "proves the I2C path itself works")
             CheckRow("DDC/CI address acknowledged", report.ddcAddressACK,

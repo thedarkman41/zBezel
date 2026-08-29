@@ -2,6 +2,31 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.17 — 2026-08-28
+
+**Link tab: drop the prose, show the current input, tile the cards evenly**
+
+The verdict card carried two paragraphs explaining that DDC/CI was blocked and
+what to do about it. With the proxy up there is no symptom of that on the screen
+— the title already says control is working and the rows already say which parts
+of the local path do — so the paragraphs were explaining a problem the user
+cannot see and cannot act on. They are gone; the same text is on the card's help
+for anyone who wants it.
+
+The one fact worth adding in their place is which input the panel is actually
+showing, which was nowhere on this tab. It replaces the bus-type detail under
+"I2C bus present", which read "DisplayPort AUX" — close enough to an input name
+to be read as one, and never the answer to the question being asked.
+
+Also removes a rendering fault visible in the screenshot: the paragraphs had
+runs of blank space mid-sentence. Swift's backslash line-continuation inside a
+multi-line string joins the lines but keeps the next line's indentation, so the
+source indentation was being drawn.
+
+Layout: the verdict ran full width above a grid of three, which left half of the
+second row empty. Now that it is a title and five rows, all four cards tile two
+by two.
+
 ## 0.1.16 — 2026-08-28
 
 **Say that control is working, instead of warning that one path is not**
