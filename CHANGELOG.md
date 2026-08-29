@@ -2,6 +2,53 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.22 — 2026-08-28
+
+**Map Picture in Picture, and stop offering a mode this panel does not have**
+
+Picture in Picture is 0xE1 sub-selector 0x11: 0 off, 1 on.
+
+HOW IT WAS FOUND
+
+Nothing in any plain vendor code moved. A poll across E6, E7, EA, EB, EF, F0,
+F5 and FA-FE, sampling every three seconds while the setting was toggled, saw no
+change at all — the only movement was the input select, which was the KVM doing
+its own job.
+
+That left the two sub-addressed codes, where HP packs many settings behind one
+code and a read returns whichever selector the monitor's rotation lands on. The
+distribution is severely lopsided: in one 150-sample pass 0x13 came back 144
+times and two other selectors three times each, while 0x35 and 0x39 — both
+already mapped on this panel, and therefore certainly present — did not appear
+once. Absence at that sample size means nothing, which is worth writing down
+because it is exactly how this kind of probing produces a confident wrong answer.
+
+At 300 samples per state the picture resolved. Nine selectors surfaced in both
+states and exactly one differed in VALUE: 0x11, reading 1 with PiP on and 0 with
+it off. Writing 0x1101 and then 0x1100 switched the panel and switched it back,
+confirmed on screen.
+
+THERE IS NO SIDE-BY-SIDE MODE
+
+The tab offered Off, Picture in Picture and Picture beside Picture. This panel's
+own OSD offers only the first two. Probed anyway, since firmware is often shared
+across models that do have it: selector 0x11 was written with 2, 3, 16 and 17,
+and every one produced a brief flicker — the panel re-evaluating — before
+landing back on 0. It accepts two states and clamps everything else.
+
+So the third option is gone. A control the hardware cannot enter is worse than
+no control: it looks like a feature and behaves like a bug.
+
+DISCOVERED BINDINGS NOW SHIP
+
+The four codes mapped previously lived only in this machine's preferences, so a
+fresh install would have started blind and been asked to repeat an hour of
+differential probing to arrive at an answer already known. They are now compiled
+in, applied only when the capabilities string confirms an HP Z-series G3 — these
+are manufacturer-specific codes, and writing HP's sub-selectors at another
+vendor's 0xE1 would be poking at something entirely unrelated — and never over a
+binding discovered locally.
+
 ## 0.1.21 — 2026-08-28
 
 **Fixed-size window, sized to its content, with nothing selectable**

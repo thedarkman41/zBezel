@@ -120,6 +120,18 @@ final class MonitorController: ObservableObject {
         kvmStatus = kvm.status
     }
 
+    /// Adopt the bindings already known for this panel family.
+    ///
+    /// Only once the capabilities string confirms which panel is attached: these
+    /// codes are manufacturer-specific and writing another vendor's 0xE1 with
+    /// HP's sub-selectors would be poking at something entirely unrelated.
+    private func seedVendorBindings() {
+        guard HPProfile.matches(capabilities) else { return }
+        var updated = vendorMap
+        updated.seedKnownIfMissing()
+        if updated != vendorMap { vendorMap = updated }
+    }
+
     /// Tell the KVM which panel is the doorway and where to land coming back.
     ///
     /// The doorway is the display this app is controlling — the one that shows
@@ -723,6 +735,7 @@ final class MonitorController: ObservableObject {
                                              maximum: value.maximum, caps: caps)
         }
         features = collected
+        seedVendorBindings()
         deriveActiveInputs()
     }
 
@@ -757,6 +770,7 @@ final class MonitorController: ObservableObject {
                                                  maximum: reading.maximum, caps: caps)
             }
             features = collected
+            seedVendorBindings()
             transport = .proxy(host: proxyHost, monitorIndex: target.index,
                                description: target.description)
             deriveActiveInputs()

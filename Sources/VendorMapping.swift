@@ -26,11 +26,17 @@ enum VendorControl: String, CaseIterable, Codable, Identifiable {
         case .usbCConfiguration:
             return ["3840 × 2160 30Hz + USB 3.0", "3840 × 2160 60Hz + USB 2.0"]
         case .pictureInPicture:
-            return ["Off", "Picture in Picture", "Picture beside Picture"]
+            // Two states, not three. The Z27k G3's own OSD offers only
+            // picture-in-picture and single-screen — there is no side-by-side
+            // mode on this panel, and offering a third option that the hardware
+            // cannot enter is how a control ends up silently doing nothing.
+            return ["Off", "On"]
         }
     }
 
-    var isToggle: Bool { self == .autoSwitch || self == .dpHotPlugDetection }
+    var isToggle: Bool {
+        self == .autoSwitch || self == .dpHotPlugDetection || self == .pictureInPicture
+    }
 }
 
 /// A discovered binding from a control to the VCP code that drives it.
@@ -67,6 +73,43 @@ struct VendorMap: Codable, Equatable {
     }
 
     static let storageKey = "vendorMap"
+
+    /// Bindings already established on the HP Z-series G3 panels.
+    ///
+    /// These were found the only way they can be — change one setting, see what
+    /// moved, then write the value back and confirm the panel obeys. Shipping
+    /// them means a fresh install is not asked to repeat an hour of differential
+    /// probing to reach a result that is already known.
+    ///
+    /// Applied only when the attached panel matches the family, and never over
+    /// a binding the user has discovered themselves.
+    static let knownZSeries: [VendorControl: VendorBinding] = [
+        .autoSwitch: VendorBinding(
+            code: 0xE6, optionValues: [0x0000, 0x0001],
+            evidence: "toggled 1->0 and 0->1 in HP Display Center"),
+        .dpHotPlugDetection: VendorBinding(
+            code: 0xE7, optionValues: [0x0000, 0x0001],
+            evidence: "toggled 1->0 then 0->1 in one pass"),
+        .displayPortVersion: VendorBinding(
+            code: 0xE1, optionValues: [0x3500, 0x3501],
+            evidence: "0xE1 sub 0x35: 0x00 on 1.1, 0x01 on 1.2; writing 0x3501 switched the panel"),
+        .usbCConfiguration: VendorBinding(
+            code: 0xE1, optionValues: [0x3901, 0x3900],
+            evidence: "0xE1 sub 0x39: 0x01 on 30Hz+USB3.0, 0x00 on 60Hz+USB2.0"),
+        .pictureInPicture: VendorBinding(
+            code: 0xE1, optionValues: [0x1100, 0x1101],
+            evidence: "0xE1 sub 0x11: 0 off, 1 on. Found by sampling the selector map in "
+                    + "both states — every other selector held its value. Nothing changed in "
+                    + "any plain vendor code. Writing 0x1101 then 0x1100 switched the panel "
+                    + "and back, confirmed on screen."),
+    ]
+
+    /// Fill in anything not already known, without disturbing what is.
+    mutating func seedKnownIfMissing() {
+        for (control, binding) in VendorMap.knownZSeries where bindings[control.rawValue] == nil {
+            bindings[control.rawValue] = binding
+        }
+    }
 
     static func load() -> VendorMap {
         guard let data = UserDefaults.standard.data(forKey: storageKey),

@@ -73,6 +73,10 @@ struct AdvancedTab: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textSecond)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        // Exempt from the panel-wide selection ban: this is a value
+                        // someone pastes into a bug report, which is the whole reason
+                        // it is on screen.
+                        .textSelection(.enabled)
                 }
                 .frame(height: 150)
                 Button("Copy") {

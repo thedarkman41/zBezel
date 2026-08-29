@@ -167,6 +167,9 @@ struct InstallerView: View {
                                          ? Theme.textPrimary : Theme.textSecond)
                     Text(fingerprint)
                         .font(.system(size: 11, design: .monospaced))
+                        // Exempt: this is compared character by character against
+                        // the other machine, and copying it is how that is done.
+                        .textSelection(.enabled)
                         .foregroundStyle(Theme.textPrimary)
                     if installer.awaitingHostKeyApproval {
                         Text("Run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the machine "
@@ -192,6 +195,8 @@ struct InstallerView: View {
             DisclosureGroup("Log", isExpanded: $showLog) {
                 Text(installer.log.isEmpty ? "—" : installer.log)
                     .font(.system(size: 10.5, design: .monospaced))
+                    // Exempt: when an install fails, this text IS the bug report.
+                    .textSelection(.enabled)
                     .foregroundStyle(Theme.textSecond)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
