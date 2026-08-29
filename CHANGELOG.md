@@ -2,6 +2,40 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.23 — 2026-08-28
+
+**Look the doorway up live; a cached screen edge had drifted to mid-screen**
+
+Crossing was firing about two thirds of the way across the panel instead of at
+its right edge.
+
+The crossing test was correct and the log proves it — every crossing fired at
+x=5119, which IS the panel's right edge in the geometry the app was holding. The
+geometry was the stale part. The doorway was captured once and refreshed only
+when macOS reported a screen-parameter change, so any re-enumeration that the app
+missed, or that it sampled while the link was still settling, left it pointing at
+an edge that no longer existed. Changing the DisplayPort version does exactly
+that kind of re-enumeration, and today's side-by-side investigation did it
+repeatedly.
+
+That failure is quiet in the worst way. A stale edge does not throw or read as
+obviously wrong — it silently relocates the doorway into the middle of the
+screen, and the pointer starts crossing early with nothing to explain why.
+
+The cache existed on a premise I later disproved myself: that switching the panel
+to the PC would take the display out of the Mac's list, so the geometry had to be
+remembered before switching. It does not — the DisplayPort link stays up while
+the panel shows another input, which was verified while building the feature.
+With that premise gone the cache had no justification and only the failure mode.
+
+Both rectangles are now read at the moment they are used. CGDisplayBounds is a
+cheap lookup, and the display id is stable across resolution changes in a way its
+bounds are not. The last known bounds are still kept, used only if the display
+really has gone.
+
+The crossing log now records the doorway it used, so an edge in the wrong place
+is visible in the log rather than only in the pointer's behaviour.
+
 ## 0.1.22 — 2026-08-28
 
 **Map Picture in Picture, and stop offering a mode this panel does not have**

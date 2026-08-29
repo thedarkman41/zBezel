@@ -144,11 +144,11 @@ final class MonitorController: ObservableObject {
     /// keeps the last known geometry for exactly that reason, since it still
     /// needs it to map the way back.
     func syncKVMPortal() {
-        var portal: CGRect?
+        var portal: CGDirectDisplayID?
         if let id = selectedID, displays.contains(where: { $0.id == id }) {
-            portal = CGDisplayBounds(id)
+            portal = id
         }
-        kvm.configurePortal(bounds: portal, main: CGDisplayBounds(CGMainDisplayID()))
+        kvm.configurePortal(display: portal)
     }
 
     /// Wire the panel-switching side of the KVM. Kept out of init because it

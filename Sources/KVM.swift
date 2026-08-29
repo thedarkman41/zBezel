@@ -289,10 +289,33 @@ final class KVMController {
     // pointer waiting on a screen that is still black reads as a lost pointer.
 
     /// The panel that shows the Mac on one input and the PC on another.
-    /// Captured before switching, because switching may take it out of the
-    /// Mac's display list and the geometry is needed to map the crossing.
-    private var portalBounds: CGRect?
-    private var mainBounds: CGRect = .zero
+    ///
+    /// Held as an ID and looked up live, NOT as cached bounds.
+    ///
+    /// Caching it was justified by an assumption that switching the panel to the
+    /// PC would take the display out of the Mac's list — which turned out to be
+    /// false: the DisplayPort link stays up while the panel shows something
+    /// else. What the cache did instead was go stale whenever the display
+    /// re-enumerated at a different size, which is exactly what changing the
+    /// DisplayPort version does. A stale right edge does not fail visibly; it
+    /// moves the doorway into the middle of the screen, and the pointer starts
+    /// crossing two thirds of the way across.
+    private var portalDisplay: CGDirectDisplayID?
+    /// Only used if the display really has gone away.
+    private var lastKnownPortalBounds: CGRect?
+
+    /// The doorway, as it is right now.
+    private var portalBounds: CGRect? {
+        if let id = portalDisplay {
+            let live = CGDisplayBounds(id)
+            if !live.isEmpty { return live }
+        }
+        return lastKnownPortalBounds
+    }
+    /// Where the pointer lands coming back. Live, for the same reason as the
+    /// doorway: a cached rectangle survives the display changing size and then
+    /// puts the pointer somewhere that is no longer the edge it names.
+    private var mainBounds: CGRect { CGDisplayBounds(CGMainDisplayID()) }
 
     /// Input Select values for the two sides. Supplied by the caller, which
     /// owns the monitor profile.
@@ -310,9 +333,10 @@ final class KVMController {
     /// panel does not.
     var switchesInput = true
 
-    func configurePortal(bounds: CGRect?, main: CGRect) {
-        portalBounds = bounds ?? portalBounds     // keep the last known geometry
-        mainBounds = main
+    func configurePortal(display: CGDirectDisplayID?) {
+        guard let display else { return }
+        portalDisplay = display
+        lastKnownPortalBounds = CGDisplayBounds(display)
     }
 
     private var host = ""
@@ -635,6 +659,8 @@ final class KVMController {
         CGWarpMouseCursorPosition(parkingSpot)
 
         side = .there
+        KVMLog.write("doorway was \(Int(doorway.minX))..\(Int(doorway.maxX)) "
+                   + "x \(Int(doorway.minY))..\(Int(doorway.maxY))")
         KVMLog.write("crossed OUT at \(Int(point.x)),\(Int(point.y)) -> remote "
                    + "\(Int(remotePoint.x)),\(Int(remotePoint.y)) "
                    + "of \(Int(remoteSize.width))x\(Int(remoteSize.height))")
