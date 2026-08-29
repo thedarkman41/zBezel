@@ -285,17 +285,48 @@ struct LinkTab: View {
         }
     }
 
+    /// The verdict on how this monitor is being controlled.
+    ///
+    /// When the proxy is carrying the controls this card used to announce
+    /// "DDC/CI blocked in the video path" under a warning triangle, and advise
+    /// plugging the monitor in differently — beside a panel whose brightness,
+    /// contrast and input were all working perfectly. It described the local
+    /// path as though the local path were the only one, which stopped being
+    /// true the moment the proxy came up.
+    ///
+    /// It now reports what IS happening. The local checks stay, because they
+    /// are why the proxy exists and are worth being able to see, but the ones
+    /// the dock blocks are drawn as expected rather than as failures.
     private var verdictCard: some View {
         let report = controller.link
-        return Card(title: report.headline,
-                    systemImage: report.monitorSideAvailable ? "checkmark.seal" : "exclamationmark.triangle",
-                    help: nil) {
-            Text(report.explanation)
+        var proxyHost: String? = nil
+        if case .proxy(let host, _, _) = controller.transport { proxyHost = host }
+
+        let title = proxyHost.map { "Monitor control is working, through \($0)" }
+            ?? report.headline
+        let symbol = (proxyHost != nil || report.monitorSideAvailable)
+            ? "checkmark.seal" : "exclamationmark.triangle"
+        let blurb = proxyHost.map { host in
+            """
+            Every control here is live. Commands go over SSH to \(host), which has             the monitor on USB-C and an unobstructed AUX channel.
+
+            The checks below are this Mac's OWN DDC/CI path, which the dock blocks.             That is expected in this setup rather than a fault — it is the reason             the proxy is here.
+            """
+        } ?? report.explanation
+
+        return Card(title: title, systemImage: symbol, help: nil) {
+            Text(blurb)
                 .font(.system(size: 12.5))
                 .foregroundStyle(Theme.textSecond)
                 .fixedSize(horizontal: false, vertical: true)
 
             Divider().overlay(Theme.rule).padding(.vertical, 4)
+
+            if proxyHost != nil {
+                Text("This Mac's direct path")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundStyle(Theme.textSecond)
+            }
 
             CheckRow("IOFramebuffer matched", report.framebufferFound)
             CheckRow("I2C bus present", report.i2cBusCount > 0,
@@ -303,9 +334,11 @@ struct LinkTab: View {
             CheckRow("EDID readable over the bus", report.edidReadOK,
                      detail: "proves the I2C path itself works")
             CheckRow("DDC/CI address acknowledged", report.ddcAddressACK,
-                     detail: "address 0x37 — a one-byte write, independent of DDC framing")
+                     detail: "address 0x37 — a one-byte write, independent of DDC framing",
+                     expected: proxyHost != nil)
             CheckRow("DDC/CI round trip", report.ddcReplyOK,
-                     detail: "a full Get VCP Feature exchange")
+                     detail: "a full Get VCP Feature exchange",
+                     expected: proxyHost != nil)
         }
     }
 
@@ -362,14 +395,22 @@ private struct CheckRow: View {
     let label: String
     let ok: Bool
     var detail: String? = nil
-    init(_ label: String, _ ok: Bool, detail: String? = nil) {
-        self.label = label; self.ok = ok; self.detail = detail
+
+    /// When true, a check that did not pass is not a fault: it is the known
+    /// state of a path this setup deliberately does not use. Drawn as a neutral
+    /// dash rather than a red cross, because a red cross beside working
+    /// hardware reads as something to go and fix.
+    var expected: Bool = false
+
+    init(_ label: String, _ ok: Bool, detail: String? = nil, expected: Bool = false) {
+        self.label = label; self.ok = ok; self.detail = detail; self.expected = expected
     }
     var body: some View {
         HStack(alignment: .top, spacing: 9) {
-            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle.fill")
+            Image(systemName: ok ? "checkmark.circle.fill"
+                                 : (expected ? "minus.circle.fill" : "xmark.circle.fill"))
                 .font(.system(size: 13))
-                .foregroundStyle(ok ? Theme.ok : Theme.danger)
+                .foregroundStyle(ok ? Theme.ok : (expected ? Theme.textDim : Theme.danger))
             VStack(alignment: .leading, spacing: 1) {
                 Text(label)
                     .font(.system(size: 12.5))

@@ -2,6 +2,26 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.16 — 2026-08-28
+
+**Say that control is working, instead of warning that one path is not**
+
+With the proxy carrying the controls, the Advanced tab announced "DDC/CI blocked
+in the video path" under a warning triangle, explained that commands never reach
+the panel, and advised plugging the monitor in differently — directly above
+brightness, contrast and input controls that were all working. It described the
+local path as though the local path were the only one, which stopped being true
+the moment the proxy came up.
+
+The card now leads with what is actually happening: control is working, through
+the named host. The local checks stay, because they are the reason the proxy
+exists and are worth being able to look at, but they are labelled as this Mac's
+own direct path and the two the dock blocks are drawn as expected — a neutral
+dash rather than a red cross.
+
+A red cross next to hardware that is working reads as something to go and fix,
+and there is nothing here to fix.
+
 ## 0.1.15 — 2026-08-28
 
 **Fix PC-to-Mac clipboard: split incoming lines on bytes, not Characters**
