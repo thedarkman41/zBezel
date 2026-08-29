@@ -2,6 +2,30 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.26 — 2026-08-29
+
+**Step out of the new Space by activating the previous app, not by faking a keypress**
+
+Creating the Space still left the user standing in it, having to switch back by
+hand.
+
+The step-back was a synthesised Control-Left, and it does not work. macOS routes
+the Space-switching hotkeys through the WindowServer, which ignores posted
+CGEvents — the shortcut is enabled, the event is accepted, and nothing moves. The
+log shows it plainly: the step-back recorded at 08:54:09, then five seconds of
+silence, then the user leaving the Space themselves at 08:54:15. Worth writing
+down, because the failure looks exactly like a timing problem and is not one.
+
+Activating an application takes the user to whatever Space that application is
+on, which is ordinary public API and is what clicking a Dock icon already does.
+So the app that was frontmost before the Space stole focus is captured on the way
+in, and activated once the transition finishes. Falls back to hiding this app if
+there is nothing sensible to go back to, which at least leaves the Space rather
+than sitting in it.
+
+Still one visible transition when the switch is flipped. That part is not
+avoidable from public API: creating a full-screen Space always animates into it.
+
 ## 0.1.25 — 2026-08-29
 
 **Create the PC's Space without leaving the user standing in it**

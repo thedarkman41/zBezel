@@ -89,6 +89,8 @@ final class PCSpace {
         self.imageView = image
         self.label = caption
         settling = true
+        // Captured BEFORE going full screen: afterwards, the frontmost app is us.
+        previousApp = NSWorkspace.shared.frontmostApplication
 
         window.makeKeyAndOrderFront(nil)
         window.toggleFullScreen(nil)          // this is what creates the Space
@@ -140,28 +142,38 @@ final class PCSpace {
         KVMLog.write("space: closed")
     }
 
-    /// Step back one Space, to undo the jump that creating this one forced.
+    /// Step back out of the Space that creating it forced us into.
     ///
-    /// Synthesised Control-Left, because switching Spaces has no public API
-    /// either. Done once, immediately after creation, and never again — every
-    /// later entry into this Space is the user asking for it.
+    /// By activating the app that was in front beforehand, NOT by synthesising
+    /// Control-Left. The keyboard route was tried first and does not work:
+    /// macOS routes the Space-switching hotkeys through the WindowServer, which
+    /// ignores posted CGEvents. The event was accepted and nothing moved — the
+    /// log recorded the step-back and then five seconds of the user doing it by
+    /// hand.
+    ///
+    /// Activating an application, on the other hand, takes the user to whatever
+    /// Space that application is on. That is ordinary public API and it is what
+    /// clicking the app in the Dock already does.
+    ///
+    /// Done once, on creation, never again — every later entry is the user
+    /// asking for it.
     private func returnToPreviousSpace() {
         guard !hasBouncedBack else { return }
         hasBouncedBack = true
 
-        // Let the transition settle first; a key event delivered mid-animation
-        // is swallowed.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            let source = CGEventSource(stateID: .combinedSessionState)
-            let left: CGKeyCode = 0x7B          // kVK_LeftArrow
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: left, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: left, keyDown: false)
-            else { return }
-            down.flags = .maskControl
-            up.flags = .maskControl
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
-            KVMLog.write("space: created, stepped back to the previous Space")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+            let mine = Bundle.main.bundleIdentifier
+            if let previous = self.previousApp, previous.bundleIdentifier != mine,
+               !previous.isTerminated {
+                previous.activate()
+                KVMLog.write("space: created, returned to "
+                           + (previous.localizedName ?? "the previous app"))
+            } else {
+                // Nothing sensible to go back to — hiding at least leaves the
+                // full-screen Space rather than sitting in it.
+                NSApp.hide(nil)
+                KVMLog.write("space: created, hid the app to step out")
+            }
 
             // Only start acting on Space changes once the dust has settled.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
@@ -174,6 +186,7 @@ final class PCSpace {
     }
 
     private var hasBouncedBack = false
+    private var previousApp: NSRunningApplication?
 
     /// True from creation until the bounce back has finished.
     ///
