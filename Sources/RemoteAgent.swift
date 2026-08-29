@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Drives a monitor that this Mac cannot reach over DDC/CI, by asking a machine
@@ -261,6 +262,26 @@ actor RemoteAgent {
         return RemoteReading(code: code, current: UInt16(clamping: current),
                              maximum: UInt16(clamping: maximum),
                              type: UInt8(clamping: (wrote["type"] as? Int) ?? 0))
+    }
+
+    /// Where the far pointer is, and the desktop it lives on.
+    ///
+    /// The KVM needs the size before it can send an absolute position that means
+    /// anything, and it cannot infer it: the far desktop is whatever resolution
+    /// and scale that machine is set to, and its origin can be negative when it
+    /// has more than one display.
+    func cursor() throws -> (point: CGPoint, bounds: CGRect) {
+        let json = try run(["cursor"])
+        let x = (json["x"] as? Int) ?? 0
+        let y = (json["y"] as? Int) ?? 0
+        guard let v = json["virtual"] as? [String: Any],
+              let vw = v["w"] as? Int, let vh = v["h"] as? Int else {
+            throw RemoteAgentError(message: "agent did not report the virtual screen")
+        }
+        let vx = (v["x"] as? Int) ?? 0
+        let vy = (v["y"] as? Int) ?? 0
+        return (CGPoint(x: x, y: y),
+                CGRect(x: vx, y: vy, width: vw, height: vh))
     }
 
     /// Drop the shared SSH connection, e.g. when the host setting changes.

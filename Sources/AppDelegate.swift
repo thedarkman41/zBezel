@@ -68,6 +68,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// An accessory app should outlive its window.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Give the pointer back before going away. While control is handed to the
+    /// PC the mouse is decoupled from the cursor and the cursor is hidden;
+    /// quitting in that state would leave the Mac with a mouse that moves
+    /// nothing and no obvious cause.
+    func applicationWillTerminate(_ notification: Notification) {
+        controller.shutdownKVM()
+    }
+
     // MARK: Clicks
 
     @objc private func statusItemClicked(_ sender: NSStatusBarButton) {

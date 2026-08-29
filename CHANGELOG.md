@@ -2,6 +2,77 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.7 — 2026-08-28
+
+**KVM: the Mac side — pointer and keyboard cross to the PC**
+
+Completes the hand-off. Moving the pointer off the right edge of the Mac's
+screen gives the pointer and keyboard to the Windows machine; bringing it back
+to the left edge of that machine's screen returns them.
+
+HOW IT IS PUT TOGETHER
+
+A CGEventTap at session level, created with .defaultTap so it can suppress and
+not merely observe. While control is remote every pointer and key event is
+swallowed here and forwarded there instead.
+
+The SSH channel is opened when the feature is switched on and held open, not
+opened at the crossing. It costs the better part of a second to establish,
+almost all of it PowerShell login-shell startup, and paid per crossing that
+would stall the pointer for a second at exactly the moment the user is watching
+it. Switching on now waits for the agent's own reply before claiming to be
+armed, because ssh starting locally says nothing about whether the far end
+answered — the failure arrives a second later, and without the wait the UI would
+report "armed" and then do nothing at the first crossing.
+
+Positions are sent absolutely, and the far desktop's size is read from the agent
+before arming. The Mac cannot infer it, and getting it wrong puts the pointer in
+the wrong place by a factor — badly so driving a 4K desktop from a smaller Mac
+screen.
+
+On crossing, the mouse is decoupled from the cursor and the cursor hidden, so it
+stops grinding along the screen edge while deltas keep arriving. Re-entry height
+is proportional, so the pointer appears to carry straight on. Coming back lands
+two pixels inside the edge rather than on it, because landing exactly on the
+edge re-triggers the crossing test on the next movement and the pointer bounces.
+
+KeyMap is a positional table. macOS keycodes are positional and Windows virtual
+keys are not, so it has to be one. Command currently maps to the Windows key and
+Option to Alt, which is the literal positional mapping: predictable, but not what
+muscle memory wants, since Cmd-C arrives as Win-C. Swapping Command to Control is
+the remapping feature and is deliberately not smuggled in here.
+
+GETTING YOUR INPUT BACK
+
+This tap swallows the keyboard and the pointer. If it kept doing that when it
+could no longer deliver them, the input needed to recover would be the input
+being eaten, so there are three ways out, all checked before anything is
+swallowed:
+
+  * Control-Option-Command-Escape hands control back immediately. Handled
+    locally, so it works even if the far machine is wedged.
+  * If the channel drops, control returns at once and that event is passed
+    through rather than eaten.
+  * Quitting zBezel unwinds it synchronously. Handing over decouples the mouse
+    from the cursor, and quitting while that was in force would leave a mouse
+    that moves nothing and no visible cause.
+
+Modifiers are released on the far side at every hand-back. Crossing while
+holding one and letting go on this side means the release is never forwarded and
+the far machine believes it is held forever.
+
+VERIFIED, AND NOT
+
+The wire protocol is verified against rigel: absolute positioning lands within
+3px, Caps Lock toggles, buttons and wheel are accepted. The Mac half compiles
+clean and the codesign identifier is stable across rebuilds, so the Accessibility
+grant it needs will survive them.
+
+The tap itself is NOT yet exercised end to end: creating it requires
+Accessibility permission, which only the user can grant. Untested until then:
+edge detection, delta accumulation, and whether scroll direction needs inverting
+for natural scrolling.
+
 ## 0.1.6 — 2026-08-28
 
 **KVM receiver: the Windows half of pointer and keyboard hand-off**

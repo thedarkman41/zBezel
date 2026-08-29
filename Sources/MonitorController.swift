@@ -89,11 +89,93 @@ final class MonitorController: ObservableObject {
 
     private let agent = RemoteAgent()
 
+    // MARK: KVM
+
+    private let kvm = KVMController()
+    @Published private(set) var kvmEnabled = false
+    @Published private(set) var kvmControllingRemote = false
+    @Published private(set) var kvmStatus = "off"
+    @Published var kvmError: String?
+
     init() {
         let defaults = UserDefaults.standard
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         vendorMap = VendorMap.load()
+
+        // The tap runs on the main run loop, but the callback reaches us from a
+        // C function pointer with no isolation the compiler can see, so hop
+        // explicitly rather than asserting it is already safe.
+        kvm.onChange = { [weak self] in
+            Task { @MainActor in self?.syncKVMState() }
+        }
+    }
+
+    private func syncKVMState() {
+        kvmEnabled = kvm.isEnabled
+        kvmControllingRemote = kvm.side == .there
+        kvmStatus = kvm.status
+    }
+
+    /// Turn the software KVM on or off.
+    ///
+    /// Switching on asks the far machine how big its desktop is first. The Mac
+    /// sends absolute positions, so without that number they would mean
+    /// different things at each end and the pointer would land in the wrong
+    /// place — badly on a 4K display driven from a smaller Mac screen.
+    func setKVM(_ on: Bool) async {
+        guard on != kvm.isEnabled else { return }
+        if on {
+            guard !proxyHost.isEmpty else {
+                kvmError = "Set a proxy host on the Link tab first."
+                return
+            }
+            await agent.update(config: .init(host: proxyHost, enabled: true))
+            var size: CGSize?
+            do {
+                size = try await agent.cursor().bounds.size
+            } catch {
+                // Not fatal: fall back to the last known size and let the user
+                // see why the reading failed rather than refusing to start.
+                kvmError = "Could not read \(proxyHost)'s screen size "
+                         + "(\(error.localizedDescription)); using the last known size."
+            }
+            if let problem = kvm.enable(host: proxyHost,
+                                        exePath: #"$HOME\bezel\BezelAgent.exe"#,
+                                        remoteSize: size) {
+                kvmError = problem
+                syncKVMState()
+                return
+            }
+
+            // Wait for the agent's own reply rather than trusting that ssh
+            // started. Roughly a second of that budget is PowerShell login-shell
+            // startup on the far side, which is unavoidable and paid once here
+            // instead of at every crossing.
+            let deadline = Date().addingTimeInterval(8)
+            while !kvm.transportReady, Date() < deadline, kvm.transportConnected {
+                try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+            kvm.noteReadiness()
+            if !kvm.transportReady {
+                kvmError = kvm.transportError
+                    ?? "\(proxyHost) did not answer. Check that the agent is installed and running."
+            }
+        } else {
+            kvm.disable()
+            kvmError = nil
+        }
+        syncKVMState()
+    }
+
+    /// Unwind the KVM synchronously on the way out.
+    ///
+    /// Handing control over decouples the pointer from the mouse and hides the
+    /// cursor. Quitting while that is in force would leave the Mac with a mouse
+    /// that moves nothing, so this cannot be left to an async Task that may not
+    /// get a chance to run before the process goes.
+    func shutdownKVM() {
+        kvm.disable()
     }
 
     /// Every code this monitor declares that the standard does not define.

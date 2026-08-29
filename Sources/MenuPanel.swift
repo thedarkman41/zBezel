@@ -21,6 +21,12 @@ struct MenuPanel: View {
                 } else {
                     unavailable
                 }
+
+                // Outside the availability check on purpose: the KVM rides the
+                // SSH channel, not DDC/CI, so it still works on a machine whose
+                // monitor control is blocked by the dock.
+                Divider().overlay(Theme.rule)
+                kvmRow
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
@@ -91,6 +97,40 @@ struct MenuPanel: View {
                             }),
                         enabled: true)
                 }
+            }
+        }
+    }
+
+    /// Keyboard and mouse hand-off. Off by default and never automatic: this
+    /// takes over the pointer, so it should only ever happen because the user
+    /// asked for it in this session.
+    private var kvmRow: some View {
+        let target = controller.proxyHost.isEmpty ? "the PC" : controller.proxyHost
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Control \(target)")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textPrimary)
+                    Text(controller.kvmStatus)
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(controller.kvmControllingRemote
+                                         ? Theme.accent : Theme.textSecond)
+                }
+                Spacer(minLength: 6)
+                Toggle("", isOn: Binding(
+                    get: { controller.kvmEnabled },
+                    set: { on in Task<Void, Never> { await controller.setKVM(on) } }))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(controller.proxyHost.isEmpty)
+            }
+            if let problem = controller.kvmError {
+                Text(problem)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.warning)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
