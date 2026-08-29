@@ -2,6 +2,48 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.28 — 2026-08-29
+
+**Advanced tab: cut its height roughly in half**
+
+It was the tab that overflowed once the window started sizing to its content —
+the one flagged as the likely candidate when the outer scroll view came out.
+Nearly all of the height was reference detail printed permanently on screen.
+
+MOVED TO TOOLTIPS
+
+Each of the fourteen manufacturer codes printed its sub-settings or accepted
+values and, for the sub-addressed ones, a paragraph explaining the scheme. That
+is two or three lines each, forty-odd lines in total, to show values that matter
+only while someone is actually poking at that one code. Hovering gives them now.
+
+The same for the mapped controls, where the evidence behind each mapping ran to
+four lines for Picture in Picture. It is the reason to trust the mapping and
+worth keeping — but not worth setting the height of the whole tab to hold prose
+nobody reads twice.
+
+LAYOUT
+
+The fourteen codes are in two columns rather than one list, halving that card.
+
+Monitor Firmware and the capabilities string now share the right column.
+Firmware is six short rows and was leaving most of a column empty beside the
+tallest card on the tab, while the capabilities string sat in a row of its own
+below.
+
+REMOVED
+
+"Discover Vendor Controls" is now "Vendor Controls" — the discovering is one
+button in it, not the point of it.
+
+The list of vendor codes above the Snapshot button restated the card beside it,
+and the numbered step above it restated the button. Two paragraphs of preamble
+over a one-word action.
+
+Forget is gone. It removed a mapping that took a long evening of differential
+probing to establish, sat one click from the action that uses it, and had no
+confirmation.
+
 ## 0.1.27 — 2026-08-29
 
 **Size the window to the tab, and group the Display tab's cards better**

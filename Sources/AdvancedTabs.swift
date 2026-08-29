@@ -7,11 +7,17 @@ struct AdvancedTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
+        // Firmware and the capabilities string share the right column: firmware
+        // is six short rows and was leaving most of a column empty next to the
+        // tallest card on the tab, while the capabilities string sat below in a
+        // row of its own.
         CardGrid {
             VendorMapperCard(controller: controller)
-            monitorIdentityCard
+            VStack(spacing: 16) {
+                monitorIdentityCard
+                capabilitiesCard
+            }
             vendorCodeCard
-            capabilitiesCard
             resetCard
         }
     }
@@ -50,10 +56,19 @@ struct AdvancedTab: View {
              each one changes.
              """) {
             if let caps = controller.capabilities, !caps.manufacturerCodes.isEmpty {
-                Text("This monitor declares \(caps.manufacturerCodes.count) manufacturer codes.")
+                Text("This monitor declares \(caps.manufacturerCodes.count) manufacturer codes. "
+                     + "Hover one for what it accepts.")
                     .font(.system(size: 12)).foregroundStyle(Theme.textSecond)
-                ForEach(caps.manufacturerCodes, id: \.self) { code in
-                    VendorCodeRow(code: code, controller: controller)
+                // Two columns. Fourteen codes in a single list ran longer than
+                // everything else on the tab put together; side by side they
+                // take half the height and the card stops setting the height of
+                // the window on its own.
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 14, alignment: .topLeading),
+                                    GridItem(.flexible(), spacing: 14, alignment: .topLeading)],
+                          alignment: .leading, spacing: 2) {
+                    ForEach(caps.manufacturerCodes, id: \.self) { code in
+                        VendorCodeRow(code: code, controller: controller)
+                    }
                 }
             } else if controller.monitorControlAvailable {
                 Text("This monitor declared no manufacturer-specific codes.")
@@ -166,23 +181,6 @@ private struct VendorCodeRow: View {
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(Theme.accent)
             }
-            let subSelectors = controller.capabilities?.subSelectors(for: code) ?? []
-            if !subSelectors.isEmpty {
-                Text("sub-settings: " + subSelectors.map { String(format: "0x%02X", $0) }
-                        .joined(separator: " "))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.textDim)
-            } else if let permitted = controller.capabilities?.values(for: code), !permitted.isEmpty {
-                Text("accepts: " + permitted.map { String(format: "0x%02X", $0) }.joined(separator: " "))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(Theme.textDim)
-            }
-            if let note = HPProfile.note(for: code) {
-                Text(note)
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Theme.textDim)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
             if editing {
                 HStack(spacing: 8) {
                     TextField("value", text: $newValue)
@@ -206,6 +204,27 @@ private struct VendorCodeRow: View {
             }
         }
         .padding(.vertical, 3)
+        .contentShape(Rectangle())
+        .help(detail)
+    }
+
+    /// Everything that used to be printed under each code.
+    ///
+    /// Fourteen codes each carrying two or three lines of hex was most of the
+    /// height of the tab, to show values that matter only when someone is
+    /// actually poking at that one code.
+    private var detail: String {
+        var parts: [String] = []
+        let subSelectors = controller.capabilities?.subSelectors(for: code) ?? []
+        if !subSelectors.isEmpty {
+            parts.append("sub-settings: "
+                + subSelectors.map { String(format: "0x%02X", $0) }.joined(separator: " "))
+        } else if let permitted = controller.capabilities?.values(for: code), !permitted.isEmpty {
+            parts.append("accepts: "
+                + permitted.map { String(format: "0x%02X", $0) }.joined(separator: " "))
+        }
+        if let note = HPProfile.note(for: code) { parts.append(note) }
+        return parts.joined(separator: "\n\n")
     }
 }
 

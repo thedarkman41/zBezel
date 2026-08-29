@@ -82,7 +82,7 @@ struct VendorMapperCard: View {
     @State private var assigning: VendorChange?
 
     var body: some View {
-        Card(title: "Discover Vendor Controls", systemImage: "scope",
+        Card(title: "Vendor Controls", systemImage: "scope",
              help: """
              HP's Auto Switch, DisplayPort version, USB-C configuration and PiP controls live in \
              the manufacturer-reserved VCP range, which no public document describes. This finds \
@@ -93,14 +93,10 @@ struct VendorMapperCard: View {
             } else if controller.vendorCodes.isEmpty {
                 UnavailableNote(text: "This monitor declares no manufacturer-specific codes.")
             } else {
-                Text("\(controller.vendorCodes.count) vendor codes on this monitor: "
-                     + controller.vendorCodes.map { String(format: "0x%02X", $0) }
-                        .joined(separator: " "))
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textDim)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                stepRow(1, "Take a snapshot of every vendor code.")
+                // The code list and the numbered step used to sit here. Both
+                // were restating what is either on screen already — every code
+                // is listed in the card beside this one — or obvious from the
+                // button. Two paragraphs of preamble above a one-word action.
                 Button(controller.vendorBaseline == nil ? "Snapshot" : "Re-snapshot") {
                     Task<Void, Never> { await controller.snapshotVendorCodes() }
                 }
@@ -173,23 +169,23 @@ struct VendorMapperCard: View {
                         .foregroundStyle(Theme.textPrimary)
                     ForEach(VendorControl.allCases) { control in
                         if let binding = controller.vendorMap[control] {
-                            HStack(alignment: .top) {
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(control.rawValue)
-                                        .font(.system(size: 11.5))
-                                        .foregroundStyle(Theme.textPrimary)
-                                    Text(String(format: "0x%02X — %@", binding.code, binding.evidence))
-                                        .font(.system(size: 10.5))
-                                        .foregroundStyle(Theme.textDim)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
+                            // The evidence is a tooltip now. It is the reason to
+                            // trust the mapping and worth keeping, but it runs to
+                            // four lines for some controls and was setting the
+                            // height of the whole tab to hold prose nobody reads
+                            // twice.
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(control.rawValue)
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(Theme.textPrimary)
                                 Spacer(minLength: 6)
-                                Button("Forget") { controller.unbind(control) }
-                                    .buttonStyle(.plain)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(Theme.danger)
+                                Text(String(format: "0x%02X", binding.code))
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundStyle(Theme.textSecond)
                             }
-                            .padding(.vertical, 2)
+                            .contentShape(Rectangle())
+                            .help(String(format: "0x%02X — %@", binding.code, binding.evidence))
+                            .padding(.vertical, 1)
                         }
                     }
                 }
