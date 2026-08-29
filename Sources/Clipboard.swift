@@ -31,11 +31,15 @@ final class ClipboardBridge {
     /// Without this the two machines volley one copy between them forever.
     private var suppressUntilChangeCount = -1
 
-    /// Big enough for a screenshot, small enough that it cannot wedge the
-    /// pointer stream. Clipboard payloads share the channel with pointer
-    /// events, and a several-megabyte image would sit in front of them — the
-    /// pointer would visibly stall mid-motion while a paste went across.
-    private static let maximumPayload = 1_048_576
+    /// The clipboard has its own SSH channel now, so this is no longer about
+    /// the pointer: a large paste cannot sit in front of pointer events any
+    /// more. What remains is memory — the payload is held whole, and base64
+    /// inflates it by a third at each end — so the cap is set where a copy
+    /// stops being a copy and starts being a file transfer.
+    private static let maximumPayload = 32 * 1_048_576
+
+    /// Something the user should be told about, rather than only the log.
+    var onNotice: ((String) -> Void)?
 
     /// Types that mean "do not persist or forward this".
     ///
@@ -104,7 +108,12 @@ final class ClipboardBridge {
     private func emit(_ format: String, _ data: Data) {
         guard !data.isEmpty else { return }
         guard data.count <= ClipboardBridge.maximumPayload else {
-            KVMLog.write("clipboard: \(format) of \(data.count) bytes is too large to send")
+            // Say so. Dropped in silence, this looked like the clipboard simply
+            // not working: copy here, walk over, paste nothing, no reason given.
+            let megabytes = Double(data.count) / 1_048_576
+            let note = String(format: "Clipboard item is %.1f MB — too large to send.", megabytes)
+            KVMLog.write("clipboard: " + note)
+            onNotice?(note)
             return
         }
         send?("C \(format) \(data.base64EncodedString())")

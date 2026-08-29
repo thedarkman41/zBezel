@@ -64,8 +64,25 @@ enum KVMLog {
 
 // MARK: - Transport
 
-/// One SSH channel, held open, carrying one event per line.
+/// One SSH channel, held open, carrying one line at a time.
+///
+/// Two of these run: pointer and keyboard on one, clipboard on the other.
+/// Separate connections rather than one, because they have opposite shapes —
+/// the input channel carries tiny messages that must never wait, the clipboard
+/// carries occasional large ones. Sharing a stream meant a paste sat in front of
+/// every pointer event behind it and the pointer visibly froze mid-motion, which
+/// is what the old 1MB payload cap existed to keep brief.
+///
+/// Not multiplexed onto the DDC connection either, though SSH would allow it:
+/// RemoteAgent tears that master down with `ssh -O exit` whenever the host
+/// setting changes, which would take the clipboard with it as a side effect of
+/// an unrelated action.
 final class KVMTransport {
+    /// The agent subcommand this channel runs.
+    private let command: String
+
+    init(command: String) { self.command = command }
+
     private var process: Process?
     private var input: FileHandle?
     private let queue = DispatchQueue(label: "com.darkstar.zBezel.kvm.tx")
@@ -108,7 +125,7 @@ final class KVMTransport {
             // shared master because they are short and frequent; this channel
             // is long-lived and carries a continuous stream, and sharing it
             // would put pointer events behind a slow capabilities read.
-            host, "& \"\(exePath)\" kvm",
+            host, "& \"\(exePath)\" \(command)",
         ]
 
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
@@ -124,7 +141,7 @@ final class KVMTransport {
         input = stdin.fileHandleForWriting
         lastError = nil
         sentCount = 0
-        KVMLog.write("transport: ssh started pid \(task.processIdentifier)")
+        KVMLog.write("transport[\(command)]: ssh started pid \(task.processIdentifier)")
 
         // Drain both so a full pipe cannot block the far side, and keep the
         // last stderr line as the reason if the channel dies.
@@ -153,7 +170,7 @@ final class KVMTransport {
                 self.stdoutBuffer.removeSubrange(self.stdoutBuffer.startIndex...newline)
                 let line = String(decoding: raw, as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                if line.contains("\"kvm\":\"ready\"") {
+                if line.contains("\"ready\"") {
                     self.readyLock.lock()
                     self.readyFlag = true
                     self.readyLock.unlock()
@@ -220,7 +237,8 @@ final class KVMController {
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private let transport = KVMTransport()
+    private let transport = KVMTransport(command: "kvm")
+    private let clipTransport = KVMTransport(command: "clipboard")
     private let clipboard = ClipboardBridge()
 
     /// Where the pointer is on the remote desktop, in its pixels. Tracked here
@@ -303,6 +321,9 @@ final class KVMController {
     /// Called when control changes hands, so the UI can follow.
     var onChange: (() -> Void)?
 
+    /// Something worth putting in front of the user.
+    var onNotice: ((String) -> Void)?
+
     // MARK: Geometry
 
     /// Every active display, unioned, in CoreGraphics' top-left origin space.
@@ -355,8 +376,9 @@ final class KVMController {
         // Clipboard sync runs whenever the KVM is armed, not only while the PC
         // has control: the whole point is to copy here, cross over, and paste
         // there — by which time control has already changed hands.
-        clipboard.send = { [weak self] line in self?.transport.send(line) }
-        transport.onLine = { [weak self] line in
+        clipboard.send = { [weak self] line in self?.clipTransport.send(line) }
+        clipboard.onNotice = { [weak self] note in self?.onNotice?(note) }
+        clipTransport.onLine = { [weak self] line in
             guard line.hasPrefix("C ") else { return }
             let parts = line.split(separator: " ", maxSplits: 2).map(String.init)
             guard parts.count == 3 else { return }
@@ -368,6 +390,7 @@ final class KVMController {
         }
 
         transport.connect(host: host, exePath: exePath)
+        clipTransport.connect(host: host, exePath: exePath)
         clipboard.start()
         isEnabled = true
         side = .here
@@ -383,6 +406,7 @@ final class KVMController {
         clipboard.stop()
         removeTap()
         transport.disconnect()
+        clipTransport.disconnect()
         isEnabled = false
         status = "off"
         onChange?()

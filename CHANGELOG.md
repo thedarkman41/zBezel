@@ -2,6 +2,60 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.19 — 2026-08-28
+
+**Give the clipboard its own SSH channel, and raise the cap to 32MB**
+
+The clipboard shared the input channel, so a paste went out as one line and every
+pointer event behind it waited. That head-of-line blocking is what the 1MB cap
+existed to keep short — the cap was never a protocol limit, just a bound on how
+long the pointer could freeze mid-motion.
+
+It now has its own SSH connection and its own pipes. The two cannot block each
+other at any layer, so the cap is only about memory: the payload is held whole
+and base64 inflates it by a third at each end. 32MB, which is where a copy stops
+being a copy and starts being a file transfer.
+
+WHY NOT MULTIPLEX ONTO THE DDC CONNECTION
+
+SSH would allow it, and the DDC path already multiplexes: RemoteAgent runs each
+call as a short session over a shared ControlMaster, so those cost no new TCP
+connection or authentication. Adding a channel there would have worked and saved
+a handshake.
+
+It would also have coupled the clipboard to something unrelated.
+RemoteAgent.disconnect() drops that master with `ssh -O exit`, taking every
+channel on it, and that fires whenever the proxy host changes or Reconnect is
+pressed. The clipboard would die as a side effect of a DDC action, which is the
+kind of dependency nobody reconstructs later from the symptom. The DDC channel is
+also bursty and slow — roughly 0.8s per call, almost all PowerShell startup —
+which is what the input channel was already deliberately kept away from.
+
+One handshake at arm time buys independence from both.
+
+RELAY EVICTION REMOVED, AND IT HAD TO BE
+
+A relay used to kill every other session-0 agent on startup, because a stale one
+held a pipe's only instance forever: it sat in Console.ReadLine, which never
+returned on a dead SSH channel. Reads go through ReadFile now and report
+ERROR_BROKEN_PIPE when the channel drops, so a relay exits on its own and the
+pipe frees — the condition that eviction guarded against can no longer arise.
+
+Keeping it would have been worse than pointless: there are two relays now, input
+and clipboard, both in session 0. Each would have killed the other on startup.
+
+OVERSIZED ITEMS ARE NOW REPORTED
+
+Previously they were dropped to the log only, so the experience was copying
+something, walking to the other machine, pasting nothing, and being told nothing.
+The panel now says what happened and how big the item was.
+
+VERIFIED
+
+Both channels arm independently and all three pipes connect. A 4MB text payload
+— four times what the old cap allowed — arrives intact: sent 4194304 bytes,
+received 4194304 bytes.
+
 ## 0.1.18 — 2026-08-28
 
 **Remember whether the KVM was left on**

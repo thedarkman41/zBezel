@@ -431,7 +431,8 @@ internal static class BezelAgent
             case "serve":  return CmdServe(args);
             case "client": return CmdClient(args);
             case "relay":  return CmdRelay(args);
-            case "kvm":    return CmdKvm();
+            case "kvm":       return CmdKvm();
+            case "clipboard": return CmdClipboard();
         }
 
         List<Target> targets;
@@ -677,8 +678,9 @@ internal static class BezelAgent
     // account, including another user logged on at the same time, is refused by
     // the kernel before a byte is read.
 
-    private const string InputPipeName = "BezelAgentInput";
-    private const string BackPipeName  = "BezelAgentBack";
+    private const string InputPipeName  = "BezelAgentInput";   // pointer + keys, Mac -> PC
+    private const string ClipInPipeName = "BezelAgentClipIn";  // clipboard,     Mac -> PC
+    private const string BackPipeName   = "BezelAgentBack";    // clipboard,     PC -> Mac
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int handle);
@@ -1141,7 +1143,10 @@ internal static class BezelAgent
     // AddClipboardFormatListener, needs a window and a message pump, which is a
     // lot of machinery to add to a console service for the same answer.
 
-    private const int MaxClipboard = 1048576;
+    // The clipboard has its own channel now, so this is no longer about keeping
+    // the pointer responsive — it is only about not holding an unreasonable
+    // amount of memory, base64 included, at both ends.
+    private const int MaxClipboard = 32 * 1048576;
 
     private static readonly object ClipboardLock = new object();
 
@@ -1323,6 +1328,46 @@ internal static class BezelAgent
         return security;
     }
 
+    /// Inbound clipboard, Mac -> PC. Its own pipe, deliberately: sharing the
+    /// input pipe put a multi-megabyte paste in front of every pointer event
+    /// behind it, and the pointer froze mid-motion until it drained.
+    private static void ClipInPipeLoop()
+    {
+        Log("clip pipe: listening on \\\\.\\pipe\\" + ClipInPipeName);
+        while (true)
+        {
+            try
+            {
+                using (var pipe = new NamedPipeServerStream(
+                           ClipInPipeName, PipeDirection.In, 1,
+                           PipeTransmissionMode.Byte, PipeOptions.None,
+                           4096, 4096, InputPipeSecurity()))
+                {
+                    pipe.WaitForConnection();
+                    Log("clip pipe: client connected");
+                    using (var reader = new System.IO.StreamReader(pipe, new UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            if (!line.StartsWith("C ", StringComparison.Ordinal)) continue;
+                            var parts = line.Split(new[] { ' ' }, 3);
+                            if (parts.Length != 3) continue;
+                            try { ApplyClipboard(parts[1], parts[2]); }
+                            catch (Exception e) { Log("clip pipe: bad payload: " + e.Message); }
+                        }
+                    }
+                    Log("clip pipe: client disconnected");
+                }
+            }
+            catch (Exception e)
+            {
+                Log("clip pipe: " + e.Message);
+                System.Threading.Thread.Sleep(500);
+            }
+        }
+    }
+
     /// The return path: PC -> Mac, for clipboard payloads.
     ///
     /// A SECOND one-directional pipe rather than making the input pipe duplex.
@@ -1414,15 +1459,9 @@ internal static class BezelAgent
                             if (received <= 4)
                                 Log("server: line[" + received + "] "
                                     + (line.Length > 40 ? line.Substring(0, 40) + "..." : line));
-                            try
-                            {
-                                if (line.StartsWith("C ", StringComparison.Ordinal))
-                                {
-                                    var parts = line.Split(new[] { ' ' }, 3);
-                                    if (parts.Length == 3) ApplyClipboard(parts[1], parts[2]);
-                                }
-                                else Inject(line);
-                            }
+                            // Input only. Clipboard has its own pipe, so a large
+                            // paste can no longer queue in front of pointer events.
+                            try { Inject(line); }
                             catch (Exception e) { Log("bad event \"" + line + "\": " + e.Message); }
                         }
                     }
@@ -1446,43 +1485,64 @@ internal static class BezelAgent
     /// crossing rather than per event.
     private static int CmdKvm()
     {
-        // Evict any earlier relay before connecting.
+        // Relays are no longer evicted, and must not be.
         //
-        // The pipe allows one server instance, so one stale relay wedges the
-        // whole feature: it keeps the connection open, every later crossing
-        // connects to nothing, and the failure is silent at both ends. They go
-        // stale because killing the ssh process on the Mac does not always
-        // deliver EOF here — PowerShell does not reliably propagate a closed
-        // stdin to its child — so the relay sits in ReadLine forever. Observed
-        // exactly that: a relay from a killed session held the pipe for six
-        // minutes while every crossing did nothing.
+        // That eviction existed because a stale relay held the pipe's only
+        // instance forever: it sat in Console.ReadLine, which never returned on
+        // a dead SSH channel. StdinLines reads with ReadFile now and reports
+        // ERROR_BROKEN_PIPE when the channel goes, so the relay exits on its own
+        // and the pipe frees — the condition it guarded against cannot arise.
         //
-        // Only session 0. The session-1 process is the service itself.
-        try
-        {
-            int me = System.Diagnostics.Process.GetCurrentProcess().Id;
-            foreach (var other in System.Diagnostics.Process.GetProcessesByName("BezelAgent"))
-            {
-                if (other.Id == me) continue;
-                try
-                {
-                    if (other.SessionId != 0) continue;
-                    other.Kill();
-                }
-                catch (Exception e) { Log("could not evict relay " + other.Id + ": " + e.Message); }
-            }
-        }
-        catch (Exception e) { Log("relay eviction failed: " + e.Message); }
-
+        // Keeping it would now be actively harmful: there are TWO relays, one
+        // for input and one for the clipboard, both running in session 0. Each
+        // would kill the other on startup.
         try
         {
             using (var pipe = new NamedPipeClientStream(".", InputPipeName, PipeDirection.Out))
             {
                 pipe.Connect(5000);
+                using (var writer = new System.IO.StreamWriter(pipe, new UTF8Encoding(false)))
+                {
+                    writer.AutoFlush = true;      // every event, immediately
+                    Console.WriteLine("{\"ok\":true,\"kvm\":\"ready\"}");
+                    Console.Out.Flush();
 
-                // Anything the service sends back — clipboard payloads — arrives
-                // on its own pipe and goes out on stdout, which is the SSH
-                // channel the Mac is already reading for the ready handshake.
+                    int seen = 0;
+                    foreach (string line in StdinLines())
+                    {
+                        seen++;
+                        if (line.Length == 0) continue;
+                        if (line == "quit") break;
+                        writer.Write(line);
+                        writer.Write("\n");
+                    }
+                    Log("kvm relay: stdin ended after " + seen + " line(s)");
+                }
+            }
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Fail("cannot reach the input pipe (" + e.Message + ")");
+            return 1;
+        }
+    }
+
+    /// The clipboard's own relay: its own SSH channel, its own pipes.
+    ///
+    /// Separate from the input relay so a multi-megabyte paste cannot sit in
+    /// front of pointer events. They travel over different SSH connections
+    /// entirely, so neither can block the other at any layer.
+    private static int CmdClipboard()
+    {
+        try
+        {
+            using (var outbound = new NamedPipeClientStream(".", ClipInPipeName, PipeDirection.Out))
+            {
+                outbound.Connect(5000);
+
+                // Inbound clipboard goes out on stdout, which is the SSH channel
+                // the Mac is already reading.
                 var returnPump = new System.Threading.Thread(() =>
                 {
                     try
@@ -1501,38 +1561,38 @@ internal static class BezelAgent
                             }
                         }
                     }
-                    catch (Exception e) { Log("relay: return path ended: " + e.Message); }
+                    catch (Exception e) { Log("clipboard relay: return path ended: " + e.Message); }
                 });
                 returnPump.IsBackground = true;
                 returnPump.Start();
 
-                using (var writer = new System.IO.StreamWriter(pipe, new UTF8Encoding(false)))
+                using (var writer = new System.IO.StreamWriter(outbound, new UTF8Encoding(false)))
                 {
-                    writer.AutoFlush = true;      // every event, immediately
-                    Console.WriteLine("{\"ok\":true,\"kvm\":\"ready\"}");
+                    writer.AutoFlush = true;
+                    Console.WriteLine("{\"ok\":true,\"clipboard\":\"ready\"}");
                     Console.Out.Flush();
 
                     int seen = 0;
                     foreach (string line in StdinLines())
                     {
                         seen++;
-                        if (seen <= 4) Log("relay: read[" + seen + "] " + line);
                         if (line.Length == 0) continue;
                         if (line == "quit") break;
                         writer.Write(line);
                         writer.Write("\n");
                     }
-                    Log("relay: stdin ended after " + seen + " line(s)");
+                    Log("clipboard relay: stdin ended after " + seen + " line(s)");
                 }
             }
             return 0;
         }
         catch (Exception e)
         {
-            Fail("cannot reach the input pipe (" + e.Message + ")");
+            Fail("cannot reach the clipboard pipe (" + e.Message + ")");
             return 1;
         }
     }
+
 
     // ---- Persistent service ------------------------------------------------
     //
@@ -1566,6 +1626,10 @@ internal static class BezelAgent
 
         // STA, because the clipboard is an OLE surface and the managed wrappers
         // refuse from an MTA thread.
+        var clipInThread = new System.Threading.Thread(ClipInPipeLoop);
+        clipInThread.IsBackground = true;
+        clipInThread.Start();
+
         var backThread = new System.Threading.Thread(BackPipeLoop);
         backThread.IsBackground = true;
         backThread.Start();

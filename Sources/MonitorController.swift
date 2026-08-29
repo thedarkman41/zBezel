@@ -109,6 +109,9 @@ final class MonitorController: ObservableObject {
         kvm.onChange = { [weak self] in
             Task { @MainActor in self?.syncKVMState() }
         }
+        kvm.onNotice = { [weak self] note in
+            Task { @MainActor in self?.kvmError = note }
+        }
     }
 
     private func syncKVMState() {
