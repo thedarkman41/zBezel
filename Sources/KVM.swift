@@ -202,6 +202,16 @@ final class KVMController {
     /// control back 51ms after taking it.
     static let returnThreshold: CGFloat = -24
 
+    /// The escape hatch: fn, Control, Option and Command, held together.
+    ///
+    /// All modifiers and no letter, deliberately. It has to be reachable with
+    /// one hand while the other is still on the mouse, and it must not be
+    /// something the far machine could reasonably want — every one of these is
+    /// swallowed here rather than forwarded, so any chord chosen is a chord the
+    /// PC can never receive.
+    private static let panicChord: CGEventFlags =
+        [.maskSecondaryFn, .maskControl, .maskAlternate, .maskCommand]
+
     // MARK: The portal
     //
     // The monitor is an extended display for the Mac on one input and the PC's
@@ -409,17 +419,46 @@ final class KVMController {
             return Unmanaged.passUnretained(event)
         }
 
-        // Deliberate panic chord: Control-Option-Command-Escape. Chosen to be
-        // something no ordinary use produces by accident, and it is handled
-        // here rather than forwarded so it works even if the far machine is
-        // wedged.
-        if type == .keyDown,
-           UInt16(event.getIntegerValueField(.keyboardEventKeycode)) == 0x35,
-           event.flags.contains(.maskControl),
-           event.flags.contains(.maskAlternate),
-           event.flags.contains(.maskCommand) {
+        // The panic chord: fn, Control, Option and Command held together.
+        //
+        // Handled here rather than forwarded, so it works even if the far
+        // machine is wedged or the channel is dead.
+        //
+        // Tested against the flags of EVERY event, not just flagsChanged. A
+        // chord made only of modifiers has no keystroke to hang the test on,
+        // and the natural thing to do while holding it is to move the mouse —
+        // requiring a modifier transition would mean the chord did nothing
+        // until the user let go and pressed again, which is the opposite of
+        // what an escape hatch should ask of someone.
+        if event.flags.isSuperset(of: KVMController.panicChord) {
+            KVMLog.write("panic chord — returning control")
             handBack()
             return nil
+        }
+
+        // Fallback, kept on purpose: Control-Option-Command-Escape.
+        //
+        // Not every keyboard reports fn. Apple's own do, but a third-party one
+        // may never set the flag, and the way that failure presents is the user
+        // holding the chord with no pointer and no keyboard and nothing
+        // happening — the one situation this mechanism exists to prevent. A
+        // second hatch costs one comparison.
+        if type == .keyDown,
+           UInt16(event.getIntegerValueField(.keyboardEventKeycode)) == 0x35,
+           event.flags.isSuperset(of: [.maskControl, .maskAlternate, .maskCommand]) {
+            KVMLog.write("panic chord (Escape fallback) — returning control")
+            handBack()
+            return nil
+        }
+
+        // Diagnostic for the case above: the modifiers are held but fn is not
+        // being reported, so the intended chord can never fire on this keyboard.
+        if type == .flagsChanged,
+           event.flags.isSuperset(of: [.maskControl, .maskAlternate, .maskCommand]),
+           !event.flags.contains(.maskSecondaryFn) {
+            KVMLog.write("note: ctrl+opt+cmd seen without fn (flags=0x"
+                       + String(event.flags.rawValue, radix: 16)
+                       + ") — if you were holding fn, this keyboard does not report it")
         }
 
         forward(type: type, event: event)

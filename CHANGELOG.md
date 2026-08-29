@@ -2,6 +2,34 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.10 — 2026-08-28
+
+**Panic chord is now fn-Control-Option-Command**
+
+Held together, no letter. Reachable with one hand while the other is still on
+the mouse, which matters for something whose whole job is to be used when
+control has gone somewhere unhelpful.
+
+Tested against the flags of EVERY event rather than only flagsChanged. A chord
+made purely of modifiers has no keystroke to hang the test on, and the natural
+thing to do while holding it is to move the mouse. Requiring a modifier
+transition would mean the chord did nothing until the user let go and pressed
+again, which is the opposite of what an escape hatch should ask of anyone.
+
+CONTROL-OPTION-COMMAND-ESCAPE STILL WORKS
+
+Deliberately kept as a fallback rather than replaced. Not every keyboard reports
+fn: Apple's own do, but a third-party keyboard may never set the flag, and the
+way that failure presents is the user holding the new chord with no pointer, no
+keyboard, and nothing happening — precisely the situation the mechanism exists
+to prevent. A second hatch costs one comparison, and this one has already been
+used in anger.
+
+If the intended chord ever fails to fire, the log says why: holding
+Control-Option-Command without fn appearing in the flags is recorded, with the
+raw flag value, since that is the signature of a keyboard that does not report
+fn and it is otherwise indistinguishable from the feature being broken.
+
 ## 0.1.9 — 2026-08-28
 
 **The panel follows the pointer: crossing switches the monitor input too**
