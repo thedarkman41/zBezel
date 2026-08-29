@@ -2,6 +2,28 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.18 — 2026-08-28
+
+**Remember whether the KVM was left on**
+
+The switch now persists across launches, and the app re-arms itself at startup
+if that is how it was left.
+
+This reverses a deliberate default. The old comment said the KVM should never
+come up automatically because it takes over the pointer, and that conflated two
+different things: armed only means the panel's right edge becomes a doorway, and
+the pointer does not go anywhere until it is deliberately driven through it.
+Restoring the switch takes nothing away from anyone, and having to re-arm after
+every launch made a setting behave like a toy.
+
+The choice is recorded even when arming fails, so a machine that happened to be
+asleep does not quietly switch the feature off for good. The restore runs
+detached from the startup probe, because bringing the channel up waits for the
+far side to answer and a host that is off would otherwise hold the first probe
+open for that whole timeout. A failure is written to the log rather than raised:
+the usual cause is the other machine not being on yet, and the switch is still
+sitting there to be flicked again.
+
 ## 0.1.17 — 2026-08-28
 
 **Link tab: drop the prose, show the current input, tile the cards evenly**

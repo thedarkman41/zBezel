@@ -155,6 +155,9 @@ final class MonitorController: ObservableObject {
     /// different things at each end and the pointer would land in the wrong
     /// place — badly on a 4K display driven from a smaller Mac screen.
     func setKVM(_ on: Bool) async {
+        // Remember the choice even if bringing it up fails, so a host that was
+        // simply asleep does not silently switch the feature off for good.
+        UserDefaults.standard.set(on, forKey: "kvmEnabled")
         guard on != kvm.isEnabled else { return }
         if on {
             guard !proxyHost.isEmpty else {
@@ -556,6 +559,31 @@ final class MonitorController: ObservableObject {
         didBootstrap = true
         refreshDisplays()
         await probe()
+        await restoreKVMIfPreviouslyOn()
+    }
+
+    /// Put the KVM back the way it was left.
+    ///
+    /// Armed is not the same as capturing: it only means that crossing the
+    /// panel's right edge hands control over. Restoring it takes nothing away
+    /// from the user — the pointer stays here until they deliberately drive it
+    /// off the edge — and having to switch it on again after every launch was
+    /// the thing that made it feel like a toy rather than a setting.
+    ///
+    /// Detached from bootstrap's own timing: bringing the channel up waits for
+    /// the far side to answer, and a host that is off would otherwise hold the
+    /// first probe open for the whole of that timeout.
+    private func restoreKVMIfPreviouslyOn() async {
+        guard UserDefaults.standard.bool(forKey: "kvmEnabled"), !proxyHost.isEmpty else { return }
+        Task { @MainActor in
+            await setKVM(true)
+            if let problem = kvmError {
+                // Worth recording, not worth a dialog: the usual cause is the
+                // other machine not being on yet, and the switch stays on so
+                // it can simply be flicked again.
+                KVMLog.write("restore: could not arm on launch — \(problem)")
+            }
+        }
     }
 
     func refreshDisplays() {

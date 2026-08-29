@@ -101,9 +101,13 @@ struct MenuPanel: View {
         }
     }
 
-    /// Keyboard and mouse hand-off. Off by default and never automatic: this
-    /// takes over the pointer, so it should only ever happen because the user
-    /// asked for it in this session.
+    /// Keyboard and mouse hand-off. The setting persists across launches.
+    ///
+    /// This said "never automatic" on the grounds that it takes over the
+    /// pointer. That conflated two things: armed only means the panel's right
+    /// edge becomes a doorway, and the pointer does not go anywhere until it is
+    /// deliberately driven through it. Restoring the switch takes nothing away,
+    /// and re-arming after every launch made a setting behave like a toy.
     private var kvmRow: some View {
         let target = controller.proxyHost.isEmpty ? "the PC" : controller.proxyHost
         return VStack(alignment: .leading, spacing: 5) {
