@@ -2,6 +2,34 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.12 — 2026-08-28
+
+**Park the Mac's pointer out of sight while the PC has control**
+
+It was visibly wandering around the main screen the whole time control was
+handed over.
+
+Two calls were supposed to prevent that and neither can: CGDisplayHideCursor and
+CGAssociateMouseAndMouseCursorPosition only take effect while the CALLING
+application is frontmost, and zBezel is an LSUIElement menu bar app that is
+essentially never frontmost. Both were no-ops. They are still made — they cost
+nothing and do work on the occasions the app is active — but nothing depends on
+them now.
+
+The pointer is parked in the middle of the panel instead, and re-parked on every
+pointer event so it cannot drift. While the PC has control the panel is showing
+the PC, so the Mac is drawing its pointer to a screen nobody is looking at:
+invisible without needing to be hidden, and stationary without needing an
+association that does not hold.
+
+The warp generates no event of its own, so it cannot feed back into the tap, and
+the deltas driving the remote pointer come from the event's hardware fields
+rather than from comparing positions — so re-parking does not disturb tracking.
+
+Middle of the panel rather than a corner, deliberately: a pointer shoved into a
+screen corner can trigger a hot corner, and Mission Control opening behind the
+scenes every time control is handed over would be a strange thing to debug later.
+
 ## 0.1.11 — 2026-08-28
 
 **Drop the fn diagnostic; it was telling the opposite of the truth**

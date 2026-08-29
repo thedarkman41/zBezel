@@ -209,6 +209,21 @@ final class KVMController {
     /// something the far machine could reasonably want — every one of these is
     /// swallowed here rather than forwarded, so any chord chosen is a chord the
     /// PC can never receive.
+    /// Where the Mac's own pointer is held while the PC has control.
+    ///
+    /// It has to go somewhere, and hiding it is not available: CGDisplayHideCursor
+    /// and CGAssociateMouseAndMouseCursorPosition both apply only while the
+    /// CALLING application is frontmost, and this is an LSUIElement menu bar app
+    /// that is never frontmost. Both calls are made anyway — they cost nothing
+    /// and do work if the app happens to be active — but neither can be relied
+    /// on, which is why the pointer was seen wandering across the main screen.
+    ///
+    /// So park it on the panel instead. While the PC has control the panel is
+    /// showing the PC, so the Mac's pointer sitting in the middle of it is drawn
+    /// to a screen nobody is looking at: invisible without needing to be hidden,
+    /// and stationary without needing the association to hold.
+    private var parkingSpot: CGPoint = .zero
+
     private static let panicChord: CGEventFlags =
         [.maskSecondaryFn, .maskControl, .maskAlternate, .maskCommand]
 
@@ -477,6 +492,12 @@ final class KVMController {
             let sendX = min(max(remotePoint.x, 0), remoteSize.width - 1)
             transport.send("A \(Int(sendX)) \(Int(remotePoint.y))")
 
+            // Put the Mac's pointer back where it cannot be seen. Cheap, and it
+            // generates no event of its own, so it cannot feed back into this
+            // tap; the deltas above come from the hardware fields rather than
+            // from comparing positions, so warping does not disturb tracking.
+            CGWarpMouseCursorPosition(parkingSpot)
+
         case .leftMouseDown:   transport.send("B 1 1")
         case .leftMouseUp:     transport.send("B 1 0")
         case .rightMouseDown:  transport.send("B 2 1")
@@ -529,8 +550,17 @@ final class KVMController {
 
         // Decouple the hardware from the cursor so it stops at the edge instead
         // of grinding along it, and hide it — deltas still arrive.
+        // Best-effort: these only bite while this app is frontmost, which it
+        // generally is not. The parking below is what actually holds.
         CGAssociateMouseAndMouseCursorPosition(0)
         CGDisplayHideCursor(CGMainDisplayID())
+
+        // Middle of the panel, which is about to be showing the PC. If there is
+        // no panel to hide behind, fall back to the far corner of the desktop,
+        // where a stationary pointer is at least out of the way.
+        parkingSpot = portalBounds.map { CGPoint(x: $0.midX, y: $0.midY) }
+            ?? CGPoint(x: macBounds.maxX - 2, y: macBounds.maxY - 2)
+        CGWarpMouseCursorPosition(parkingSpot)
 
         side = .there
         KVMLog.write("crossed OUT at \(Int(point.x)),\(Int(point.y)) -> remote "
