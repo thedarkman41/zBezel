@@ -2,6 +2,57 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.9 — 2026-08-28
+
+**The panel follows the pointer: crossing switches the monitor input too**
+
+The monitor is an extended display for the Mac on DisplayPort and the PC's only
+display on USB-C, which makes it the same sheet of glass either way. Crossing
+its right edge now switches the panel to the PC and hands over the pointer
+together, and the pointer keeps the spot on the glass it already had. Pushing
+back past the PC's left edge switches the panel to DisplayPort and returns the
+pointer to the Mac.
+
+THE DOORWAY IS THE PANEL, NOT THE DESKTOP
+
+The crossing test was the right edge of the whole desktop. That happened to be
+correct only because the panel is the rightmost display; with the panel on the
+left it would have been the wrong wall entirely. It is now the panel's own
+right edge, taken from the display this app is controlling.
+
+KEEPING THE SPOT ON THE GLASS
+
+The entry position is mapped proportionally rather than by pixel, because the
+two machines drive the same panel at different resolutions — the Mac at
+2560x1440 logical, the PC at 3840x2160. Equal fractions land on the same glass;
+equal coordinates would not.
+
+COMING BACK LANDS ON THE MAIN DISPLAY
+
+Deliberately not on the panel. The panel has just been told to show the Mac
+again and takes a second or two to renegotiate the link, and a pointer parked on
+a screen that is still black is indistinguishable from a pointer that has been
+lost — the reflex is to move the mouse harder, which would only push it back
+through the doorway. It lands two pixels inside the main display's right edge,
+which is where the panel's left edge adjoins it, so the motion still reads as
+continuous.
+
+THE ASSUMPTION THIS RESTS ON, VERIFIED
+
+Switching the panel to USB-C does not take the display away from the Mac. The
+DisplayPort link stays up while the panel shows something else, so the desktop
+geometry does not change, no windows move, and the doorway's bounds stay valid
+throughout. Confirmed by reading the monitor's input as 19 (USB-C) while macOS
+continued to report the external display at (2560,0 2560x1440).
+
+The KVM keeps the last known geometry regardless, so the way back is still
+computable if a future layout does drop the display.
+
+The input switch is fired, never awaited: a DDC write through the proxy costs
+the better part of a second, and blocking the event tap on it would stall every
+input event on the Mac behind it. The pointer moves first and the panel catches
+up.
+
 ## 0.1.8 — 2026-08-28
 
 **KVM works end to end: pointer and keyboard cross to the PC**

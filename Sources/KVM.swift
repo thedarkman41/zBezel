@@ -197,10 +197,49 @@ final class KVMController {
     private var remotePoint = CGPoint.zero
     private var remoteSize = CGSize(width: 1920, height: 1080)
 
-    /// How far inside the remote's left edge a crossing lands.
-    static let entryInset: CGFloat = 4
-    /// How far past that edge the pointer must be pushed to come back.
+    /// How far past the remote's left edge the pointer must be pushed to come
+    /// back. Not zero: a single stray pixel of leftward jitter used to hand
+    /// control back 51ms after taking it.
     static let returnThreshold: CGFloat = -24
+
+    // MARK: The portal
+    //
+    // The monitor is an extended display for the Mac on one input and the PC's
+    // only display on another, so it is the same sheet of glass either way.
+    // That makes its right edge a doorway rather than the end of the desktop:
+    // pushing through it switches the panel to the PC and hands over the
+    // pointer together, and the pointer keeps the spot on the glass it already
+    // had. Coming back is the mirror image, except the pointer lands on the
+    // Mac's main display rather than on the panel — the panel has just been
+    // told to show the Mac again and takes a second or two to do it, and a
+    // pointer waiting on a screen that is still black reads as a lost pointer.
+
+    /// The panel that shows the Mac on one input and the PC on another.
+    /// Captured before switching, because switching may take it out of the
+    /// Mac's display list and the geometry is needed to map the crossing.
+    private var portalBounds: CGRect?
+    private var mainBounds: CGRect = .zero
+
+    /// Input Select values for the two sides. Supplied by the caller, which
+    /// owns the monitor profile.
+    var macInput: UInt16 = 0x0F          // DisplayPort
+    var pcInput: UInt16 = 0x13           // USB-C
+
+    /// Put the monitor on an input. Fired, never awaited: the pointer has to
+    /// move now, and the panel catches up in its own time — a DDC write through
+    /// the proxy costs the better part of a second, and blocking the event tap
+    /// on it would stall every input event on the Mac behind it.
+    var setMonitorInput: ((UInt16) -> Void)?
+
+    /// Whether crossing should switch the monitor's input as well as the
+    /// pointer. Off means the KVM behaves as it did before: control moves, the
+    /// panel does not.
+    var switchesInput = true
+
+    func configurePortal(bounds: CGRect?, main: CGRect) {
+        portalBounds = bounds ?? portalBounds     // keep the last known geometry
+        mainBounds = main
+    }
 
     private var host = ""
     private var exePath = #"$HOME\bezel\BezelAgent.exe"#
@@ -340,10 +379,14 @@ final class KVMController {
             // Only looking for the crossing; everything passes through.
             if type == .mouseMoved || type == .leftMouseDragged
                 || type == .rightMouseDragged || type == .otherMouseDragged {
-                let bounds = macBounds
+                // The doorway is the PANEL's right edge, not the desktop's.
+                // They coincide in the usual layout, but only by accident of
+                // the panel being the rightmost display — put it on the left
+                // and the desktop edge would be the wrong wall entirely.
+                let doorway = portalBounds ?? macBounds
                 let where_ = event.location
-                if where_.x >= bounds.maxX - 1 {
-                    handOver(atY: where_.y, in: bounds)
+                if where_.x >= doorway.maxX - 1 {
+                    handOver(at: where_, doorway: doorway)
                     return nil
                 }
             }
@@ -438,16 +481,19 @@ final class KVMController {
 
     // MARK: Crossings
 
-    private func handOver(atY y: CGFloat, in bounds: CGRect) {
-        // Enter the far screen at the same height, proportionally, so the
-        // pointer appears to continue in a straight line.
-        let fraction = bounds.height > 0 ? (y - bounds.minY) / bounds.height : 0.5
-        // A few pixels in, not on the edge itself. Entering at x=0 meant any
-        // leftward jitter drove the accumulator straight below zero and handed
-        // control back before the pointer had gone anywhere — measured at 51ms
-        // between crossing out and crossing back.
-        remotePoint = CGPoint(x: KVMController.entryInset,
-                              y: min(max(fraction, 0), 1) * (remoteSize.height - 1))
+    private func handOver(at point: CGPoint, doorway: CGRect) {
+        // Keep the spot on the glass.
+        //
+        // The panel is about to stop showing the Mac and start showing the PC,
+        // and it is the same physical screen either way, so the pointer belongs
+        // where the user last saw it. Proportionally, not by pixel: the Mac
+        // drives this panel at 2560x1440 logical and the PC drives it at
+        // 3840x2160, so equal fractions land on the same glass, equal
+        // coordinates would not.
+        let relX = doorway.width  > 0 ? (point.x - doorway.minX) / doorway.width  : 1
+        let relY = doorway.height > 0 ? (point.y - doorway.minY) / doorway.height : 0.5
+        remotePoint = CGPoint(x: min(max(relX, 0), 1) * (remoteSize.width  - 1),
+                              y: min(max(relY, 0), 1) * (remoteSize.height - 1))
 
         // Decouple the hardware from the cursor so it stops at the edge instead
         // of grinding along it, and hide it — deltas still arrive.
@@ -455,10 +501,19 @@ final class KVMController {
         CGDisplayHideCursor(CGMainDisplayID())
 
         side = .there
-        KVMLog.write("crossed OUT at y=\(Int(y)) -> remote \(Int(remotePoint.x)),\(Int(remotePoint.y)) "
+        KVMLog.write("crossed OUT at \(Int(point.x)),\(Int(point.y)) -> remote "
+                   + "\(Int(remotePoint.x)),\(Int(remotePoint.y)) "
                    + "of \(Int(remoteSize.width))x\(Int(remoteSize.height))")
-        status = "controlling \(host) — pointer back at its left edge returns"
         transport.send("A \(Int(remotePoint.x)) \(Int(remotePoint.y))")
+
+        // Send the pointer first, then the panel. The pointer is already on the
+        // far machine as far as the user is concerned, and the input switch
+        // costs the better part of a second through the proxy.
+        if switchesInput {
+            KVMLog.write("switching panel to the PC input (0x\(String(pcInput, radix: 16)))")
+            setMonitorInput?(pcInput)
+        }
+        status = "controlling \(host) — its left edge brings you back"
         onChange?()
     }
 
@@ -468,19 +523,30 @@ final class KVMController {
         // release and behaves as though it is held forever.
         for vk in KeyMap.allModifierVKs { transport.send("K \(vk) 0") }
 
-        let bounds = macBounds
+        // Land on the Mac's MAIN display, not back on the panel.
+        //
+        // The panel has just been told to show the Mac again and takes a second
+        // or two to renegotiate the link. A pointer parked on a screen that is
+        // still black is indistinguishable from a pointer that has been lost,
+        // and the reflex is to move the mouse harder, which would only push it
+        // back through the doorway.
+        let landing = mainBounds.isEmpty ? macBounds : mainBounds
         let fraction = remoteSize.height > 1 ? remotePoint.y / (remoteSize.height - 1) : 0.5
-        let y = bounds.minY + min(max(fraction, 0), 1) * bounds.height
+        let y = landing.minY + min(max(fraction, 0), 1) * landing.height
 
         CGAssociateMouseAndMouseCursorPosition(1)
         CGDisplayShowCursor(CGMainDisplayID())
         // Two pixels in, not one: landing exactly on the edge re-triggers the
         // crossing test on the very next movement and the pointer bounces.
-        CGWarpMouseCursorPosition(CGPoint(x: bounds.maxX - 2, y: y))
+        CGWarpMouseCursorPosition(CGPoint(x: landing.maxX - 2, y: y))
 
         side = .here
-        KVMLog.write("crossed BACK to y=\(Int(y))")
-        status = "armed — pointer at the right edge crosses to \(host)"
+        KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
+        if switchesInput {
+            KVMLog.write("switching panel to the Mac input (0x\(String(macInput, radix: 16)))")
+            setMonitorInput?(macInput)
+        }
+        status = "armed — the panel's right edge crosses to \(host)"
         onChange?()
     }
 

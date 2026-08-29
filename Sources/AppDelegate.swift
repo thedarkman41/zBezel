@@ -59,6 +59,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
                 // Give the display stack a moment to settle before asking.
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 self.controller.refreshDisplays()
+                // The doorway moves when the layout does.
+                self.controller.syncKVMPortal()
                 await self.controller.probe()
                 self.updateTooltip()
             }

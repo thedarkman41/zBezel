@@ -117,6 +117,37 @@ final class MonitorController: ObservableObject {
         kvmStatus = kvm.status
     }
 
+    /// Tell the KVM which panel is the doorway and where to land coming back.
+    ///
+    /// The doorway is the display this app is controlling — the one that shows
+    /// the Mac on DisplayPort and the PC on USB-C. Its right edge is the
+    /// crossing point, which is NOT the same thing as the right edge of the
+    /// desktop: they coincide only because the panel happens to sit rightmost.
+    ///
+    /// Re-read whenever the layout changes, and note that switching the panel
+    /// to the PC may take it out of the Mac's display list entirely — the KVM
+    /// keeps the last known geometry for exactly that reason, since it still
+    /// needs it to map the way back.
+    func syncKVMPortal() {
+        var portal: CGRect?
+        if let id = selectedID, displays.contains(where: { $0.id == id }) {
+            portal = CGDisplayBounds(id)
+        }
+        kvm.configurePortal(bounds: portal, main: CGDisplayBounds(CGMainDisplayID()))
+    }
+
+    /// Wire the panel-switching side of the KVM. Kept out of init because it
+    /// needs the monitor profile, which is not known until a probe has run.
+    private func wireKVMInputs() {
+        kvm.macInput = HPProfile.inputNames.first { $0.value == "DisplayPort"  }?.key ?? 0x0F
+        kvm.pcInput  = HPProfile.inputNames.first { $0.value == "USB-C1 Video" }?.key ?? 0x13
+        kvm.setMonitorInput = { [weak self] value in
+            Task { @MainActor in
+                await self?.set(code: VCP.inputSelect.code, value: value)
+            }
+        }
+    }
+
     /// Turn the software KVM on or off.
     ///
     /// Switching on asks the far machine how big its desktop is first. The Mac
@@ -130,6 +161,8 @@ final class MonitorController: ObservableObject {
                 kvmError = "Set a proxy host on the Link tab first."
                 return
             }
+            wireKVMInputs()
+            syncKVMPortal()
             await agent.update(config: .init(host: proxyHost, enabled: true))
             var size: CGSize?
             do {
