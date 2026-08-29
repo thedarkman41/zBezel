@@ -168,7 +168,6 @@ struct InstallerView: View {
                     Text(fingerprint)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textPrimary)
-                        .textSelection(.enabled)
                     if installer.awaitingHostKeyApproval {
                         Text("Run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the machine "
                              + "itself and check it matches. Nothing has been sent yet.")
@@ -194,7 +193,6 @@ struct InstallerView: View {
                 Text(installer.log.isEmpty ? "—" : installer.log)
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Theme.textSecond)
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .font(.system(size: 11.5))

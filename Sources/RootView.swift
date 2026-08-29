@@ -29,7 +29,13 @@ struct RootView: View {
         }
         .background(Theme.canvas)
         .background(WindowPlacement())
-        .frame(minWidth: 940, minHeight: 660)
+        // A fixed width so the seven tabs and the two-column grid always lay out
+        // the same, and a height that follows whatever the current tab needs
+        // rather than being padded out to match the tallest one.
+        .frame(width: 980)
+        // Nothing here is meant to be selected — it is a control panel, not a
+        // document, and a stray drag highlighting a label looks like a bug.
+        .textSelection(.disabled)
         .task {
             await controller.bootstrap()
             await controller.refreshVisible()

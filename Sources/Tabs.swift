@@ -383,7 +383,6 @@ struct InfoRow: View {
             Text(value)
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.textPrimary)
-                .textSelection(.enabled)
             Spacer(minLength: 0)
         }
     }

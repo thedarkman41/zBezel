@@ -2,6 +2,32 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.21 — 2026-08-28
+
+**Fixed-size window, sized to its content, with nothing selectable**
+
+The window was .contentMinSize, so it could be dragged to any size above a
+940x660 minimum. Stretched, tabs with less in them than the tallest one showed a
+large empty area below the cards.
+
+It is now .contentSize: the window takes the size its content asks for and
+cannot be dragged away from it. The width is pinned at 980 so the seven tabs and
+the two-column grid always lay out identically; the height follows whatever the
+current tab needs.
+
+That does mean the window changes height when switching between tabs of
+different lengths, which is the direct consequence of sizing around content
+rather than padding every tab out to match the tallest. Easy to pin instead if
+it reads as restless.
+
+Text selection is off everywhere. Four places had deliberately opted in — the
+capabilities string, the manufacturer-code dump, and two panes of the installer
+log — on the grounds that they are the things you would want to copy out. That
+is a real loss and worth stating: those are exactly the values someone would
+paste into a bug report. It is a control panel rather than a document, though,
+and a stray drag highlighting half a label looks like a fault. Disabled at the
+root as well as at the four sites, so anything added later inherits it.
+
 ## 0.1.20 — 2026-08-28
 
 **Serialise the panel's input switching so a return crossing is not lost**

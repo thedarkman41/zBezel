@@ -72,7 +72,6 @@ struct AdvancedTab: View {
                     Text(caps.raw)
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textSecond)
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(height: 150)

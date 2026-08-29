@@ -10,7 +10,11 @@ struct BezelApp: App {
             RootView(controller: appDelegate.controller)
                 .preferredColorScheme(.dark)
         }
-        .windowResizability(.contentMinSize)
+        // .contentSize, not .contentMinSize: the window takes the size its
+        // content asks for and cannot be dragged away from it. With
+        // .contentMinSize it could be stretched, which left large empty areas
+        // below tabs that have less in them than the tallest one.
+        .windowResizability(.contentSize)
         .commands {
             CommandGroup(replacing: .newItem) {}
         }
