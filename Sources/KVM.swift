@@ -17,6 +17,51 @@ import Foundation
 /// +200,-300 measured +522,-785 — so this tracks where the pointer is on the
 /// remote desktop itself and says exactly where to put it.
 
+// MARK: - Log
+
+/// A trace of what the KVM did, at ~/Library/Logs/zBezel/kvm.log.
+///
+/// The same reasoning as the agent's log on the Windows side, for the same
+/// reason. This feature takes over the pointer, so its failures are exactly the
+/// ones that cannot be investigated interactively: when a crossing does not
+/// happen there is nothing on screen to look at, and when one does happen the
+/// pointer is somewhere else. The alternative is asking the user to narrate
+/// symptoms, which is slower and loses the timing.
+enum KVMLog {
+    private static let queue = DispatchQueue(label: "com.darkstar.zBezel.kvm.log")
+    private static let url: URL = {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/zBezel", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("kvm.log")
+    }()
+
+    private static let stamp: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
+
+    static func write(_ message: String) {
+        let line = stamp.string(from: Date()) + "  " + message + "\n"
+        queue.async {
+            // Bounded. This is for "what is it doing now", not history.
+            if let size = try? FileManager.default
+                .attributesOfItem(atPath: url.path)[.size] as? UInt64, size > 256 * 1024 {
+                try? FileManager.default.removeItem(at: url)
+            }
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: url) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: url)
+            }
+        }
+    }
+}
+
 // MARK: - Transport
 
 /// One SSH channel, held open, carrying one event per line.
@@ -78,6 +123,8 @@ final class KVMTransport {
         process = task
         input = stdin.fileHandleForWriting
         lastError = nil
+        sentCount = 0
+        KVMLog.write("transport: ssh started pid \(task.processIdentifier)")
 
         // Drain both so a full pipe cannot block the far side, and keep the
         // last stderr line as the reason if the channel dies.
@@ -96,12 +143,24 @@ final class KVMTransport {
         }
     }
 
+    private var sentCount = 0
+
     func send(_ line: String) {
         queue.async { [weak self] in
-            guard let handle = self?.input else { return }
+            guard let self else { return }
+            guard let handle = self.input else {
+                KVMLog.write("send DROPPED (no channel): \(line)")
+                return
+            }
             guard let data = (line + "\n").data(using: .utf8) else { return }
-            do { try handle.write(contentsOf: data) }
-            catch { self?.lastError = "send failed: \(error.localizedDescription)" }
+            do {
+                try handle.write(contentsOf: data)
+                self.sentCount += 1
+                if self.sentCount <= 8 { KVMLog.write("sent[\(self.sentCount)] \(line)") }
+            } catch {
+                self.lastError = "send failed: \(error.localizedDescription)"
+                KVMLog.write("send FAILED: \(line) — \(error.localizedDescription)")
+            }
         }
     }
 
@@ -137,6 +196,11 @@ final class KVMController {
     /// because the remote is not telling us — we are telling it.
     private var remotePoint = CGPoint.zero
     private var remoteSize = CGSize(width: 1920, height: 1080)
+
+    /// How far inside the remote's left edge a crossing lands.
+    static let entryInset: CGFloat = 4
+    /// How far past that edge the pointer must be pushed to come back.
+    static let returnThreshold: CGFloat = -24
 
     private var host = ""
     private var exePath = #"$HOME\bezel\BezelAgent.exe"#
@@ -179,12 +243,16 @@ final class KVMController {
             self.remoteSize = size
         }
 
-        guard KVMController.hasInputPermission(prompt: true) else {
+        let trusted = KVMController.hasInputPermission(prompt: true)
+        KVMLog.write("enable: host=\(host) accessibility=\(trusted)")
+        guard trusted else {
             return "zBezel needs Accessibility permission to capture input. "
                  + "Grant it in System Settings > Privacy & Security > Accessibility, "
                  + "then switch this on again."
         }
-        guard installTap() else {
+        let tapped = installTap()
+        KVMLog.write("enable: eventTap=\(tapped)")
+        guard tapped else {
             return "Could not create the event tap even though Accessibility is granted. "
                  + "Removing zBezel from the Accessibility list and re-adding it usually clears this."
         }
@@ -199,6 +267,7 @@ final class KVMController {
 
     func disable() {
         guard isEnabled else { return }
+        KVMLog.write("disable")
         if side == .there { handBack() }
         removeTap()
         transport.disconnect()
@@ -322,12 +391,16 @@ final class KVMController {
             remotePoint.x += dx
             remotePoint.y += dy
 
-            // Off the left edge of the remote desktop is the way home.
-            if remotePoint.x < 0 { handBack(); return }
+            // Coming home takes a deliberate push past the left edge, not a
+            // single stray pixel. The accumulator is allowed to go negative so
+            // that push has to be sustained; what gets SENT is always clamped
+            // to the remote desktop.
+            if remotePoint.x < KVMController.returnThreshold { handBack(); return }
 
             remotePoint.x = min(remotePoint.x, remoteSize.width - 1)
             remotePoint.y = min(max(remotePoint.y, 0), remoteSize.height - 1)
-            transport.send("A \(Int(remotePoint.x)) \(Int(remotePoint.y))")
+            let sendX = min(max(remotePoint.x, 0), remoteSize.width - 1)
+            transport.send("A \(Int(sendX)) \(Int(remotePoint.y))")
 
         case .leftMouseDown:   transport.send("B 1 1")
         case .leftMouseUp:     transport.send("B 1 0")
@@ -369,7 +442,12 @@ final class KVMController {
         // Enter the far screen at the same height, proportionally, so the
         // pointer appears to continue in a straight line.
         let fraction = bounds.height > 0 ? (y - bounds.minY) / bounds.height : 0.5
-        remotePoint = CGPoint(x: 0, y: min(max(fraction, 0), 1) * (remoteSize.height - 1))
+        // A few pixels in, not on the edge itself. Entering at x=0 meant any
+        // leftward jitter drove the accumulator straight below zero and handed
+        // control back before the pointer had gone anywhere — measured at 51ms
+        // between crossing out and crossing back.
+        remotePoint = CGPoint(x: KVMController.entryInset,
+                              y: min(max(fraction, 0), 1) * (remoteSize.height - 1))
 
         // Decouple the hardware from the cursor so it stops at the edge instead
         // of grinding along it, and hide it — deltas still arrive.
@@ -377,6 +455,8 @@ final class KVMController {
         CGDisplayHideCursor(CGMainDisplayID())
 
         side = .there
+        KVMLog.write("crossed OUT at y=\(Int(y)) -> remote \(Int(remotePoint.x)),\(Int(remotePoint.y)) "
+                   + "of \(Int(remoteSize.width))x\(Int(remoteSize.height))")
         status = "controlling \(host) — pointer back at its left edge returns"
         transport.send("A \(Int(remotePoint.x)) \(Int(remotePoint.y))")
         onChange?()
@@ -399,6 +479,7 @@ final class KVMController {
         CGWarpMouseCursorPosition(CGPoint(x: bounds.maxX - 2, y: y))
 
         side = .here
+        KVMLog.write("crossed BACK to y=\(Int(y))")
         status = "armed — pointer at the right edge crosses to \(host)"
         onChange?()
     }
@@ -416,6 +497,8 @@ final class KVMController {
 
     /// Note that the channel came up, or say why it did not.
     func noteReadiness() {
+        KVMLog.write("transport ready=\(transport.isReady) connected=\(transport.isConnected) "
+                   + "error=\(transport.lastError ?? "none")")
         if transport.isReady {
             status = "armed — pointer at the right edge crosses to \(host)"
         } else {

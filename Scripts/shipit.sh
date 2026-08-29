@@ -74,7 +74,11 @@ if [ ! -f "$REPO_DIR/Sources/BezelApp.swift" ] || [ ! -f "$REPO_DIR/Agent/BezelA
 fi
 echo "Repo: $REPO_DIR"
 
-APP_BUNDLE="$REPO_DIR/build/zBezel.app"
+# The shipped app lives on the internal volume, not in the repo: the repo is on
+# a file-provider volume whose com.apple.FinderInfo stamp fails strict codesign
+# verification, which in turn makes TCC refuse the Accessibility grant.
+# build-app.sh installs and signs it there; build/ is only staging.
+APP_BUNDLE="/Applications/zBezel.app"
 APP_BIN="$APP_BUNDLE/Contents/MacOS/zBezel"
 BODY_FILE="$REPO_DIR/CHANGES.txt"
 CHANGELOG="$REPO_DIR/CHANGELOG.md"

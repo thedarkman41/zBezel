@@ -2,6 +2,87 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.8 — 2026-08-28
+
+**KVM works end to end: pointer and keyboard cross to the PC**
+
+Verified on rigel. The pointer leaves the right edge of the Mac, control lands
+on the Windows machine and tracks continuously, and pushing back past its left
+edge returns it. Positions match exactly: the Mac sends "A 113 597" and the
+agent places the cursor at 113,597, at about 16ms per event on both sides with
+no backlog.
+
+Four separate faults stood between the last commit and that, and none of them
+announced itself.
+
+STDIN: Console.ReadLine RETURNS ONE LINE, THEN BLOCKS FOREVER
+
+The one that mattered. In .NET Framework, reading an SSH-provided stdin pipe
+with Console.ReadLine() returns the FIRST line and then blocks permanently —
+no exception, no EOF, while data keeps arriving and the writer stays open.
+A StreamReader over Console.OpenStandardInput() behaves identically. ReadFile
+on the very same handle streams every line.
+
+It presented as a transport fault and cost the most time, so the elimination is
+worth recording: it is not SSH, and not the shell — `findstr` read the same
+stream incrementally through the identical command; not PowerShell's `&` call
+operator, which passes `findstr` cleanly; not cmd.exe, which fails the same way;
+and not Console.OutputEncoding, since a six-line echo program with no such call
+also failed. Only replacing the read fixed it. Both read loops now use ReadFile,
+CmdRelay included — it had the same latent bug and would have been a trap later.
+
+TCC: THE APP COULD NEVER HOLD ACCESSIBILITY PERMISSION
+
+zBezel needs Accessibility to capture and suppress input, and the grant would
+not stick. Two causes on top of each other.
+
+Ad-hoc signing has no identity to name, so the designated requirement TCC stores
+is the binary's cdhash, and every rebuild invalidated it silently: the entry
+stayed in the list, still switched on, matching nothing. Scripts/make-signing-cert.sh
+now creates a ten-year self-signed certificate and the requirement becomes
+"identifier zBezel and certificate root = H..." which survives rebuilds.
+
+That alone was not enough. The repo lives on a file-provider volume that stamps
+com.apple.FinderInfo on the bundle, and that xattr fails strict codesign
+verification, which TCC applies — so the app was invalid to it however correctly
+it was signed. Clearing the xattr does not help, because the volume restores it
+the moment Finder touches the bundle, including when the user navigates there in
+the very picker used to grant permission. $HOME is on that volume too, so
+~/Applications was no better. The build now installs to /Applications, signs it
+there, and FAILS if strict verification does not pass — that check is the one
+that predicts whether TCC will honour a grant, so it should break the build
+rather than resurface as a permission prompt that cannot be dismissed.
+
+A STALE RELAY WEDGED THE PIPE
+
+The input pipe allows one server instance, so a single leftover session-0 relay
+blocked every later crossing, silently at both ends. They go stale because
+killing ssh on the Mac does not reliably deliver EOF to the far child. A relay
+now evicts older ones at startup; verified by abandoning one without EOF and
+confirming the next recovered.
+
+CROSSING BOUNCED STRAIGHT BACK
+
+The remote x position started at 0, so any leftward jitter drove it negative and
+handed control back immediately — measured at 51ms between crossing out and
+crossing back. Crossings now land 4px inside the edge and returning takes a
+sustained 24px push.
+
+DIAGNOSABILITY
+
+Added a Mac-side log at ~/Library/Logs/zBezel/kvm.log, matching the agent's.
+Neither of the first two faults was findable without them: every symptom was a
+success return value or an unchanged screen, and the feature takes over the
+pointer, so it cannot be investigated interactively.
+
+STILL TO DO
+
+  * Command maps to the Windows key positionally, so Cmd-C arrives as Win-C.
+    Swapping it to Control is the key-remapping feature, kept separate.
+  * Scroll direction is untested against natural scrolling.
+  * The input pipe remains reachable by any process running as the console
+    user, including medium-integrity ones.
+
 ## 0.1.7 — 2026-08-28
 
 **KVM: the Mac side — pointer and keyboard cross to the PC**

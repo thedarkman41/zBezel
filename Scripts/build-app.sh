@@ -56,7 +56,65 @@ echo '</plist>' >> "$APP/Contents/Info.plist"
 # strip before AND after signing. Use /usr/bin/xattr explicitly — conda's Python
 # xattr shadows it on PATH and lacks -r.
 /usr/bin/xattr -cr "$APP"
-codesign --force --sign - --identifier zBezel "$APP"
-/usr/bin/xattr -cr "$APP" 2>/dev/null || true
 
-echo "Built: $APP"
+# Sign with a real certificate when one is present, ad-hoc otherwise.
+#
+# This is not about trust — the certificate is self-signed and Gatekeeper does
+# not honour it. It is about what TCC pins. An ad-hoc signature has no identity
+# to name, so the designated requirement it generates is the cdhash of the
+# binary, and the cdhash changes with every code change. The practical effect
+# was that each rebuild silently invalidated the Accessibility grant: the entry
+# stayed in the list, still switched on, matching nothing, and the app just
+# asked for permission again. With a certificate the requirement becomes
+#
+#     identifier zBezel and certificate root = H"<cert>"
+#
+# which is stable across rebuilds, so the grant is given once.
+#
+# Create the certificate with Scripts/make-signing-cert.sh. Falling back to
+# ad-hoc keeps the build working on a machine that has not run it, at the cost
+# of re-granting after each build there.
+SIGN_ID="zBezel Code Signing"
+
+# Install onto the internal volume, and sign THERE.
+#
+# The repo lives on /Volumes/Faraday, a file-provider volume that stamps
+# com.apple.FinderInfo on anything Finder so much as looks at — and a bundle
+# carrying that xattr fails `codesign --verify --strict`:
+#
+#     resource fork, Finder information, or similar detritus not allowed
+#
+# TCC validates strictly. So an app sitting there is invalid as far as
+# Accessibility is concerned, no matter how correctly it was signed: the grant
+# is accepted in System Settings, shows as enabled, and then matches nothing.
+# Clearing the xattr does not fix it either, because the volume puts it back
+# the next time Finder touches the bundle — which includes the user navigating
+# to it in the very file picker used to grant permission.
+#
+# $HOME is on that same volume, so ~/Applications is no better. /Applications
+# is on the internal data volume, is writable without admin, and stays clean.
+#
+# ditto --norsrc --noextattr copies without carrying the xattrs across, and the
+# signature is applied afterwards so it covers what is actually on disk.
+INSTALL="/Applications/zBezel.app"
+rm -rf "$INSTALL"
+/usr/bin/ditto --norsrc --noextattr "$APP" "$INSTALL"
+
+if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
+    codesign --force --sign "$SIGN_ID" --identifier zBezel "$INSTALL"
+else
+    echo "note: signing ad-hoc — '$SIGN_ID' not in the keychain."
+    echo "      Accessibility permission will need re-granting after every build."
+    echo "      Run Scripts/make-signing-cert.sh once to fix that."
+    codesign --force --sign - --identifier zBezel "$INSTALL"
+fi
+
+# Strict verification is the check that actually predicts whether TCC will
+# honour a grant, so failing it has to fail the build rather than be discovered
+# later as a permission prompt that will not go away.
+if ! codesign --verify --deep --strict "$INSTALL" 2>&1; then
+    echo "error: $INSTALL does not pass strict verification." >&2
+    exit 1
+fi
+
+echo "Built: $INSTALL"

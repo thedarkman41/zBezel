@@ -653,6 +653,63 @@ internal static class BezelAgent
 
     private const string InputPipeName = "BezelAgentInput";
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool ReadFile(IntPtr handle, byte[] buffer, uint toRead,
+                                        out uint read, IntPtr overlapped);
+
+    private const int STD_INPUT_HANDLE = -10;
+    private const int ERROR_BROKEN_PIPE = 109;
+
+    /// Read newline-delimited lines from stdin, via ReadFile rather than Console.
+    ///
+    /// Console.ReadLine() cannot be used here, and neither can a StreamReader
+    /// over Console.OpenStandardInput(). When stdin is the pipe SSH provides,
+    /// both return the FIRST line and then block forever on the next read, even
+    /// though more data is arriving and the writer is still open. No exception,
+    /// no EOF — the process simply stops seeing its own input.
+    ///
+    /// That was worth pinning down precisely, because it looks exactly like a
+    /// transport fault and sent the investigation to entirely the wrong places.
+    /// It is not SSH, the shell, or PowerShell's call operator: `findstr` reads
+    /// the same stream incrementally without trouble through the identical
+    /// command, and so does this, once the .NET console layer is out of the way.
+    /// A three-line-apart test read one line via Console and all three via
+    /// ReadFile.
+    ///
+    /// ERROR_BROKEN_PIPE is how a closed stdin reports itself here, and is the
+    /// normal way this ends rather than a fault worth logging.
+    private static IEnumerable<string> StdinLines()
+    {
+        IntPtr handle = GetStdHandle(STD_INPUT_HANDLE);
+        var buffer = new byte[4096];
+        var pending = new StringBuilder();
+
+        while (true)
+        {
+            uint read;
+            if (!ReadFile(handle, buffer, (uint)buffer.Length, out read, IntPtr.Zero))
+            {
+                int error = Marshal.GetLastWin32Error();
+                if (error != ERROR_BROKEN_PIPE) Log("stdin ReadFile failed win32=" + error);
+                yield break;
+            }
+            if (read == 0) yield break;                    // clean end of stream
+
+            pending.Append(Encoding.UTF8.GetString(buffer, 0, (int)read));
+            while (true)
+            {
+                string buffered = pending.ToString();
+                int newline = buffered.IndexOf('\n');
+                if (newline < 0) break;
+                string line = buffered.Substring(0, newline).TrimEnd('\r');
+                pending.Remove(0, newline + 1);
+                yield return line;
+            }
+        }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct MOUSEINPUT
     {
@@ -1103,6 +1160,34 @@ internal static class BezelAgent
     /// crossing rather than per event.
     private static int CmdKvm()
     {
+        // Evict any earlier relay before connecting.
+        //
+        // The pipe allows one server instance, so one stale relay wedges the
+        // whole feature: it keeps the connection open, every later crossing
+        // connects to nothing, and the failure is silent at both ends. They go
+        // stale because killing the ssh process on the Mac does not always
+        // deliver EOF here — PowerShell does not reliably propagate a closed
+        // stdin to its child — so the relay sits in ReadLine forever. Observed
+        // exactly that: a relay from a killed session held the pipe for six
+        // minutes while every crossing did nothing.
+        //
+        // Only session 0. The session-1 process is the service itself.
+        try
+        {
+            int me = System.Diagnostics.Process.GetCurrentProcess().Id;
+            foreach (var other in System.Diagnostics.Process.GetProcessesByName("BezelAgent"))
+            {
+                if (other.Id == me) continue;
+                try
+                {
+                    if (other.SessionId != 0) continue;
+                    other.Kill();
+                }
+                catch (Exception e) { Log("could not evict relay " + other.Id + ": " + e.Message); }
+            }
+        }
+        catch (Exception e) { Log("relay eviction failed: " + e.Message); }
+
         try
         {
             using (var pipe = new NamedPipeClientStream(".", InputPipeName, PipeDirection.Out))
@@ -1114,14 +1199,17 @@ internal static class BezelAgent
                     Console.WriteLine("{\"ok\":true,\"kvm\":\"ready\"}");
                     Console.Out.Flush();
 
-                    string line;
-                    while ((line = Console.ReadLine()) != null)
+                    int seen = 0;
+                    foreach (string line in StdinLines())
                     {
+                        seen++;
+                        if (seen <= 4) Log("relay: read[" + seen + "] " + line);
                         if (line.Length == 0) continue;
                         if (line == "quit") break;
                         writer.Write(line);
                         writer.Write("\n");
                     }
+                    Log("relay: stdin ended after " + seen + " line(s)");
                 }
             }
             return 0;
@@ -1316,8 +1404,7 @@ internal static class BezelAgent
         Console.WriteLine("{\"ok\":true,\"relay\":\"ready\",\"port\":" + port + "}");
         Console.Out.Flush();
 
-        string line;
-        while ((line = Console.ReadLine()) != null)
+        foreach (string line in StdinLines())
         {
             if (line.Trim().Length == 0) continue;
             string reply;
