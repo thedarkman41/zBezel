@@ -12,11 +12,18 @@
 //   BezelAgent get   <index> <vcpHex> [vcpHex ...]
 //   BezelAgent set   <index> <vcpHex> <value>
 //   BezelAgent probe <index>            -- read every code the monitor declares
+//
+// It also carries the KVM receiver: `serve` accepts pointer and keyboard events
+// on a named pipe and replays them here, so the Mac can drive this machine once
+// the pointer crosses its screen edge. See "Input injection" below.
 
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO.Pipes;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 internal static class BezelAgent
@@ -249,6 +256,8 @@ internal static class BezelAgent
             case "setget": CmdSetGet(targets, args); return true;
             case "set":    CmdSet(targets, args);    return true;
             case "probe":  CmdProbe(targets, args);  return true;
+            case "cursor":   CmdCursor();            return true;
+            case "keystate": CmdKeyState();          return true;
             default:       return false;
         }
     }
@@ -301,6 +310,46 @@ internal static class BezelAgent
         if (!servingRequests) Environment.Exit(1);
     }
 
+    /// Append a line to %USERPROFILE%\bezel\agent.log.
+    ///
+    /// Serve mode is started by install-service.ps1 registering wscript.exe
+    /// against start-hidden.vbs, which does `shell.Run "<exe> serve", 0, False`
+    /// — window hidden, nothing redirected anywhere. So Console.Error from the
+    /// running agent goes precisely nowhere, and until now a failure inside it
+    /// left no trace of any kind: no console, no file, no event. That is
+    /// tolerable for a request/response command that reports its own errors up
+    /// the socket, and not tolerable for the KVM receiver, which runs unattended
+    /// for hours and has no caller waiting on a reply to complain to.
+    private static readonly object LogLock = new object();
+
+    private static void Log(string message)
+    {
+        try
+        {
+            string dir = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "bezel");
+            System.IO.Directory.CreateDirectory(dir);
+            string path = System.IO.Path.Combine(dir, "agent.log");
+            lock (LogLock)
+            {
+                // Bounded, and history is not the point — this exists to answer
+                // "what is it doing right now", so truncating the old half is
+                // better than growing without limit on a machine nobody watches.
+                var info = new System.IO.FileInfo(path);
+                if (info.Exists && info.Length > 256 * 1024) info.Delete();
+                System.IO.File.AppendAllText(path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff",
+                                          CultureInfo.InvariantCulture)
+                    + "  " + message + Environment.NewLine);
+            }
+        }
+        catch (Exception)
+        {
+            // Deliberately swallowed, and the one place in this file where that
+            // is right: the logger is the thing you would report a failure to.
+        }
+    }
+
     private static byte ParseCode(string s)
     {
         s = s.Trim();
@@ -310,8 +359,40 @@ internal static class BezelAgent
 
     // ---- Commands ----------------------------------------------------------
 
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
+
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+    /// Ask Windows for real pixels.
+    ///
+    /// A DPI-unaware process is lied to for its own good: on this machine the
+    /// desktop is 3840x2160 at 150%, and GetSystemMetrics answered 2560x1440 —
+    /// the virtualised size — while GetCursorPos returned virtualised
+    /// coordinates to match. That is coherent but useless here, because the Mac
+    /// is going to send absolute pixel positions and they have to mean the same
+    /// thing at both ends. Without this the pointer lands two thirds of the way
+    /// to where it was asked to go, and only on scaled displays, which is the
+    /// kind of bug that survives a long time.
+    ///
+    /// Per-monitor v2 where it exists (Windows 10 1703+), falling back to the
+    /// old system-wide call, which is enough for a machine whose displays share
+    /// a scale factor.
+    private static void MakeDpiAware()
+    {
+        try { if (SetProcessDpiAwarenessContext(PerMonitorAwareV2)) return; }
+        catch (EntryPointNotFoundException) { /* pre-1703; fall through */ }
+        try { SetProcessDPIAware(); }
+        catch (EntryPointNotFoundException) { /* pre-Vista; nothing to do */ }
+    }
+
     private static int Main(string[] args)
     {
+        // Before anything reads a coordinate or a metric.
+        MakeDpiAware();
         Console.OutputEncoding = Encoding.UTF8;
         if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe"); return 1; }
 
@@ -324,6 +405,7 @@ internal static class BezelAgent
             case "serve":  return CmdServe(args);
             case "client": return CmdClient(args);
             case "relay":  return CmdRelay(args);
+            case "kvm":    return CmdKvm();
         }
 
         List<Target> targets;
@@ -544,6 +626,513 @@ internal static class BezelAgent
             result.Add(b);
     }
 
+    // ---- Input injection ---------------------------------------------------
+    //
+    // The KVM receiver. When the pointer leaves the right edge of the Mac's
+    // screen, the Mac stops handling its own input and streams it here instead;
+    // these functions replay it with SendInput so it lands in the console
+    // session as though it came from the local keyboard and mouse.
+    //
+    // Two things decide the shape of this.
+    //
+    // SendInput only reaches the desktop of the session it is called from, so it
+    // has to run on the session-1 service. An SSH process lands in session 0 and
+    // has no desktop at all, which is the same constraint that put the DDC
+    // commands behind a loopback relay in the first place.
+    //
+    // And it deliberately does NOT ride that loopback TCP socket. Any local
+    // process, running as any user, can connect to 127.0.0.1 — a socket that
+    // sets monitor brightness and a socket that types into the console session
+    // are very different propositions, and the second one is why the earlier
+    // `inject` command was deleted rather than fixed. This uses a named pipe
+    // whose DACL names exactly one account: the one already running the
+    // interactive session. That account can synthesise its own input anyway, so
+    // nothing new is granted and no privilege boundary is crossed; every other
+    // account, including another user logged on at the same time, is refused by
+    // the kernel before a byte is read.
+
+    private const string InputPipeName = "BezelAgentInput";
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        public int dx, dy;
+        public uint mouseData, dwFlags, time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KEYBDINPUT
+    {
+        public ushort wVk, wScan;
+        public uint dwFlags, time;
+        public IntPtr dwExtraInfo;
+    }
+
+    // INPUT is a tagged union. On x64 the union aligns to 8 because it contains
+    // a pointer, so the struct is 40 bytes with 4 of padding after `type`;
+    // Marshal.SizeOf works that out, which is why SendInput is handed it rather
+    // than a hard-coded size.
+    [StructLayout(LayoutKind.Explicit)]
+    private struct INPUTUNION
+    {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct INPUT
+    {
+        public uint type;
+        public INPUTUNION u;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count, INPUT[] inputs, int size);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetThreadDesktop(IntPtr desktop);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetThreadDesktop(uint threadId);
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool GetUserObjectInformation(IntPtr obj, int index,
+        StringBuilder info, uint length, out uint needed);
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetProcessWindowStation();
+
+    private const int UOI_NAME = 2;
+    private const uint MAXIMUM_ALLOWED = 0x02000000;
+
+    private static string DesktopName(IntPtr desktop)
+    {
+        if (desktop == IntPtr.Zero) return "(none)";
+        var name = new StringBuilder(256);
+        uint needed;
+        return GetUserObjectInformation(desktop, UOI_NAME, name, 256, out needed)
+             ? name.ToString() : "(unreadable)";
+    }
+
+    /// Point this thread at whatever desktop is currently receiving input.
+    ///
+    /// SendInput delivers to the desktop of the CALLING THREAD, and it reports
+    /// success either way — a process attached to the wrong desktop injects
+    /// perfectly valid events into a desktop nobody is looking at, and the only
+    /// symptom is that nothing happens. The agent is started by a logon
+    /// scheduled task, which is exactly the situation where the thread can end
+    /// up somewhere other than the visible desktop.
+    ///
+    /// This must run on the thread that will call SendInput, which is why it is
+    /// at the top of the pipe loop rather than in Main.
+    private static void AttachToInputDesktop()
+    {
+        // The window station matters as much as the desktop and is easy to miss:
+        // EVERY window station has a desktop called "Default", so a process
+        // stranded on a non-interactive station reports exactly the same desktop
+        // name as one doing it right. Only WinSta0 is attached to the physical
+        // input, so log the station before concluding anything from the desktop.
+        Log("station=\"" + DesktopName(GetProcessWindowStation())
+            + "\" desktop=\"" + DesktopName(GetThreadDesktop(GetCurrentThreadId())) + "\"");
+
+        string before = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+        IntPtr input = OpenInputDesktop(0, true, MAXIMUM_ALLOWED);
+        if (input == IntPtr.Zero)
+        {
+            Log("OpenInputDesktop failed (win32 " + Marshal.GetLastWin32Error()
+                + "); staying on desktop \"" + before + "\"");
+            return;
+        }
+        if (!SetThreadDesktop(input))
+        {
+            Log("SetThreadDesktop failed (win32 " + Marshal.GetLastWin32Error()
+                + "); staying on desktop \"" + before + "\"");
+            return;
+        }
+        Log("input desktop: \"" + before + "\" -> \"" + DesktopName(input) + "\"");
+    }
+
+    private const uint InputMouse = 0, InputKeyboard = 1;
+    private const uint MouseMove       = 0x0001,
+                       MouseLeftDown   = 0x0002, MouseLeftUp   = 0x0004,
+                       MouseRightDown  = 0x0008, MouseRightUp  = 0x0010,
+                       MouseMiddleDown = 0x0020, MouseMiddleUp = 0x0040,
+                       MouseWheel      = 0x0800, MouseHWheel   = 0x1000,
+                       MouseVirtualDesk = 0x4000, MouseAbsolute = 0x8000;
+    private const uint KeyUp = 0x0002, KeyUnicode = 0x0004;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int x, y; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorPos(out POINT point);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CURSORINFO
+    {
+        public int cbSize;
+        public int flags;
+        public IntPtr hCursor;
+        public POINT ptScreenPos;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorInfo(ref CURSORINFO info);
+
+    // 0 hidden, 1 CURSOR_SHOWING, 2 CURSOR_SUPPRESSED.
+    //
+    // Suppression is the interesting one: Windows sets it when the machine has
+    // no active pointing device — common on a laptop being driven remotely —
+    // and while it is set the cursor is parked and position calls are refused.
+    private static int CursorFlags()
+    {
+        var info = new CURSORINFO();
+        info.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+        return GetCursorInfo(ref info) ? info.flags : -1;
+    }
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int index);
+
+    private const int SM_XVIRTUALSCREEN  = 76, SM_YVIRTUALSCREEN  = 77,
+                      SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
+
+    /// Where the pointer is, and the bounds it may occupy.
+    ///
+    /// The Mac needs both. It has handed the pointer over and is no longer being
+    /// told where it went, so the only way to know the pointer has reached this
+    /// machine's left edge — the signal to hand control back — is to ask. The
+    /// virtual-screen rectangle is what "left edge" means when this machine has
+    /// more than one display, and it can be negative on a multi-monitor layout,
+    /// which is why it is reported rather than assumed to start at zero.
+    ///
+    /// Answered from the session-1 service, so it is the console session's
+    /// pointer. Asked over SSH directly it would report session 0's, which has a
+    /// desktop nobody can see and a cursor that never moves.
+    private static int CmdCursor()
+    {
+        POINT p;
+        if (!GetCursorPos(out p))
+        {
+            Fail("GetCursorPos failed (win32 error " + Marshal.GetLastWin32Error() + ")");
+            return 1;
+        }
+        Console.WriteLine("{\"ok\":true,\"x\":" + p.x + ",\"y\":" + p.y
+            + ",\"cursorFlags\":" + CursorFlags()
+            + ",\"virtual\":{\"x\":" + GetSystemMetrics(SM_XVIRTUALSCREEN)
+            + ",\"y\":" + GetSystemMetrics(SM_YVIRTUALSCREEN)
+            + ",\"w\":" + GetSystemMetrics(SM_CXVIRTUALSCREEN)
+            + ",\"h\":" + GetSystemMetrics(SM_CYVIRTUALSCREEN) + "}}");
+        return 0;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern short GetKeyState(int vk);
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vk);
+
+    /// Toggle and modifier state.
+    ///
+    /// Two uses. It answers "did a keystroke actually land" without needing
+    /// anything on screen to type into — Caps Lock is observable, reversible and
+    /// harmless. And a KVM leaves modifiers stuck when control is handed over
+    /// mid-chord: press Shift on the Mac, cross the edge, release it, and the
+    /// far machine never hears the release and behaves as though Shift is held
+    /// forever. Being able to read the state is the first half of fixing that.
+    private static int CmdKeyState()
+    {
+        Console.WriteLine("{\"ok\":true"
+            + ",\"caps\":"   + ((GetKeyState(0x14) & 1) != 0 ? "true" : "false")
+            + ",\"num\":"    + ((GetKeyState(0x90) & 1) != 0 ? "true" : "false")
+            + ",\"scroll\":" + ((GetKeyState(0x91) & 1) != 0 ? "true" : "false")
+            + ",\"shift\":"  + ((GetAsyncKeyState(0x10) & 0x8000) != 0 ? "true" : "false")
+            + ",\"ctrl\":"   + ((GetAsyncKeyState(0x11) & 0x8000) != 0 ? "true" : "false")
+            + ",\"alt\":"    + ((GetAsyncKeyState(0x12) & 0x8000) != 0 ? "true" : "false")
+            + ",\"win\":"    + ((GetAsyncKeyState(0x5B) & 0x8000) != 0 ? "true" : "false")
+            + "}");
+        return 0;
+    }
+
+    private static INPUT MouseEvent(uint flags, int dx, int dy, int data)
+    {
+        var input = new INPUT();
+        input.type = InputMouse;
+        input.u.mi.dx = dx;
+        input.u.mi.dy = dy;
+        input.u.mi.mouseData = unchecked((uint)data);
+        input.u.mi.dwFlags = flags;
+        input.u.mi.time = 0;
+        input.u.mi.dwExtraInfo = IntPtr.Zero;
+        return input;
+    }
+
+    private static INPUT KeyEvent(ushort vk, ushort scan, uint flags)
+    {
+        var input = new INPUT();
+        input.type = InputKeyboard;
+        input.u.ki.wVk = vk;
+        input.u.ki.wScan = scan;
+        input.u.ki.dwFlags = flags;
+        input.u.ki.time = 0;
+        input.u.ki.dwExtraInfo = IntPtr.Zero;
+        return input;
+    }
+
+    /// The first events of each crossing are traced, then it goes quiet.
+    ///
+    /// SendInput returning 1 means the event was accepted into the input stream,
+    /// not that anything moved — the two come apart when the injecting thread is
+    /// on a desktop other than the visible one, and that failure is completely
+    /// silent. Logging where the pointer actually ended up is the only way to
+    /// tell "injected and ignored" from "injected and worked", and a dozen lines
+    /// per connection is cheap enough to leave switched on.
+    private static int traced;
+
+    private static void Send(INPUT input)
+    {
+        var batch = new INPUT[1];
+        batch[0] = input;
+        if (SendInput(1, batch, Marshal.SizeOf(typeof(INPUT))) == 0)
+        {
+            Log("SendInput refused (win32 " + Marshal.GetLastWin32Error() + ")");
+            return;
+        }
+        if (traced < 12)
+        {
+            traced++;
+            POINT p;
+            string where = GetCursorPos(out p) ? p.x + "," + p.y : "unreadable";
+            Log(input.type == InputMouse
+                ? "sent mouse flags=0x" + input.u.mi.dwFlags.ToString("x")
+                    + " dx=" + input.u.mi.dx + " dy=" + input.u.mi.dy
+                    + " data=" + input.u.mi.mouseData + " -> cursor " + where
+                : "sent key vk=" + input.u.ki.wVk + " scan=" + input.u.ki.wScan
+                    + " flags=0x" + input.u.ki.dwFlags.ToString("x"));
+        }
+    }
+
+    /// Place the pointer at a pixel position in this machine's virtual-screen
+    /// space.
+    ///
+    /// Absolute, not relative, and that is not a detail. A relative event is
+    /// measured in mickeys and goes through the pointer speed and acceleration
+    /// curve before it reaches the cursor, so the far end cannot know where the
+    /// pointer will land; with acceleration on, the same event produces a
+    /// different distance depending on how fast the previous ones arrived. For a
+    /// KVM that is unusable — the Mac has to know exactly where the pointer is
+    /// to decide when it has reached an edge and should come back.
+    ///
+    /// SendInput takes absolute coordinates normalised to 0..65535 rather than
+    /// pixels, and with VIRTUALDESK that range spans every display. Doing the
+    /// conversion here rather than on the Mac keeps the one machine that knows
+    /// its own layout in charge of it.
+    private static void SendAbsolute(int x, int y)
+    {
+        int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if (vw <= 1 || vh <= 1) { Log("virtual screen is degenerate: " + vw + "x" + vh); return; }
+
+        if (x < vx) x = vx; else if (x > vx + vw - 1) x = vx + vw - 1;
+        if (y < vy) y = vy; else if (y > vy + vh - 1) y = vy + vh - 1;
+
+        // Windows converts back with floor(n * extent / 65536), so dividing by
+        // 65535 and rounding down lands a pixel short about half the time —
+        // measured: asking for x=500 produced 501, x=3000 produced 3002. Round
+        // UP against 65536 instead and the round trip is exact.
+        int nx = (int)((((long)(x - vx) * 65536) + vw - 1) / vw);
+        int ny = (int)((((long)(y - vy) * 65536) + vh - 1) / vh);
+        Send(MouseEvent(MouseMove | MouseAbsolute | MouseVirtualDesk, nx, ny, 0));
+    }
+
+    private static int Num(string s)
+    {
+        int value;
+        if (!int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out value))
+            throw new ArgumentException("not a number: " + s);
+        return value;
+    }
+
+    // Replay one event. Text, one per line, deliberately: the peak volume is a
+    // few hundred events a second, the saving from packing it into binary is
+    // irrelevant next to the network hop, and being able to watch the stream
+    // with a terminal open is worth considerably more while this is young.
+    //
+    //   A <x> <y>            pointer move, absolute, in virtual-screen pixels
+    //   M <dx> <dy>          pointer move, relative
+    //   B <button> <1|0>     1 left, 2 right, 3 middle; 1 down, 0 up
+    //   W <delta>            wheel, in WHEEL_DELTA (120) units
+    //   H <delta>            horizontal wheel
+    //   K <vk> <1|0>         virtual-key code, down or up
+    //   U <codepoint> <1|0>  a character, bypassing the far keyboard layout
+    private static void Inject(string line)
+    {
+        var parts = line.Split(' ');
+        if (parts.Length == 0 || parts[0].Length == 0) return;
+
+        switch (parts[0])
+        {
+            case "A":
+                if (parts.Length >= 3) SendAbsolute(Num(parts[1]), Num(parts[2]));
+                break;
+
+            case "S":
+                // Diagnostic counterpart to A. SetCursorPos writes the position
+                // directly instead of posting through the input stream, so the
+                // two disagreeing tells us whether injection is being filtered
+                // or the session is not moving the pointer at all.
+                if (parts.Length >= 3)
+                {
+                    bool moved = SetCursorPos(Num(parts[1]), Num(parts[2]));
+                    POINT after;
+                    GetCursorPos(out after);
+                    Log("SetCursorPos(" + parts[1] + "," + parts[2] + ") returned "
+                        + moved + " (win32 " + Marshal.GetLastWin32Error()
+                        + ") -> cursor " + after.x + "," + after.y);
+                }
+                break;
+
+            case "M":
+                if (parts.Length >= 3) Send(MouseEvent(MouseMove, Num(parts[1]), Num(parts[2]), 0));
+                break;
+
+            case "B":
+                if (parts.Length >= 3)
+                {
+                    bool down = Num(parts[2]) != 0;
+                    uint flags;
+                    switch (Num(parts[1]))
+                    {
+                        case 1:  flags = down ? MouseLeftDown   : MouseLeftUp;   break;
+                        case 2:  flags = down ? MouseRightDown  : MouseRightUp;  break;
+                        case 3:  flags = down ? MouseMiddleDown : MouseMiddleUp; break;
+                        default: return;
+                    }
+                    Send(MouseEvent(flags, 0, 0, 0));
+                }
+                break;
+
+            case "W":
+                if (parts.Length >= 2) Send(MouseEvent(MouseWheel, 0, 0, Num(parts[1])));
+                break;
+
+            case "H":
+                if (parts.Length >= 2) Send(MouseEvent(MouseHWheel, 0, 0, Num(parts[1])));
+                break;
+
+            case "K":
+                if (parts.Length >= 3)
+                    Send(KeyEvent((ushort)Num(parts[1]), 0, Num(parts[2]) != 0 ? 0 : KeyUp));
+                break;
+
+            case "U":
+                // wVk must be 0 for a unicode event; the character rides in wScan
+                // and arrives regardless of the layout selected on this machine.
+                if (parts.Length >= 3)
+                    Send(KeyEvent(0, (ushort)Num(parts[1]),
+                                  KeyUnicode | (Num(parts[2]) != 0 ? 0 : KeyUp)));
+                break;
+
+            default:
+                break;
+        }
+    }
+
+    /// A DACL with a single Allow entry, naming the account this service runs
+    /// as. Everyone else is refused by omission, which is preferable to adding
+    /// Deny entries: there is no ordering to reason about and nothing inherited.
+    private static PipeSecurity InputPipeSecurity()
+    {
+        var security = new PipeSecurity();
+        security.SetAccessRule(new PipeAccessRule(
+            WindowsIdentity.GetCurrent().User,
+            PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
+            AccessControlType.Allow));
+        return security;
+    }
+
+    private static void InputPipeLoop()
+    {
+        AttachToInputDesktop();
+        Log("input pipe: listening on \\\\.\\pipe\\" + InputPipeName);
+        while (true)
+        {
+            try
+            {
+                using (var pipe = new NamedPipeServerStream(
+                           InputPipeName, PipeDirection.In, 1,
+                           PipeTransmissionMode.Byte, PipeOptions.None,
+                           4096, 4096, InputPipeSecurity()))
+                {
+                    pipe.WaitForConnection();
+                    traced = 0;          // a fresh trace window per crossing
+                    // The input desktop is not fixed for the life of the process:
+                    // locking, unlocking and any UAC prompt each switch it. Once
+                    // at startup would leave the KVM silently dead after the
+                    // first lock, so re-attach at every crossing.
+                    AttachToInputDesktop();
+                    Log("input pipe: client connected");
+                    using (var reader = new System.IO.StreamReader(pipe, new UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            try { Inject(line); }
+                            catch (Exception e) { Log("bad event \"" + line + "\": " + e.Message); }
+                        }
+                    }
+                    Log("input pipe: client disconnected");
+                }
+            }
+            catch (Exception e)
+            {
+                // A dropped client must not end the loop, or the KVM works
+                // exactly once per logon.
+                Log("input pipe: " + e.Message);
+                System.Threading.Thread.Sleep(500);
+            }
+        }
+    }
+
+    /// The session-0 half: reads events from the Mac on stdin and hands them to
+    /// the session-1 service through the pipe. One SSH channel is opened for the
+    /// whole session, so the ~0.8s PowerShell login cost is paid once at the
+    /// crossing rather than per event.
+    private static int CmdKvm()
+    {
+        try
+        {
+            using (var pipe = new NamedPipeClientStream(".", InputPipeName, PipeDirection.Out))
+            {
+                pipe.Connect(5000);
+                using (var writer = new System.IO.StreamWriter(pipe, new UTF8Encoding(false)))
+                {
+                    writer.AutoFlush = true;      // every event, immediately
+                    Console.WriteLine("{\"ok\":true,\"kvm\":\"ready\"}");
+                    Console.Out.Flush();
+
+                    string line;
+                    while ((line = Console.ReadLine()) != null)
+                    {
+                        if (line.Length == 0) continue;
+                        if (line == "quit") break;
+                        writer.Write(line);
+                        writer.Write("\n");
+                    }
+                }
+            }
+            return 0;
+        }
+        catch (Exception e)
+        {
+            Fail("cannot reach the input pipe (" + e.Message + ")");
+            return 1;
+        }
+    }
+
     // ---- Persistent service ------------------------------------------------
     //
     // The Monitor Configuration API only works from the interactive desktop
@@ -565,10 +1154,20 @@ internal static class BezelAgent
     {
         int port = PortFrom(args, 1);
         servingRequests = true;
+
+        // The KVM receiver runs alongside the DDC listener rather than as its own
+        // process: SendInput has to be called from this session, and this is
+        // already the process that lives in it. Background, so a stuck pipe read
+        // cannot keep the agent alive after the DDC loop is gone.
+        var inputThread = new System.Threading.Thread(InputPipeLoop);
+        inputThread.IsBackground = true;
+        inputThread.Start();
+
         var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
         listener.Start();
         Console.WriteLine("{\"ok\":true,\"listening\":" + port + "}");
         Console.Out.Flush();
+        Log("serve: listening on 127.0.0.1:" + port);
 
         while (true)
         {

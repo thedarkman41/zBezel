@@ -2,6 +2,86 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.6 — 2026-08-28
+
+**KVM receiver: the Windows half of pointer and keyboard hand-off**
+
+The agent can now replay mouse and keyboard events into the console session, so
+the Mac can drive this machine once the pointer crosses its screen edge. This is
+the receiving end only; nothing on the Mac sends to it yet.
+
+TRANSPORT
+
+Events arrive on a named pipe, deliberately not on the loopback TCP socket the
+DDC commands already use. Any local process, running as any user, can connect to
+127.0.0.1 — a socket that sets brightness and a socket that types into the
+console session are very different propositions, and that is why the earlier
+`inject` command was deleted rather than repaired. The pipe's DACL carries a
+single Allow entry naming the account running the interactive session.
+
+The session-0 half is `BezelAgent kvm`, run over one long-lived SSH channel: the
+~0.8s PowerShell login cost is paid once per crossing rather than per event.
+
+WHY IT DID NOT WORK, AND WHY THAT TOOK A WHILE
+
+Injection failed silently at first. SendInput returned success for every event
+and nothing moved; SetCursorPos returned false. Ruled out in turn: the pipe
+(events arrived and parsed correctly), the desktop and window station (WinSta0
+and Default, both right — worth checking explicitly, because every window
+station has a desktop called "Default" and a process stranded on the wrong one
+looks identical), the lock state, cursor suppression, and the coordinate maths.
+
+The cause was UIPI. Synthetic input from a process at a lower integrity level
+than the receiving window is discarded without an error being reported anywhere:
+SendInput still returns the number of events it queued. install-service.ps1 set
+-RunLevel Limited, so the agent was medium integrity. At Highest the same events
+land exactly.
+
+That is a genuine privilege increase and is documented at length in
+install-service.ps1 rather than slipped in. The pipe admits only the console
+account, which is an administrator that can elevate unaided, so nothing
+Microsoft treats as a security boundary is crossed — it says plainly that UAC
+and UIPI are not one. A medium-integrity process running as that same user could
+still reach the pipe, which is recorded below as a gap rather than claimed to be
+handled.
+
+ABSOLUTE, NOT RELATIVE
+
+Relative events are measured in mickeys and pass through the pointer
+acceleration curve: asking for +200,-300 produced +522,-785. The far end cannot
+predict where the pointer will land, which is unusable for a KVM that has to
+know when the pointer has reached an edge. Absolute positioning is now the
+primary path. Both are implemented; the Mac will use absolute.
+
+DIAGNOSABILITY
+
+Serve mode is launched by wscript with nothing redirected, so until now a
+failure inside the running agent left no trace of any kind. Added an agent.log
+alongside the executable, bounded at 256KB. Without it none of the above would
+have been findable: every symptom in this change was a success return value.
+
+Added `cursor` and `keystate` commands, both answered from session 1. The Mac
+needs cursor position to detect the return crossing, and keystate exists because
+a KVM strands modifiers when control changes hands mid-chord.
+
+Made the agent DPI-aware. It had been reporting the desktop as 2560x1440 while
+it is 3840x2160 at 150%, so absolute coordinates would have landed two thirds of
+the way to where they were aimed, on scaled displays only.
+
+VERIFIED ON RIGEL
+
+Absolute positioning lands within 3px, exact at the origin; keyboard toggles
+Caps Lock; buttons and wheel are accepted. Residual x error is bounded and does
+not accumulate.
+
+KNOWN GAPS
+
+  * The input pipe is reachable by any process running as the console user,
+    including medium-integrity ones, which is a UIPI bypass for that account.
+    Wants a mandatory-label SACL or a client integrity check on connect.
+  * Absolute x lands within 3px rather than exactly; y is exact.
+  * Nothing sends events yet. The Mac side is next.
+
 ## 0.1.5 — 2026-08-28
 
 **Delete run-agent.ps1, closing ZBZ-S004**
