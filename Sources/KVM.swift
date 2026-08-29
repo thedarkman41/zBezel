@@ -129,12 +129,32 @@ final class KVMTransport {
         // Drain both so a full pipe cannot block the far side, and keep the
         // last stderr line as the reason if the channel dies.
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
-            guard text.contains("\"kvm\":\"ready\"") else { return }
             guard let self else { return }
-            self.readyLock.lock()
-            self.readyFlag = true
-            self.readyLock.unlock()
+            let chunk = String(decoding: handle.availableData, as: UTF8.self)
+            guard !chunk.isEmpty else { return }
+
+            // Line-buffered: the far side now sends clipboard payloads back
+            // this way as well as the ready handshake, and a base64 image
+            // arrives in several reads. Only this handler touches the buffer.
+            self.stdoutBuffer += chunk
+            if self.stdoutBuffer.utf8.count > 8 * 1_048_576 {
+                // Something is sending unbounded garbage with no newline in it.
+                KVMLog.write("transport: discarding an oversized unterminated reply")
+                self.stdoutBuffer = ""
+                return
+            }
+            while let newline = self.stdoutBuffer.firstIndex(of: "\n") {
+                let line = String(self.stdoutBuffer[..<newline])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                self.stdoutBuffer.removeSubrange(...newline)
+                if line.contains("\"kvm\":\"ready\"") {
+                    self.readyLock.lock()
+                    self.readyFlag = true
+                    self.readyLock.unlock()
+                } else if !line.isEmpty {
+                    self.onLine?(line)
+                }
+            }
         }
         stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let text = String(decoding: handle.availableData, as: UTF8.self)
@@ -144,6 +164,10 @@ final class KVMTransport {
     }
 
     private var sentCount = 0
+    private var stdoutBuffer = ""
+
+    /// A complete line received from the far side, other than the handshake.
+    var onLine: ((String) -> Void)?
 
     func send(_ line: String) {
         queue.async { [weak self] in
@@ -191,6 +215,7 @@ final class KVMController {
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
     private let transport = KVMTransport()
+    private let clipboard = ClipboardBridge()
 
     /// Where the pointer is on the remote desktop, in its pixels. Tracked here
     /// because the remote is not telling us — we are telling it.
@@ -321,7 +346,23 @@ final class KVMController {
                  + "Removing zBezel from the Accessibility list and re-adding it usually clears this."
         }
 
+        // Clipboard sync runs whenever the KVM is armed, not only while the PC
+        // has control: the whole point is to copy here, cross over, and paste
+        // there — by which time control has already changed hands.
+        clipboard.send = { [weak self] line in self?.transport.send(line) }
+        transport.onLine = { [weak self] line in
+            guard line.hasPrefix("C ") else { return }
+            let parts = line.split(separator: " ", maxSplits: 2).map(String.init)
+            guard parts.count == 3 else { return }
+            // AppKit's pasteboard is main-thread work; this arrives on the
+            // pipe-reading queue.
+            DispatchQueue.main.async {
+                self?.clipboard.apply(format: parts[1], base64: parts[2])
+            }
+        }
+
         transport.connect(host: host, exePath: exePath)
+        clipboard.start()
         isEnabled = true
         side = .here
         status = "armed — pointer at the right edge crosses to \(host)"
@@ -333,6 +374,7 @@ final class KVMController {
         guard isEnabled else { return }
         KVMLog.write("disable")
         if side == .there { handBack() }
+        clipboard.stop()
         removeTap()
         transport.disconnect()
         isEnabled = false

@@ -258,6 +258,7 @@ internal static class BezelAgent
             case "probe":  CmdProbe(targets, args);  return true;
             case "cursor":   CmdCursor();            return true;
             case "keystate": CmdKeyState();          return true;
+            case "clip":     CmdClip();              return true;
             default:       return false;
         }
     }
@@ -337,10 +338,35 @@ internal static class BezelAgent
                 // better than growing without limit on a machine nobody watches.
                 var info = new System.IO.FileInfo(path);
                 if (info.Exists && info.Length > 256 * 1024) info.Delete();
-                System.IO.File.AppendAllText(path,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff",
-                                          CultureInfo.InvariantCulture)
-                    + "  " + message + Environment.NewLine);
+
+                // TWO processes write here — the session-1 service and the
+                // session-0 relay — and File.AppendAllText opens for exclusive
+                // write, so simultaneous writes throw a sharing violation that
+                // the catch below would swallow. Lines were being lost exactly
+                // when both ends were busy, which is exactly when the log is
+                // being read. Share the handle and retry briefly instead.
+                string stamped = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff",
+                                                       CultureInfo.InvariantCulture)
+                                 + "  " + message + Environment.NewLine;
+                byte[] bytes = Encoding.UTF8.GetBytes(stamped);
+                for (int attempt = 0; attempt < 12; attempt++)
+                {
+                    try
+                    {
+                        using (var file = new System.IO.FileStream(
+                                   path, System.IO.FileMode.Append,
+                                   System.IO.FileAccess.Write,
+                                   System.IO.FileShare.ReadWrite))
+                        {
+                            file.Write(bytes, 0, bytes.Length);
+                        }
+                        break;
+                    }
+                    catch (System.IO.IOException)
+                    {
+                        System.Threading.Thread.Sleep(15);   // the other process has it
+                    }
+                }
             }
         }
         catch (Exception)
@@ -652,6 +678,7 @@ internal static class BezelAgent
     // the kernel before a byte is read.
 
     private const string InputPipeName = "BezelAgentInput";
+    private const string BackPipeName  = "BezelAgentBack";
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int handle);
@@ -1098,6 +1125,191 @@ internal static class BezelAgent
         }
     }
 
+    // ---- Clipboard ----------------------------------------------------
+    //
+    // Copy on one machine, paste on the other.
+    //
+    // This lives in the session-1 service and not in the relay, because the
+    // Windows clipboard belongs to a session: the relay runs in session 0 and
+    // would be reading and writing a clipboard nobody can see.
+    //
+    // It also needs an STA thread. The clipboard is an OLE surface and the
+    // managed wrappers refuse outright from an MTA thread, so one thread owns
+    // every clipboard operation and everything else queues work onto it.
+    //
+    // Change detection is GetClipboardSequenceNumber, polled. The alternative,
+    // AddClipboardFormatListener, needs a window and a message pump, which is a
+    // lot of machinery to add to a console service for the same answer.
+
+    private const int MaxClipboard = 1048576;
+
+    private static readonly object ClipboardLock = new object();
+
+    /// The raw pipe stream, NOT a StreamWriter.
+    ///
+    /// Setting StreamWriter.AutoFlush flushes immediately, and on the SERVER end
+    /// of a named pipe a flush is FlushFileBuffers, which blocks until the
+    /// client has consumed everything in the buffer. Wrapping this end in an
+    /// auto-flushing writer therefore wedged the server thread the moment a
+    /// client connected — before it reached its own read loop — so no event or
+    /// clipboard payload was ever read again. The client end does not have that
+    /// behaviour, which is why the pointer stream never showed it.
+    ///
+    /// Byte-mode pipe writes go out as they are made, so nothing needs flushing.
+    private static System.IO.Stream pipeBack;
+    private static uint lastClipboardSequence;
+
+    /// The payload most recently pushed in from the Mac. Compared against what
+    /// is read back out, because setting the clipboard bumps the sequence
+    /// number exactly as a real copy does — without this the two machines
+    /// return the same item to each other indefinitely.
+    private static string lastAppliedPayload;
+
+    private static readonly System.Collections.Concurrent.BlockingCollection<Action> ClipboardWork
+        = new System.Collections.Concurrent.BlockingCollection<Action>();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetClipboardSequenceNumber();
+
+    private static void SendBack(string line)
+    {
+        lock (ClipboardLock)
+        {
+            if (pipeBack == null) return;
+            try
+            {
+                byte[] bytes = Encoding.UTF8.GetBytes(line + "\n");
+                pipeBack.Write(bytes, 0, bytes.Length);
+            }
+            catch (Exception e) { Log("clipboard: could not send back: " + e.Message); }
+        }
+    }
+
+    private static void ClipboardLoop()
+    {
+        lastClipboardSequence = GetClipboardSequenceNumber();
+        Log("clipboard: watching");
+        while (true)
+        {
+            Action work;
+            // Queued work first and immediately; polling only when idle, so an
+            // incoming paste does not wait out the poll interval.
+            if (ClipboardWork.TryTake(out work, 400))
+            {
+                try { work(); }
+                catch (Exception e) { Log("clipboard: apply failed: " + e.Message); }
+                continue;
+            }
+            uint sequence = GetClipboardSequenceNumber();
+            if (sequence == lastClipboardSequence) continue;
+            lastClipboardSequence = sequence;
+            try { CaptureClipboard(); }
+            catch (Exception e) { Log("clipboard: capture failed: " + e.Message); }
+        }
+    }
+
+    private static void CaptureClipboard()
+    {
+        string format = null;
+        byte[] payload = null;
+
+        if (System.Windows.Forms.Clipboard.ContainsImage())
+        {
+            using (var image = System.Windows.Forms.Clipboard.GetImage())
+            {
+                if (image == null) return;
+                using (var buffer = new System.IO.MemoryStream())
+                {
+                    image.Save(buffer, System.Drawing.Imaging.ImageFormat.Png);
+                    format = "png";
+                    payload = buffer.ToArray();
+                }
+            }
+        }
+        else if (System.Windows.Forms.Clipboard.ContainsText(System.Windows.Forms.TextDataFormat.Rtf))
+        {
+            format = "rtf";
+            payload = Encoding.UTF8.GetBytes(
+                System.Windows.Forms.Clipboard.GetText(System.Windows.Forms.TextDataFormat.Rtf));
+        }
+        else if (System.Windows.Forms.Clipboard.ContainsText())
+        {
+            format = "text";
+            payload = Encoding.UTF8.GetBytes(System.Windows.Forms.Clipboard.GetText());
+        }
+
+        if (format == null || payload == null || payload.Length == 0) return;
+        if (payload.Length > MaxClipboard)
+        {
+            Log("clipboard: " + format + " of " + payload.Length + " bytes is too large to send");
+            return;
+        }
+
+        string encoded = Convert.ToBase64String(payload);
+        if (encoded == lastAppliedPayload) return;      // this is what the Mac just sent
+        SendBack("C " + format + " " + encoded);
+        Log("clipboard: sent " + format + ", " + payload.Length + " bytes");
+    }
+
+    /// Report what is on the clipboard of the interactive session.
+    ///
+    /// Needed because SSH lands in session 0, which has a clipboard of its own
+    /// that nothing ever writes to — reading it there would answer confidently
+    /// about the wrong thing.
+    private static int CmdClip()
+    {
+        string result = null;
+        var done = new System.Threading.ManualResetEventSlim(false);
+        ClipboardWork.Add(() =>
+        {
+            try
+            {
+                if (System.Windows.Forms.Clipboard.ContainsImage()) result = "<image>";
+                else if (System.Windows.Forms.Clipboard.ContainsText()) result = System.Windows.Forms.Clipboard.GetText();
+                else result = "";
+            }
+            catch (Exception e) { result = "<error: " + e.Message + ">"; }
+            done.Set();
+        });
+        if (!done.Wait(3000)) { Fail("the clipboard thread did not answer"); return 1; }
+        Console.WriteLine("{\"ok\":true,\"text\":\"" + Esc(result) + "\"}");
+        return 0;
+    }
+
+    private static void ApplyClipboard(string format, string encoded)
+    {
+        byte[] data;
+        try { data = Convert.FromBase64String(encoded); }
+        catch (FormatException e) { Log("clipboard: undecodable payload: " + e.Message); return; }
+        if (data.Length == 0) return;
+
+        lastAppliedPayload = encoded;
+        ClipboardWork.Add(() =>
+        {
+            switch (format)
+            {
+                case "text":
+                    System.Windows.Forms.Clipboard.SetText(Encoding.UTF8.GetString(data));
+                    break;
+                case "rtf":
+                    System.Windows.Forms.Clipboard.SetText(Encoding.UTF8.GetString(data),
+                        System.Windows.Forms.TextDataFormat.Rtf);
+                    break;
+                case "png":
+                    using (var buffer = new System.IO.MemoryStream(data))
+                        System.Windows.Forms.Clipboard.SetImage(System.Drawing.Image.FromStream(buffer));
+                    break;
+                default:
+                    Log("clipboard: ignoring unknown format " + format);
+                    return;
+            }
+            // Setting the clipboard bumps the sequence number; adopt it so the
+            // poll does not read this straight back out and return it.
+            lastClipboardSequence = GetClipboardSequenceNumber();
+            Log("clipboard: received " + format + ", " + data.Length + " bytes");
+        });
+    }
+
     /// A DACL with a single Allow entry, naming the account this service runs
     /// as. Everyone else is refused by omission, which is preferable to adding
     /// Deny entries: there is no ordering to reason about and nothing inherited.
@@ -1109,6 +1321,65 @@ internal static class BezelAgent
             PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
             AccessControlType.Allow));
         return security;
+    }
+
+    /// The return path: PC -> Mac, for clipboard payloads.
+    ///
+    /// A SECOND one-directional pipe rather than making the input pipe duplex.
+    /// Duplex looked tidier and cost a long evening: with both directions on one
+    /// handle the server stopped receiving anything at all the moment a client
+    /// connected, while the client happily went on writing. Two pipes, each
+    /// carrying one direction, restores the input path to exactly the code that
+    /// was already proven and makes the return path just as dull.
+    private static void BackPipeLoop()
+    {
+        while (true)
+        {
+            try
+            {
+                using (var pipe = new NamedPipeServerStream(
+                           BackPipeName, PipeDirection.Out, 1,
+                           PipeTransmissionMode.Byte, PipeOptions.None,
+                           4096, 4096, InputPipeSecurity()))
+                {
+                    pipe.WaitForConnection();
+                    Log("back pipe: client connected");
+                    lock (ClipboardLock) { pipeBack = pipe; }
+
+                    // Hold the connection open until the client goes away, and
+                    // detect that by writing to it.
+                    //
+                    // IsConnected is not enough: on a server stream it stays
+                    // true after a client dies without any I/O, so a single
+                    // abandoned relay held this pipe's only instance forever and
+                    // every later relay timed out waiting for it. A periodic
+                    // write throws the moment the far end is gone. The Mac
+                    // ignores any line that is not a clipboard payload, so the
+                    // heartbeat costs nothing there.
+                    byte[] beat = Encoding.UTF8.GetBytes("P\n");
+                    while (true)
+                    {
+                        System.Threading.Thread.Sleep(2000);
+                        bool alive = true;
+                        lock (ClipboardLock)
+                        {
+                            try { pipe.Write(beat, 0, beat.Length); }
+                            catch (Exception) { alive = false; }
+                        }
+                        if (!alive) break;
+                    }
+
+                    lock (ClipboardLock) { pipeBack = null; }
+                    Log("back pipe: client disconnected");
+                }
+            }
+            catch (Exception e)
+            {
+                lock (ClipboardLock) { pipeBack = null; }
+                Log("back pipe: " + e.Message);
+                System.Threading.Thread.Sleep(500);
+            }
+        }
     }
 
     private static void InputPipeLoop()
@@ -1132,15 +1403,30 @@ internal static class BezelAgent
                     // first lock, so re-attach at every crossing.
                     AttachToInputDesktop();
                     Log("input pipe: client connected");
+
                     using (var reader = new System.IO.StreamReader(pipe, new UTF8Encoding(false)))
                     {
                         string line;
+                        int received = 0;
                         while ((line = reader.ReadLine()) != null)
                         {
-                            try { Inject(line); }
+                            received++;
+                            if (received <= 4)
+                                Log("server: line[" + received + "] "
+                                    + (line.Length > 40 ? line.Substring(0, 40) + "..." : line));
+                            try
+                            {
+                                if (line.StartsWith("C ", StringComparison.Ordinal))
+                                {
+                                    var parts = line.Split(new[] { ' ' }, 3);
+                                    if (parts.Length == 3) ApplyClipboard(parts[1], parts[2]);
+                                }
+                                else Inject(line);
+                            }
                             catch (Exception e) { Log("bad event \"" + line + "\": " + e.Message); }
                         }
                     }
+
                     Log("input pipe: client disconnected");
                 }
             }
@@ -1193,6 +1479,33 @@ internal static class BezelAgent
             using (var pipe = new NamedPipeClientStream(".", InputPipeName, PipeDirection.Out))
             {
                 pipe.Connect(5000);
+
+                // Anything the service sends back — clipboard payloads — arrives
+                // on its own pipe and goes out on stdout, which is the SSH
+                // channel the Mac is already reading for the ready handshake.
+                var returnPump = new System.Threading.Thread(() =>
+                {
+                    try
+                    {
+                        using (var backPipe = new NamedPipeClientStream(
+                                   ".", BackPipeName, PipeDirection.In))
+                        {
+                            backPipe.Connect(5000);
+                            var fromService = new System.IO.StreamReader(
+                                backPipe, new UTF8Encoding(false));
+                            string back;
+                            while ((back = fromService.ReadLine()) != null)
+                            {
+                                Console.WriteLine(back);
+                                Console.Out.Flush();
+                            }
+                        }
+                    }
+                    catch (Exception e) { Log("relay: return path ended: " + e.Message); }
+                });
+                returnPump.IsBackground = true;
+                returnPump.Start();
+
                 using (var writer = new System.IO.StreamWriter(pipe, new UTF8Encoding(false)))
                 {
                     writer.AutoFlush = true;      // every event, immediately
@@ -1250,6 +1563,17 @@ internal static class BezelAgent
         var inputThread = new System.Threading.Thread(InputPipeLoop);
         inputThread.IsBackground = true;
         inputThread.Start();
+
+        // STA, because the clipboard is an OLE surface and the managed wrappers
+        // refuse from an MTA thread.
+        var backThread = new System.Threading.Thread(BackPipeLoop);
+        backThread.IsBackground = true;
+        backThread.Start();
+
+        var clipboardThread = new System.Threading.Thread(ClipboardLoop);
+        clipboardThread.SetApartmentState(System.Threading.ApartmentState.STA);
+        clipboardThread.IsBackground = true;
+        clipboardThread.Start();
 
         var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
         listener.Start();
