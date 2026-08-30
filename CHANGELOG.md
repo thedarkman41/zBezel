@@ -2,6 +2,51 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.29 — 2026-08-29
+
+**Picture in Picture, mapped and drawn instead of listed**
+
+All four settings are now controllable, and the MultiScreen tab shows them as
+diagrams rather than radio buttons.
+
+WHAT THE PANEL ACTUALLY EXPOSES
+
+  0xE1 sub 0x11   on/off        0 off, 1 on
+  0xE1 sub 0x12   mode          0 picture-in-picture, 1+ side by side
+  0xE1 sub 0x13   size          0-3
+  0xE1 sub 0x14   placement     0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left
+
+SIDE BY SIDE EXISTS, AND YESTERDAY'S CONCLUSION WAS WRONG
+
+It was recorded as settled that this panel has no side-by-side mode. That was a
+bad inference from good data. Selector 0x11 was probed with every value from 2 to
+17, all refused, and the conclusion drawn was that the MODE did not exist — when
+what had actually been established was only that the ENABLE takes two values.
+Side by side is a different selector entirely, and the test could never have
+found it. Testing one axis exhaustively says nothing about a second axis.
+
+Placement was not findable by sampling either: 0x12 and 0x14 essentially never
+appear in the monitor's selector rotation, so no amount of watching would have
+surfaced them. Eight batches across four position changes recorded no movement at
+all. They were found by writing candidate selectors and watching the screen —
+0x14 turned up next to the three already known.
+
+The same rotation is why these are held locally rather than read back. The panel
+obeys the writes and simply will not report them, so the UI shows what was last
+sent and never claims to have re-read it.
+
+THE DIAGRAMS
+
+Placement is four corners drawn as four corners; click one to fill it. Size is
+four nested boxes growing from the bottom-left, clicked to cycle, each step
+shaded a little stronger so it reads as a quantity rather than a number. Side by
+side is two centred panes in two shades.
+
+Every outline is 16:9, and so is every inset, so the control is the shape of what
+the panel will do. These settings are spatial, and four radio buttons reading
+"upper left, upper right, lower left, lower right" ask the reader to hold a
+picture in their head that the control could just show them.
+
 ## 0.1.28 — 2026-08-29
 
 **Advanced tab: cut its height roughly in half**

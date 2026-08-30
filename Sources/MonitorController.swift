@@ -104,6 +104,10 @@ final class MonitorController: ObservableObject {
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         vendorMap = VendorMap.load()
+        pipOn         = defaults.bool(forKey: "pipOn")
+        pipSideBySide = defaults.bool(forKey: "pipSideBySide")
+        pipSize       = defaults.object(forKey: "pipSize") as? Int ?? 0
+        pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
 
         // The tap runs on the main run loop, but the callback reaches us from a
         // C function pointer with no isolation the compiler can see, so hop
@@ -144,6 +148,52 @@ final class MonitorController: ObservableObject {
         var updated = vendorMap
         updated.seedKnownIfMissing()
         if updated != vendorMap { vendorMap = updated }
+    }
+
+    // MARK: Picture in Picture
+    //
+    // All four settings live behind 0xE1's sub-addressing: 0x11 on/off, 0x12
+    // mode, 0x13 size, 0x14 placement.
+    //
+    // Held locally rather than read back, and that is not laziness. 0x12 and
+    // 0x14 essentially never surface in the monitor's selector rotation — 300
+    // samples returned neither — so a read cannot tell us where they stand. The
+    // panel obeys the writes; it simply will not report them. Optimistic state
+    // plus persistence is the honest answer, and it is why the UI never claims
+    // to have re-read these.
+
+    @Published var pipOn: Bool { didSet { UserDefaults.standard.set(pipOn, forKey: "pipOn") } }
+    @Published var pipSideBySide: Bool { didSet { UserDefaults.standard.set(pipSideBySide, forKey: "pipSideBySide") } }
+    @Published var pipSize: Int { didSet { UserDefaults.standard.set(pipSize, forKey: "pipSize") } }
+    @Published var pipPlacement: Int { didSet { UserDefaults.standard.set(pipPlacement, forKey: "pipPlacement") } }
+
+    private func writeSub(_ selector: UInt8, _ value: Int) async {
+        await set(code: 0xE1, value: UInt16(Int(selector) << 8 | (value & 0xFF)))
+    }
+
+    func applyPiPOn(_ on: Bool) async {
+        pipOn = on
+        await writeSub(0x11, on ? 1 : 0)
+    }
+
+    func applyPiPSideBySide(_ side: Bool) async {
+        pipSideBySide = side
+        if !pipOn { await applyPiPOn(true) }
+        await writeSub(0x12, side ? 1 : 0)
+    }
+
+    /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.
+    func applyPiPPlacement(_ corner: Int) async {
+        pipPlacement = corner
+        if !pipOn { await applyPiPOn(true) }
+        if pipSideBySide { await applyPiPSideBySide(false) }
+        await writeSub(0x14, corner)
+    }
+
+    func applyPiPSize(_ size: Int) async {
+        pipSize = size
+        if !pipOn { await applyPiPOn(true) }
+        await writeSub(0x13, size)
     }
 
     /// Tell the KVM which panel is the doorway and where to land coming back.

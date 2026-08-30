@@ -508,11 +508,59 @@ struct ViewTab: View {
 struct MultiScreenTab: View {
     @ObservedObject var controller: MonitorController
 
+    /// A diagram with its name under it.
+    private func diagram<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 5) {
+            content()
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textSecond)
+        }
+    }
+
     var body: some View {
         CardGrid {
             Card(title: "Picture in Picture", systemImage: "rectangle.inset.topright.filled",
-                 help: "PiP/PbP is not covered by the public MCCS tables; HP implements it with manufacturer-specific codes.") {
-                VendorGroup(controls: [.pictureInPicture], controller: controller)
+                 help: """
+                 None of this is in the public MCCS tables. HP puts all four settings behind \
+                 0xE1's sub-addressing — 0x11 on/off, 0x12 mode, 0x13 size, 0x14 placement — \
+                 found by experiment. The panel obeys these writes but will not report them \
+                 back, so what is shown here is what was last sent, not a reading.
+                 """) {
+                Toggle(isOn: Binding(
+                    get: { controller.pipOn },
+                    set: { on in Task<Void, Never> { await controller.applyPiPOn(on) } })) {
+                    Text("Picture in Picture")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+                .toggleStyle(StatusToggleStyle())
+
+                HStack(alignment: .top, spacing: 14) {
+                    diagram("Placement") {
+                        PiPPlacementPicker(
+                            placement: Binding(get: { controller.pipPlacement }, set: { _ in }),
+                            enabled: controller.pipOn && !controller.pipSideBySide) { corner in
+                            Task<Void, Never> { await controller.applyPiPPlacement(corner) }
+                        }
+                    }
+                    diagram("Size") {
+                        PiPSizePicker(
+                            size: Binding(get: { controller.pipSize }, set: { _ in }),
+                            enabled: controller.pipOn && !controller.pipSideBySide) { next in
+                            Task<Void, Never> { await controller.applyPiPSize(next) }
+                        }
+                    }
+                    diagram("Side by side") {
+                        PiPSideBySidePicker(
+                            active: controller.pipSideBySide,
+                            enabled: controller.pipOn) {
+                            Task<Void, Never> {
+                                await controller.applyPiPSideBySide(!controller.pipSideBySide)
+                            }
+                        }
+                    }
+                }
             }
 
             Card(title: "Displays macOS Can See", systemImage: "rectangle.on.rectangle",
