@@ -121,42 +121,51 @@ struct PiPSizePicker: View {
 
 // MARK: - Side by side
 
-/// Two panes, centred, in two shades — one image each.
+/// Two panes, in the order the panel actually puts them.
+///
+/// The PC is on the LEFT and the Mac on the RIGHT. That is not a guess or a
+/// convention — it is what the monitor does, checked against a photograph of the
+/// panel in side-by-side mode. It was the other way round here at first, which
+/// made the diagram a mirror of the thing it was describing.
 struct PiPSideBySidePicker: View {
     var active: Bool
     var enabled: Bool
     var onPick: () -> Void
-    /// Optional live pictures. Left is this Mac, right is the PC.
-    var left: NSImage?
-    var right: NSImage?
+    /// This Mac's display.
+    var mac: NSImage?
+    /// The PC's display.
+    var pc: NSImage?
 
     var body: some View {
         ScreenOutline(active: active && enabled) {
-            GeometryReader { geo in
-                HStack(spacing: 2) {
-                    pane(image: left, shade: 0.55, size: geo.size)
-                    pane(image: right, shade: 0.30, size: geo.size)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture { if enabled { onPick() } }
+            HStack(spacing: 1) {
+                pane(image: pc, shade: 0.50)      // left
+                pane(image: mac, shade: 0.28)     // right
             }
+            .contentShape(Rectangle())
+            .onTapGesture { if enabled { onPick() } }
         }
         .opacity(enabled ? 1 : 0.4)
     }
 
-    private func pane(image: NSImage?, shade: Double, size: CGSize) -> some View {
+    private func pane(image: NSImage?, shade: Double) -> some View {
         ZStack {
+            Rectangle().fill(Color.black)
             if active, let image {
+                // .fit, not .fill. The panel squeezes each whole desktop into
+                // half the width and letterboxes what is left over; filling and
+                // cropping would show a magnified corner of one machine and
+                // claim it was the layout.
                 Image(nsImage: image)
                     .resizable()
-                    .aspectRatio(contentMode: .fill)
-                    .clipped()
+                    .aspectRatio(contentMode: .fit)
             } else {
                 Rectangle()
                     .fill(active ? Theme.accent.opacity(shade) : Color.clear)
                     .overlay(Rectangle().stroke(active ? Color.clear : Theme.textDim, lineWidth: 1))
             }
         }
-        .frame(width: (size.width - 2) / 2, height: size.height)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
     }
 }

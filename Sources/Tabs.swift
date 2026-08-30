@@ -574,8 +574,8 @@ struct MultiScreenTab: View {
                                     await controller.applyPiPSideBySide(!controller.pipSideBySide)
                                 }
                             },
-                            left: controller.macSnapshot,
-                            right: controller.pcSnapshot)
+                            mac: controller.macSnapshot,
+                            pc: controller.pcSnapshot)
                     }
                 }
 

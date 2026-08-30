@@ -2,6 +2,25 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.31 — 2026-08-29
+
+**Side-by-side diagram: correct the order, and fit instead of crop**
+
+Two faults, both visible the moment it was compared against a photograph of the
+panel actually in side-by-side mode.
+
+The panes were the wrong way round. The monitor puts the PC on the LEFT and this
+Mac on the RIGHT; the diagram had it reversed, so it was a mirror of the thing it
+was describing — the one job a diagram has.
+
+And each pane was filling and cropping rather than fitting. The panel squeezes a
+whole desktop into half the width and letterboxes the remainder; cropping instead
+showed a magnified corner of one machine and presented it as the layout. They now
+fit within a black pane, which is what the panel does.
+
+Neither was findable from the code. The order is a fact about the hardware, and
+the only way to know it was to look at the screen.
+
 ## 0.1.30 — 2026-08-29
 
 **Live desktops in the side-by-side diagram**
