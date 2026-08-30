@@ -513,6 +513,7 @@ struct MultiScreenTab: View {
     /// or wakes the PC while nobody is looking at the diagram.
     private func liveSnapshots() async {
         while !Task.isCancelled {
+            await controller.syncPiPFromPanel()
             await controller.refreshSnapshots()
             try? await Task.sleep(nanoseconds: 8_000_000_000)
         }
@@ -554,29 +555,37 @@ struct MultiScreenTab: View {
                     diagram("Placement") {
                         PiPPlacementPicker(
                             placement: Binding(get: { controller.pipPlacement }, set: { _ in }),
-                            enabled: controller.pipOn && !controller.pipSideBySide) { corner in
+                            enabled: controller.pipOn && controller.pipSideBySide != true) { corner in
                             Task<Void, Never> { await controller.applyPiPPlacement(corner) }
                         }
                     }
                     diagram("Size") {
                         PiPSizePicker(
                             size: Binding(get: { controller.pipSize }, set: { _ in }),
-                            enabled: controller.pipOn && !controller.pipSideBySide) { next in
+                            enabled: controller.pipOn && controller.pipSideBySide != true) { next in
                             Task<Void, Never> { await controller.applyPiPSize(next) }
                         }
                     }
                     diagram("Side by side") {
                         PiPSideBySidePicker(
-                            active: controller.pipSideBySide,
+                            active: controller.pipSideBySide == true,
                             enabled: controller.pipOn,
                             onPick: {
                                 Task<Void, Never> {
-                                    await controller.applyPiPSideBySide(!controller.pipSideBySide)
+                                    await controller.applyPiPSideBySide(controller.pipSideBySide != true)
                                 }
                             },
                             mac: controller.macSnapshot,
                             pc: controller.pcSnapshot)
                     }
+                }
+
+                if controller.pipOn && controller.pipPlacement == nil {
+                    Text("The panel does not report placement or mode, so those two are blank "
+                         + "until set here. On/off and size are read from the monitor.")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(Theme.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if controller.needsScreenRecording {

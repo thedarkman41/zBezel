@@ -36,7 +36,9 @@ struct PiPPlacementPicker: View {
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left — the panel's own
     /// numbering, which is not in any sensible order and is therefore mapped
     /// here rather than assumed anywhere else.
-    @Binding var placement: Int
+    /// nil when the panel's placement is not known — it cannot be read back,
+    /// so nothing is filled in until this app has set it.
+    @Binding var placement: Int?
     var enabled: Bool
     var onPick: (Int) -> Void
 

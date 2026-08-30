@@ -104,10 +104,7 @@ final class MonitorController: ObservableObject {
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         vendorMap = VendorMap.load()
-        pipOn         = defaults.bool(forKey: "pipOn")
-        pipSideBySide = defaults.bool(forKey: "pipSideBySide")
-        pipSize       = defaults.object(forKey: "pipSize") as? Int ?? 0
-        pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
+
 
         // The tap runs on the main run loop, but the callback reaches us from a
         // C function pointer with no isolation the compiler can see, so hop
@@ -163,10 +160,19 @@ final class MonitorController: ObservableObject {
     // plus persistence is the honest answer, and it is why the UI never claims
     // to have re-read these.
 
-    @Published var pipOn: Bool { didSet { UserDefaults.standard.set(pipOn, forKey: "pipOn") } }
-    @Published var pipSideBySide: Bool { didSet { UserDefaults.standard.set(pipSideBySide, forKey: "pipSideBySide") } }
-    @Published var pipSize: Int { didSet { UserDefaults.standard.set(pipSize, forKey: "pipSize") } }
-    @Published var pipPlacement: Int { didSet { UserDefaults.standard.set(pipPlacement, forKey: "pipPlacement") } }
+    /// Read back from the panel: these two DO surface in the selector rotation.
+    @Published var pipOn = false
+    @Published var pipSize = 0
+
+    /// NOT readable, and therefore not known until this app sets them.
+    ///
+    /// 0x12 and 0x14 never appear in the monitor's rotation — a thousand
+    /// consecutive reads returned neither. Storing a last-known value and
+    /// drawing it as fact is what made the diagram disagree with the screen:
+    /// it showed a remembered default while the panel sat somewhere else
+    /// entirely. nil means unknown, and the UI says so rather than guessing.
+    @Published var pipPlacement: Int?
+    @Published var pipSideBySide: Bool?
 
     private func writeSub(_ selector: UInt8, _ value: Int) async {
         await set(code: 0xE1, value: UInt16(Int(selector) << 8 | (value & 0xFF)))
@@ -183,11 +189,24 @@ final class MonitorController: ObservableObject {
         await writeSub(0x12, side ? 1 : 0)
     }
 
+    /// Take on/off and size from the panel itself.
+    ///
+    /// Only these two: mode and placement cannot be read at all, so they stay
+    /// unknown until set. Sampled rather than read once, because a single read
+    /// of 0xE1 returns whichever selector the rotation lands on.
+    func syncPiPFromPanel() async {
+        guard case .proxy(_, let index, _) = transport else { return }
+        guard let map = try? await agent.readSubSelectorMap(
+            monitor: index, code: 0xE1, samples: 200) else { return }
+        if let raw = map[0x11] { pipOn = (raw & 0xFF) != 0 }
+        if let raw = map[0x13] { pipSize = Int(raw & 0xFF) }
+    }
+
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.
     func applyPiPPlacement(_ corner: Int) async {
         pipPlacement = corner
         if !pipOn { await applyPiPOn(true) }
-        if pipSideBySide { await applyPiPSideBySide(false) }
+        if pipSideBySide == true { await applyPiPSideBySide(false) }
         await writeSub(0x14, corner)
     }
 

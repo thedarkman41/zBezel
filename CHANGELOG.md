@@ -2,6 +2,31 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.32 — 2026-08-29
+
+**Stop the PiP diagram claiming things it cannot know**
+
+The diagram disagreed with the panel: it showed a large inset at bottom-right
+while the monitor had a small one at top-left.
+
+All four settings were being held locally and drawn as fact. That is only ever
+what this app last wrote, so on launch the diagram showed stored defaults while
+the panel sat wherever it actually was. A control that reports a remembered
+default as the current state is worse than one that admits it does not know,
+because there is no way to tell the two apart by looking.
+
+Two of the four can be read after all. 0x11 and 0x13 do surface in the selector
+rotation, so on/off and size are now sampled from the monitor and shown truthfully
+— the read said size 0, smallest, which matched the panel.
+
+The other two cannot. A thousand consecutive reads of 0xE1 returned 0x12 and 0x14
+not once, so mode and placement are genuinely unreadable. They are now unknown
+until this app sets them: nothing is filled in, and a note says why. Once set in
+a session they are known, because we did it.
+
+That is the honest shape of this hardware. The panel takes these writes and obeys
+them, and declines to say where it stands.
+
 ## 0.1.31 — 2026-08-29
 
 **Side-by-side diagram: correct the order, and fit instead of crop**
