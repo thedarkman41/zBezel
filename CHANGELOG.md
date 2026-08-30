@@ -2,6 +2,40 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.35 — 2026-08-29
+
+**PiP: one write per change, not three with read-backs**
+
+A corner took ten seconds. Measured through the proxy, it was three write-and-
+read-back exchanges at about 3.2 seconds each.
+
+THE READ-BACK
+
+The generic set() re-reads every volatile code after each write, costing roughly
+two extra seconds — 3.22s against 1.29s for a bare write. That is a fair trade
+for brightness, where what is on screen should follow the panel. It is pure waste
+for 0xE1: a read of that code returns whichever sub-setting the panel feels like
+naming, so it can neither confirm what was written nor refresh anything that
+changed. These writes now go bare.
+
+THE TWO WRITES NOBODY ASKED FOR
+
+Setting a corner first wrote PiP on, then wrote the mode, then wrote the corner.
+The preambles fired because pipOn defaults to false and the read almost never
+corrects it: 0x11 turns up in about one read in a hundred, so a twenty-four
+sample sync essentially never sees it. The app was switching on something already
+on, and switching off a mode already off, every single time.
+
+They are gone. Setting placement or size while PiP is off is harmless — the value
+takes effect when PiP is switched on, and that toggle is immediately above.
+
+The confirming read after a size change is gone too. 0x13's share of the rotation
+swings from 82% of a thousand reads to absent from thirty, so a check usually
+costs two seconds to learn nothing — and worse, the read it queues delays the
+next click behind it.
+
+One write. About 1.3 seconds, most of which is the panel.
+
 ## 0.1.34 — 2026-08-29
 
 **PiP: correct the corners, and stop taking ten seconds to do it**

@@ -174,9 +174,24 @@ final class MonitorController: ObservableObject {
     @Published var pipPlacement: Int?
     @Published var pipSideBySide: Bool?
 
+    /// A bare write, with no read-back of anything else.
+    ///
+    /// The generic set() re-reads every volatile code after each write, which
+    /// costs about two extra seconds. That is a fair trade for brightness, where
+    /// the values on screen should follow the panel. It is pure waste here:
+    /// 0xE1's read returns whichever sub-setting the panel feels like naming, so
+    /// the read-back cannot confirm what was just written and cannot refresh
+    /// anything that changed.
+    ///
+    /// Measured: 3.22s with the read-back, 1.29s without.
     private func writeSub(_ selector: UInt8, _ value: Int) async {
+        guard case .proxy(_, let index, _) = transport else {
+            await set(code: 0xE1, value: UInt16(Int(selector) << 8 | (value & 0xFF)))
+            return
+        }
         let started = Date()
-        await set(code: 0xE1, value: UInt16(Int(selector) << 8 | (value & 0xFF)))
+        let raw = UInt16(Int(selector) << 8 | (value & 0xFF))
+        _ = try? await agent.write(monitor: index, code: 0xE1, value: raw)
         KVMLog.write(String(format: "pip: write 0x%02X=%d took %.2fs",
                             selector, value, Date().timeIntervalSince(started)))
     }
@@ -231,9 +246,17 @@ final class MonitorController: ObservableObject {
         pipBusyControl = "placement"
         defer { pipBusyControl = nil }
 
+        // No on/off or mode write first.
+        //
+        // Those preambles tripled the cost of every corner: three writes at ~3s
+        // each is the ten seconds. They fired because pipOn defaults to false
+        // and the sync rarely corrects it — 0x11 surfaces in about one read in a
+        // hundred, so twenty-four samples almost never see it, and the app kept
+        // "helpfully" switching on something already on.
+        //
+        // Setting placement while PiP is off is harmless: it takes effect when
+        // PiP is switched on, which is the toggle right above.
         let started = Date()
-        if !pipOn { await applyPiPOn(true) }
-        if pipSideBySide == true { await applyPiPSideBySide(false) }
         await writeSub(0x14, corner)
         pipPlacement = corner
         KVMLog.write(String(format: "pip placement %d: total %.2fs",
@@ -286,26 +309,17 @@ final class MonitorController: ObservableObject {
         guard !pipBusy else { return }
         pipBusyControl = "size"
 
+        // One write, nothing else. No enable preamble and no confirming read:
+        // 0x13 appears in the rotation unreliably — 82% of a thousand reads once,
+        // absent from thirty later — so a check costs two seconds to usually
+        // learn nothing, and any read it does queue delays the NEXT click behind
+        // it.
         let started = Date()
-        pipSize = size                       // show it at once; the write follows
-        if !pipOn { await applyPiPOn(true) }
+        pipSize = size
         await writeSub(0x13, size)
-        KVMLog.write(String(format: "pip size %d: write done in %.2fs",
+        KVMLog.write(String(format: "pip size %d: total %.2fs",
                             size, Date().timeIntervalSince(started)))
-        pipBusyControl = nil                 // the control is usable again here
-
-        // Confirm afterwards, off the critical path.
-        //
-        // Blocking on the read cost 15 seconds when it sampled 200 times, and
-        // even 24 samples is two more seconds of a control that looks stuck for
-        // no benefit — the write either took or it did not, and waiting does not
-        // change which. Correct the display ONLY if the panel actually reports
-        // something different; a size it declined to mention is not a
-        // disagreement.
-        try? await Task.sleep(nanoseconds: 700_000_000)
-        if let seen = await syncPiPFromPanel(samples: 24), seen != size {
-            kvmError = "The monitor did not take PiP size \(size) — it reports \(seen)."
-        }
+        pipBusyControl = nil
     }
 
     /// Tell the KVM which panel is the doorway and where to land coming back.
