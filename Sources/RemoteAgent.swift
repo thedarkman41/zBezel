@@ -10,8 +10,11 @@ import Foundation
 /// codes — including HP's manufacturer-specific ones. BezelAgent exposes that
 /// over SSH.
 ///
-/// Calls cost roughly 0.8 s, essentially all of it PowerShell login-shell
-/// startup on the far side, so every read is batched into a single call.
+/// Commands go down ONE held-open SSH channel. Spawning a process per call cost
+/// about 0.65s of PowerShell login shell and .NET startup before any DDC work
+/// happened at all; the same command on an open channel measures 0.079s. Reads
+/// are still batched where it is natural to, but that is no longer what stands
+/// between a click and the panel moving.
 struct RemoteAgentError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -63,7 +66,10 @@ actor RemoteAgent {
 
     init(config: Config = Config()) { self.config = config }
 
-    func update(config: Config) { self.config = config }
+    func update(config: Config) {
+        if config.host != self.config.host { stopRelay() }
+        self.config = config
+    }
 
     /// Short path: a Unix socket path is capped at 104 bytes.
     private var controlPath: String {
@@ -81,8 +87,125 @@ actor RemoteAgent {
         return argument
     }
 
+    // MARK: The relay
+    //
+    // One SSH channel, held open, carrying one command per line.
+    //
+    // Spawning `ssh host "BezelAgent.exe client ..."` per call pays for a
+    // PowerShell login shell and a .NET start EVERY time, and that is nearly all
+    // of the cost: measured 0.648s per call that way against 0.079s down a
+    // channel already open — eight times faster for the identical DDC work. The
+    // agent has had a `relay` mode for this all along; nothing was using it.
+    //
+    // The actor serialises callers, so exactly one command is ever in flight.
+
+    private var relay: Process?
+    private var relayIn: FileHandle?
+    private var relayOut: FileHandle?
+    private var relayBuffer = Data()
+
+    private func startRelay() -> Bool {
+        stopRelay()
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        task.arguments = [
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=20",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=\(controlPath)",
+            "-o", "ControlPersist=600",
+            config.host, "& \"\(config.exePath)\" relay",
+        ]
+        let input = Pipe(), output = Pipe()
+        task.standardInput = input
+        task.standardOutput = output
+        task.standardError = FileHandle.nullDevice
+        do { try task.run() } catch { return false }
+
+        relay = task
+        relayIn = input.fileHandleForWriting
+        relayOut = output.fileHandleForReading
+        relayBuffer.removeAll()
+
+        // The agent announces itself; without waiting for that, the first real
+        // command would read the banner as its own reply.
+        guard let ready = readRelayLine(timeout: 20), ready.contains("\"relay\"") else {
+            stopRelay()
+            return false
+        }
+        return true
+    }
+
+    private func stopRelay() {
+        if let handle = relayIn { try? handle.write(contentsOf: Data("quit\n".utf8)) }
+        relayIn = nil
+        relayOut = nil
+        if let task = relay, task.isRunning { task.terminate() }
+        relay = nil
+        relayBuffer.removeAll()
+    }
+
+    /// One line from the relay, or nil on timeout or EOF.
+    ///
+    /// The read happens on another queue with a semaphore, because
+    /// availableData blocks with no timeout of its own — and this runs on the
+    /// actor, so a far side that never answers would wedge every other call
+    /// behind it.
+    private func readRelayLine(timeout: TimeInterval) -> String? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            if let newline = relayBuffer.firstIndex(of: 0x0A) {
+                let raw = relayBuffer[relayBuffer.startIndex..<newline]
+                relayBuffer.removeSubrange(relayBuffer.startIndex...newline)
+                let line = String(decoding: raw, as: UTF8.self)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if line.isEmpty { continue }
+                return line
+            }
+            guard let handle = relayOut, Date() < deadline else { return nil }
+
+            var chunk = Data()
+            let done = DispatchSemaphore(value: 0)
+            DispatchQueue.global(qos: .userInitiated).async {
+                chunk = handle.availableData
+                done.signal()
+            }
+            if done.wait(timeout: .now() + max(0.1, deadline.timeIntervalSinceNow)) == .timedOut {
+                return nil
+            }
+            if chunk.isEmpty { return nil }        // the channel closed
+            relayBuffer.append(chunk)
+        }
+    }
+
+    private func runViaRelay(_ safe: [String], timeout: TimeInterval) -> [String: Any]? {
+        if relay?.isRunning != true, !startRelay() { return nil }
+        guard let handle = relayIn else { return nil }
+        guard let payload = (safe.joined(separator: "\t") + "\n").data(using: .utf8) else { return nil }
+        do { try handle.write(contentsOf: payload) } catch { stopRelay(); return nil }
+
+        guard let line = readRelayLine(timeout: timeout) else { stopRelay(); return nil }
+        guard let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
+        else { return nil }
+        return json
+    }
+
     private func run(_ agentArgs: [String], timeout: TimeInterval = 30) throws -> [String: Any] {
         let safe = try agentArgs.map(sanitize)
+
+        // Try the open channel first; fall back to spawning a one-shot client if
+        // it is not there. The fallback matters: this is the path every monitor
+        // control uses, and a relay that will not start must degrade to slow
+        // rather than to broken.
+        if let json = runViaRelay(safe, timeout: timeout) {
+            if let ok = json["ok"] as? Bool, ok == false {
+                throw RemoteAgentError(message: (json["error"] as? String) ?? "agent reported failure")
+            }
+            lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
+            return json
+        }
+
         let remote = "& \"\(config.exePath)\" client " + safe.joined(separator: " ")
 
         let process = Process()
@@ -286,6 +409,7 @@ actor RemoteAgent {
 
     /// Drop the shared SSH connection, e.g. when the host setting changes.
     func disconnect() {
+        stopRelay()
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         process.arguments = ["-o", "ControlPath=\(controlPath)", "-O", "exit", config.host]

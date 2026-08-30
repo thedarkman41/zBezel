@@ -2,6 +2,36 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.36 — 2026-08-29
+
+**Use the relay: monitor control is eight times faster**
+
+Every DDC call spawned `ssh host "BezelAgent.exe client ..."`, paying for a
+PowerShell login shell and a .NET start before any DDC work happened. Measured
+against the identical command sent down a channel already open:
+
+    process per call    0.648s mean
+    held-open relay     0.079s mean     (0.53s to open, paid once)
+
+The agent has had a `relay` mode for exactly this since it was written, and
+nothing ever used it — the Mac spoke to `client` and paid the startup every time.
+It is a dead-code path that was worth eight times the throughput of the live one.
+
+The actor already serialises callers, so exactly one command is ever in flight
+and the channel needs no locking of its own.
+
+FALLBACK KEPT
+
+If the relay will not start, or the channel drops, the call falls back to
+spawning a one-shot client as before. This is the path every monitor control
+uses, and a relay that fails must degrade to slow rather than to broken. The
+channel is also torn down when the proxy host changes, so it cannot keep talking
+to the previous machine.
+
+The reply is read on a background queue with a timeout rather than blocking on
+availableData, which has none: this runs on the actor, so a far side that stops
+answering would otherwise wedge every later call behind it.
+
 ## 0.1.35 — 2026-08-29
 
 **PiP: one write per change, not three with read-backs**
