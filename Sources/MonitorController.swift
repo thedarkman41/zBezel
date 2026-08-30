@@ -175,7 +175,10 @@ final class MonitorController: ObservableObject {
     @Published var pipSideBySide: Bool?
 
     private func writeSub(_ selector: UInt8, _ value: Int) async {
+        let started = Date()
         await set(code: 0xE1, value: UInt16(Int(selector) << 8 | (value & 0xFF)))
+        KVMLog.write(String(format: "pip: write 0x%02X=%d took %.2fs",
+                            selector, value, Date().timeIntervalSince(started)))
     }
 
     func applyPiPOn(_ on: Bool) async {
@@ -184,6 +187,8 @@ final class MonitorController: ObservableObject {
     }
 
     func applyPiPSideBySide(_ side: Bool) async {
+        pipBusyControl = "mode"
+        defer { pipBusyControl = nil }
         pipSideBySide = side
         if !pipOn { await applyPiPOn(true) }
         await writeSub(0x12, side ? 1 : 0)
@@ -194,12 +199,27 @@ final class MonitorController: ObservableObject {
     /// Only these two: mode and placement cannot be read at all, so they stay
     /// unknown until set. Sampled rather than read once, because a single read
     /// of 0xE1 returns whichever selector the rotation lands on.
-    func syncPiPFromPanel() async {
-        guard case .proxy(_, let index, _) = transport else { return }
+    /// Read on/off and size if the panel happens to report them.
+    ///
+    /// Returns the size it saw, or nil if 0x13 did not come up. That distinction
+    /// matters: 0x13's share of the rotation is not constant — it was 82% of a
+    /// thousand reads once and absent from thirty reads later — so "not seen" is
+    /// commonplace and must never be mistaken for "changed".
+    @discardableResult
+    func syncPiPFromPanel(samples: Int = 24) async -> Int? {
+        guard case .proxy(_, let index, _) = transport else { return nil }
+        let started = Date()
         guard let map = try? await agent.readSubSelectorMap(
-            monitor: index, code: 0xE1, samples: 200) else { return }
+            monitor: index, code: 0xE1, samples: samples) else { return nil }
+        KVMLog.write(String(format: "pip: %d samples in %.2fs, saw %@",
+                            samples, Date().timeIntervalSince(started),
+                            map.keys.sorted().map { String(format: "%02X", $0) }
+                                .joined(separator: " ")))
         if let raw = map[0x11] { pipOn = (raw & 0xFF) != 0 }
-        if let raw = map[0x13] { pipSize = Int(raw & 0xFF) }
+        guard let raw = map[0x13] else { return nil }
+        let size = Int(raw & 0xFF)
+        pipSize = size
+        return size
     }
 
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.
@@ -208,13 +228,16 @@ final class MonitorController: ObservableObject {
     /// that needs seconds per change is what made the size control misbehave.
     func applyPiPPlacement(_ corner: Int) async {
         guard !pipBusy else { return }
-        pipBusy = true
-        defer { pipBusy = false }
+        pipBusyControl = "placement"
+        defer { pipBusyControl = nil }
 
+        let started = Date()
         if !pipOn { await applyPiPOn(true) }
         if pipSideBySide == true { await applyPiPSideBySide(false) }
         await writeSub(0x14, corner)
         pipPlacement = corner
+        KVMLog.write(String(format: "pip placement %d: total %.2fs",
+                            corner, Date().timeIntervalSince(started)))
     }
 
     // Live stills for the side-by-side diagram: what each machine is showing.
@@ -245,7 +268,9 @@ final class MonitorController: ObservableObject {
 
     /// True while a PiP write is in flight, so the UI can say so and further
     /// clicks are dropped rather than queued.
-    @Published private(set) var pipBusy = false
+    /// Which diagram is mid-write: "placement", "size" or "mode".
+    @Published private(set) var pipBusyControl: String?
+    var pipBusy: Bool { pipBusyControl != nil }
 
     /// Write the size, then READ IT BACK, and only move the UI if it took.
     ///
@@ -259,19 +284,27 @@ final class MonitorController: ObservableObject {
     /// is a cycle button, and queueing them is what produced the burst.
     func applyPiPSize(_ size: Int) async {
         guard !pipBusy else { return }
-        pipBusy = true
-        defer { pipBusy = false }
+        pipBusyControl = "size"
 
+        let started = Date()
+        pipSize = size                       // show it at once; the write follows
         if !pipOn { await applyPiPOn(true) }
         await writeSub(0x13, size)
+        KVMLog.write(String(format: "pip size %d: write done in %.2fs",
+                            size, Date().timeIntervalSince(started)))
+        pipBusyControl = nil                 // the control is usable again here
 
-        // Settle before reading: a read taken during the change reports the
-        // transition rather than the result, which is true of every setting on
-        // this panel.
-        try? await Task.sleep(nanoseconds: 900_000_000)
-        await syncPiPFromPanel()
-        if pipSize != size {
-            kvmError = "The monitor did not take PiP size \(size) — it reports \(pipSize)."
+        // Confirm afterwards, off the critical path.
+        //
+        // Blocking on the read cost 15 seconds when it sampled 200 times, and
+        // even 24 samples is two more seconds of a control that looks stuck for
+        // no benefit — the write either took or it did not, and waiting does not
+        // change which. Correct the display ONLY if the panel actually reports
+        // something different; a size it declined to mention is not a
+        // disagreement.
+        try? await Task.sleep(nanoseconds: 700_000_000)
+        if let seen = await syncPiPFromPanel(samples: 24), seen != size {
+            kvmError = "The monitor did not take PiP size \(size) — it reports \(seen)."
         }
     }
 

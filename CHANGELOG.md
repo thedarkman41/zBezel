@@ -2,6 +2,54 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.34 — 2026-08-29
+
+**PiP: correct the corners, and stop taking ten seconds to do it**
+
+FOUR CORNERS, ALL WRONG
+
+Every corner put the inset somewhere else: top-left produced top-right, top-right
+produced bottom-left, and so on. The mapping came from observations made last
+night that arrived out of step with the writes that caused them, and the result
+was a consistent rotation nobody noticed because each value did move the inset
+somewhere.
+
+Re-derived one click at a time. It is reading order — 0 top-left, 1 top-right,
+2 bottom-left, 3 bottom-right.
+
+TEN SECONDS
+
+Measured through the proxy: a write is 1.14s, a single read 0.65s, twenty-four
+reads 2.04s. The verify was sampling TWO HUNDRED times, so it alone was about
+fifteen seconds. That was the delay in its entirety; nothing else was slow.
+
+The verify is now off the critical path. The write is shown immediately and
+confirmed afterwards, because the write either took or it did not and waiting
+does not change which. A size change is now one write, about a second.
+
+THE SIZE THAT CHANGED BY ITSELF
+
+The snapshot loop was calling the panel read every eight seconds, and a read
+landing mid-change reports the transition rather than the result. So the diagram
+wandered on its own. It now reads once when the tab appears.
+
+The confirm also no longer treats silence as disagreement. 0x13's share of the
+selector rotation is not constant — 82% of a thousand reads on one occasion,
+absent from thirty on another — so "not seen" is commonplace and must not be
+mistaken for "changed".
+
+SPINNER
+
+It sat on the size diagram whatever was being changed. It is now on whichever
+control is actually mid-write.
+
+TESTED AND REFUTED
+
+Writing a selector does not make the panel report that selector: after writing
+0x14, thirty consecutive reads contained no 0x14 at all. Placement stays
+unreadable, and it is the panel's choice, not the agent's — single codes are read
+and written atomically already.
+
 ## 0.1.33 — 2026-08-29
 
 **PiP controls: fix the dead corners, and verify the size instead of assuming it**

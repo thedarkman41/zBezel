@@ -45,22 +45,31 @@ struct PiPPlacementPicker: View {
     /// so nothing is filled in until this app has set it.
     @Binding var placement: Int?
     var enabled: Bool
+    var busy: Bool = false
     var onPick: (Int) -> Void
 
     var body: some View {
         ScreenOutline(active: enabled) {
+            // 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right — reading
+            // order. An earlier mapping here had these rotated, derived from
+            // observations that arrived out of step with the writes that caused
+            // them. Re-derived one click at a time: every corner was landing in
+            // the wrong place, consistently.
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    quadrant(1, .topLeading)
-                    quadrant(2, .topTrailing)
+                    quadrant(0, .topLeading)
+                    quadrant(1, .topTrailing)
                 }
                 HStack(spacing: 0) {
-                    quadrant(3, .bottomLeading)
-                    quadrant(0, .bottomTrailing)
+                    quadrant(2, .bottomLeading)
+                    quadrant(3, .bottomTrailing)
                 }
             }
         }
-        .opacity(enabled ? 1 : 0.4)
+        .overlay(alignment: .center) {
+            if busy { ProgressView().controlSize(.small).colorScheme(.dark) }
+        }
+        .opacity(enabled ? (busy ? 0.7 : 1) : 0.4)
     }
 
     private func quadrant(_ value: Int, _ alignment: Alignment) -> some View {
@@ -75,7 +84,7 @@ struct PiPPlacementPicker: View {
             .padding(6)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
             .contentShape(Rectangle())            // the whole quadrant is the target
-            .onTapGesture { if enabled { onPick(value) } }
+            .onTapGesture { if enabled && !busy { onPick(value) } }
     }
 }
 

@@ -513,7 +513,6 @@ struct MultiScreenTab: View {
     /// or wakes the PC while nobody is looking at the diagram.
     private func liveSnapshots() async {
         while !Task.isCancelled {
-            await controller.syncPiPFromPanel()
             await controller.refreshSnapshots()
             try? await Task.sleep(nanoseconds: 8_000_000_000)
         }
@@ -530,7 +529,13 @@ struct MultiScreenTab: View {
     }
 
     var body: some View {
-        grid.task { await liveSnapshots() }
+        grid
+            .task { await liveSnapshots() }
+            // Read the panel ONCE on arrival. Doing it on the snapshot loop
+            // meant re-reading every eight seconds, and a read that lands mid
+            // change reports the transition — which is why the size diagram
+            // appeared to wander on its own.
+            .task { await controller.syncPiPFromPanel() }
     }
 
     private var grid: some View {
@@ -555,7 +560,8 @@ struct MultiScreenTab: View {
                     diagram("Placement") {
                         PiPPlacementPicker(
                             placement: Binding(get: { controller.pipPlacement }, set: { _ in }),
-                            enabled: controller.pipOn && controller.pipSideBySide != true) { corner in
+                            enabled: controller.pipOn && controller.pipSideBySide != true,
+                            busy: controller.pipBusyControl == "placement") { corner in
                             Task<Void, Never> { await controller.applyPiPPlacement(corner) }
                         }
                     }
@@ -563,7 +569,7 @@ struct MultiScreenTab: View {
                         PiPSizePicker(
                             size: Binding(get: { controller.pipSize }, set: { _ in }),
                             enabled: controller.pipOn && controller.pipSideBySide != true,
-                            busy: controller.pipBusy) { next in
+                            busy: controller.pipBusyControl == "size") { next in
                             Task<Void, Never> { await controller.applyPiPSize(next) }
                         }
                     }
