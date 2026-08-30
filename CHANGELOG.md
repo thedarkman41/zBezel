@@ -2,6 +2,47 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.41 — 2026-08-30
+
+**Name the colour presets, add menu transparency**
+
+The Colour Preset card lists the monitor's nine presets by name, and drives the
+code the OSD actually uses.
+
+0xDC is that code. MCCS calls it "display application" and defines it as picture
+modes — Standard, Productivity, Movie — and none of that applies here: on the
+Z27k G3 it IS the Colour menu, and its values are nowhere near the standard ones.
+The card that used to sit on the View tab as "Viewing Mode" was this same
+register under that wrong name, showing raw hex; it is gone. The Colour tab's
+preset card used to drive 0x14, which mirrors the choice but is not what the menu
+sets.
+
+Six of the nine presets named themselves. Writing a 0xDC value and reading 0x14
+back gives a standard MCCS name, so Native, sRGB and the three colour
+temperatures fell out by machine; only HP Enhance+, P3 and Color Match needed
+the OSD.
+
+HP declares this code as DC(00(00 01 02 13 14 15 1D 21 2B) 02(...) 04(...)),
+which reads exactly like 0xE1's sub-addressing and is not — writing a plain 0x01
+selects sRGB. The parser had it as three sub-selectors, which is why the picker
+offered three meaningless entries. 0xDC is now marked as a code whose
+capabilities entry does not describe what it accepts.
+
+Menu Transparency is controllable, in the steps the monitor's menu shows. Only
+six of its eight steps can be reached over DDC: everything from raw 0 to 43 lands
+on 89 and everything from 95 to 255 lands on 35, so the two extremes are settable
+from the monitor's buttons and not from here. The spacing between the six is
+irregular, so it is a picker rather than a slider, which would imply a continuum
+that does not exist. Nothing reports it back: every plain VCP code was read at 89
+and at 35, twice over, and not one differs.
+
+Reads no longer touch the write-only restore commands 0x04, 0x05, 0x06, 0x08 and
+0x0A. This monitor demonstrably ignores a read of them — a controlled single read
+of 0x04 changed nothing — but asking a display to restore its factory defaults in
+order to discover what value it holds is not a sensible thing to do, and the
+capabilities string lists them beside real settings with nothing to mark the
+difference.
+
 ## 0.1.40 — 2026-08-30
 
 **Read the monitor's menu: correct PIP size, add the Menu controls**

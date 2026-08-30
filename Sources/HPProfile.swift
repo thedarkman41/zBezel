@@ -38,7 +38,16 @@ enum HPProfile {
     /// Codes whose MCCS-standard value labels do not apply to this panel because
     /// HP extended the enumeration well past the standard's range. Showing the
     /// standard names for these would be actively misleading.
-    static let extendedByVendor: Set<UInt8> = [0xDC, 0x14, 0x86]
+    static let extendedByVendor: Set<UInt8> = [0x14]
+
+    /// Codes whose capabilities entry does not describe the values it accepts.
+    ///
+    /// 0xDC is declared as `DC(00(00 01 02 13 14 15 1D 21 2B) 02(...) 04(...))`,
+    /// which reads like sub-addressing and is not: writing a plain 0x01 selects
+    /// sRGB. The real value list is the contents of the FIRST group, and the
+    /// parser cannot know that, so the names in VCP.swift are used instead.
+    /// Trusting the caps here produced a picker with three meaningless entries.
+    static let capsValuesUnreliable: Set<UInt8> = [0xDC]
 
     /// HP concentrates many settings behind a small number of codes rather than
     /// giving each its own, so a sweep across code numbers finds nothing —

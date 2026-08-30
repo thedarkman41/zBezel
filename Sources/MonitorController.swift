@@ -25,7 +25,10 @@ struct FeatureState {
     }
 
     var choices: [(value: UInt16, label: String)] {
-        var values = permittedValues.isEmpty ? Array(feature.values.keys).sorted() : permittedValues
+        var values = (permittedValues.isEmpty
+                      || HPProfile.capsValuesUnreliable.contains(feature.code))
+            ? Array(feature.values.keys).sorted()
+            : permittedValues
         if feature.code == 0x60 {
             // The panel declares more input values than it has sockets — 0x21,
             // 0x2F and 0x3D match no connector on the back and are presumably
@@ -113,6 +116,8 @@ final class MonitorController: ObservableObject {
         osdMenuH       = defaults.object(forKey: "osdMenuH") as? Int ?? 97
         osdMenuV       = defaults.object(forKey: "osdMenuV") as? Int ?? 14
         osdMenuTimeout = defaults.object(forKey: "osdMenuTimeout") as? Int ?? 60
+        osdTransparency = Transparency(
+            rawValue: defaults.object(forKey: "osdTransparency") as? Int ?? -1)
         pipSideBySide = defaults.bool(forKey: "pipSideBySide")
 
 
@@ -423,6 +428,50 @@ final class MonitorController: ObservableObject {
     }
     @Published var osdMenuTimeout: Int {
         didSet { UserDefaults.standard.set(osdMenuTimeout, forKey: "osdMenuTimeout") }
+    }
+
+    /// Menu transparency, in the steps HP's own menu shows.
+    ///
+    /// The panel has eight steps and only SIX can be reached over DDC. Everything
+    /// from raw 0 to 43 lands on 89, and everything from 95 to 200 lands on 35,
+    /// so the two extremes — 100 and 25 — are settable from the monitor's buttons
+    /// and not from here.
+    ///
+    /// The raw values were found one probe at a time, because the spacing is
+    /// irregular (10, 10, 6, 6, 15) and three different curves fitted through the
+    /// early points each predicted a step that turned out to be wrong. Walking it
+    /// took nine round trips; guessing took three wrong answers first.
+    enum Transparency: Int, CaseIterable, Identifiable {
+        case p89 = 30
+        case p78 = 58
+        case p67 = 68
+        case p57 = 74
+        case p46 = 80
+        case p35 = 95
+
+        var id: Int { rawValue }
+
+        /// What HP's menu calls this step.
+        var shown: Int {
+            switch self {
+            case .p89: return 89
+            case .p78: return 78
+            case .p67: return 67
+            case .p57: return 57
+            case .p46: return 46
+            case .p35: return 35
+            }
+        }
+    }
+
+    @Published var osdTransparency: Transparency? {
+        didSet { UserDefaults.standard.set(osdTransparency?.rawValue ?? -1,
+                                           forKey: "osdTransparency") }
+    }
+
+    func applyOSDMenu(transparency: Transparency) async {
+        osdTransparency = transparency
+        await writeSub(0x56, transparency.rawValue)
     }
 
     func applyOSDMenu(horizontal: Int) async {
@@ -1095,7 +1144,11 @@ final class MonitorController: ObservableObject {
             let caps = capsString.isEmpty ? nil : Capabilities.parse(capsString)
             capabilities = caps
 
-            let codes = caps?.supportedCodes ?? Self.fallbackCodes
+            // Drop the write-only restore commands before reading anything. The
+            // capabilities string lists them next to real settings, and reading
+            // 0x04 asks the monitor to restore its factory defaults.
+            let codes = (caps?.supportedCodes ?? Self.fallbackCodes)
+                .filter { !VCP.neverRead.contains($0) }
             probeStatus = "Reading \(codes.count) features from \(proxyHost)…"
             let readings = try await agent.read(monitor: target.index, codes: codes)
 
@@ -1311,7 +1364,13 @@ final class MonitorController: ObservableObject {
     }
 
     /// Re-read a set of codes in one round trip. Used by the vendor-code mapper.
-    func reread(codes: [UInt8]) async -> [UInt8: UInt16] {
+    ///
+    /// Filters the write-only restores again rather than trusting every caller to
+    /// have done it. This is the path the vendor mapper uses, and it builds its
+    /// code lists by sweeping ranges — exactly the way a restore command gets read
+    /// by accident.
+    func reread(codes rawCodes: [UInt8]) async -> [UInt8: UInt16] {
+        let codes = rawCodes.filter { !VCP.neverRead.contains($0) }
         switch transport {
         case .none:
             return [:]

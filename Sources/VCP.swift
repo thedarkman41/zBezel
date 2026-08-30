@@ -149,13 +149,23 @@ enum VCP {
                  0x21: "Slovak", 0x22: "Slovenian", 0x23: "Thai", 0x24: "Ukrainian",
                  0x25: "Vietnamese"])
 
+    /// The nine colour presets on HP's Colour menu, named as that menu names them.
+    ///
+    /// MCCS calls 0xDC "display application" and defines it as picture modes —
+    /// Standard, Productivity, Movie and so on. None of that applies here: on the
+    /// Z27k G3 this code IS the Colour menu, and its values are nowhere near the
+    /// standard ones.
+    ///
+    /// Six were identified without touching the monitor, by writing a value and
+    /// reading 0x14 back: that code mirrors the preset and answers with standard
+    /// MCCS names, so Native, sRGB and the three colour temperatures named
+    /// themselves. The remaining three were read off the OSD.
     static let displayApplication = VCPFeature(
-        code: 0xDC, name: "Preset Mode", kind: .nonContinuous,
-        values: [0x00: "Standard", 0x01: "Productivity", 0x02: "Mixed",
-                 0x03: "Movie", 0x04: "User", 0x05: "Games", 0x06: "Sports",
-                 0x07: "Professional", 0x08: "Standard (default)", 0x09: "Reading",
-                 0x0A: "Text", 0x0B: "Video"],
-        blurb: "Vendor picture modes. HP exposes its viewing modes here on models that support it.")
+        code: 0xDC, name: "Colour Preset", kind: .nonContinuous,
+        values: [0x00: "Native",       0x01: "sRGB (D65)",   0x02: "BT.709 (D65)",
+                 0x13: "Warm",         0x15: "Neutral",      0x14: "Cool",
+                 0x1D: "HP Enhance+",  0x21: "P3 (D65)",     0x2B: "Color Match"],
+        blurb: "The nine presets on the monitor's own Colour menu.")
 
     static let vcpVersion = VCPFeature(code: 0xDF, name: "MCCS Version", kind: .continuous)
 
@@ -164,6 +174,26 @@ enum VCP {
         values: [0x01: "On", 0x02: "Standby", 0x03: "Suspend",
                  0x04: "Off (soft)", 0x05: "Off (hard)"],
         blurb: "DPMS power state.")
+
+    /// Codes that must NEVER be read, only written.
+    ///
+    /// MCCS defines these as write-only commands, not settings: writing 0x04 is
+    /// "restore factory defaults". The Z27k G3 answers a READ of them anyway, and
+    /// answering is not the same as ignoring — the monitor's OSD settings were
+    /// found back at their factory values immediately after a scan whose only
+    /// writes were to an unrelated sub-selector.
+    ///
+    /// Whether or not this panel truly acts on the read, asking a display to
+    /// restore its defaults in order to find out what value it is holding is not
+    /// a sensible thing to do, and the capabilities string lists these codes
+    /// alongside real settings with nothing to mark the difference.
+    static let neverRead: Set<UInt8> = [
+        0x04,   // restore factory defaults
+        0x05,   // restore factory luminance and contrast
+        0x06,   // restore factory geometry
+        0x08,   // restore factory colour
+        0x0A,   // restore factory TV defaults
+    ]
 
     /// Everything above, indexed by code.
     static let all: [UInt8: VCPFeature] = {

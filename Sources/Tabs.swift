@@ -465,9 +465,10 @@ struct ColorTab: View {
     var body: some View {
         CardGrid {
             Card(title: "Colour Preset", systemImage: "paintpalette",
-                 help: VCP.selectColorPreset.blurb) {
-                if controller.features[0x14]?.readable == true {
-                    FeaturePicker(code: 0x14, controller: controller)
+                 help: "The nine presets on the monitor's Colour menu (0xDC). "
+                     + "0x14 mirrors the choice but is not what the OSD drives.") {
+                if controller.features[0xDC]?.readable == true {
+                    FeaturePicker(code: 0xDC, controller: controller)
                 } else {
                     StyledPicker(options: [(value: UInt16(1), label: "sRGB")],
                                  selection: .constant(UInt16(1)), enabled: false, width: 220)
@@ -527,45 +528,6 @@ struct ViewTab: View {
 
     var body: some View {
         CardGrid {
-            Card(title: "Viewing Mode", systemImage: "eye",
-                 help: VCP.displayApplication.blurb) {
-                if controller.features[0xDC]?.readable == true {
-                    FeaturePicker(code: 0xDC, controller: controller)
-                } else {
-                    StyledPicker(options: [(value: UInt16(0), label: "Standard")],
-                                 selection: .constant(UInt16(0)), enabled: false, width: 220)
-                    MonitorSideUnavailable(controller: controller)
-                }
-            }
-
-            // Three settings HP's Menu screen owns, reachable only as 0xE1
-            // sub-selectors and readable through no channel at all — so the
-            // sliders show what this app last set, and start at HP's factory
-            // values rather than pretending to have asked the panel.
-            Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
-                 help: "Where HP's own menu appears and how long it stays up. "
-                     + "Vendor sub-selectors 0x3B, 0x3C and 0x3E — set only, "
-                     + "never reported back.") {
-                if controller.controlsLive {
-                    OSDMenuSlider(label: "Position across", value: controller.osdMenuH,
-                                  range: 0...100) { v in
-                        Task<Void, Never> { await controller.applyOSDMenu(horizontal: v) }
-                    }
-                    OSDMenuSlider(label: "Position down", value: controller.osdMenuV,
-                                  range: 0...100) { v in
-                        Task<Void, Never> { await controller.applyOSDMenu(vertical: v) }
-                    }
-                    OSDMenuSlider(label: "Stays up for", value: controller.osdMenuTimeout,
-                                  range: 5...60, suffix: "s") { v in
-                        Task<Void, Never> { await controller.applyOSDMenu(timeout: v) }
-                    }
-                } else {
-                    SliderRow(label: "Position across", value: .constant(97),
-                              range: 0...100, enabled: false)
-                    MonitorSideUnavailable(controller: controller)
-                }
-            }
-
             Card(title: "On-Screen Display", systemImage: "character.bubble",
                  help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
                 FieldLabel(text: "Language")
