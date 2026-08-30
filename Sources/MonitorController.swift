@@ -105,6 +105,14 @@ final class MonitorController: ObservableObject {
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         vendorMap = VendorMap.load()
         pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
+        // -1 means this app has never set a size, which is not the same as
+        // "small" — the panel is not asked and so is not claimed.
+        pipSize       = PiPSize(rawValue: defaults.object(forKey: "pipSize") as? Int ?? -1)
+        // HP's factory values, used only until this app sets one — the panel will
+        // not report where these actually stand.
+        osdMenuH       = defaults.object(forKey: "osdMenuH") as? Int ?? 97
+        osdMenuV       = defaults.object(forKey: "osdMenuV") as? Int ?? 14
+        osdMenuTimeout = defaults.object(forKey: "osdMenuTimeout") as? Int ?? 60
         pipSideBySide = defaults.bool(forKey: "pipSideBySide")
 
 
@@ -162,9 +170,19 @@ final class MonitorController: ObservableObject {
     // plus persistence is the honest answer, and it is why the UI never claims
     // to have re-read these.
 
-    /// Read back from the panel: these two DO surface in the selector rotation.
+    /// Read back from the panel: this one DOES surface in the selector rotation.
     @Published var pipOn = false
-    @Published var pipSize = 0
+
+    /// The size this app last set, remembered across launches.
+    ///
+    /// Optimistic, like mode and placement, and for the same reason: the panel
+    /// will not report it. 0x13 answers reads with a latched constant that does
+    /// not follow a change — 2 across one session's four size changes, 3 across
+    /// another's — so it is asserted rather than read, and nil until this app has
+    /// actually set one.
+    @Published var pipSize: PiPSize? {
+        didSet { UserDefaults.standard.set(pipSize?.rawValue ?? -1, forKey: "pipSize") }
+    }
 
     /// Not readable — 0x12 and 0x14 never appear in the monitor's rotation; a
     /// thousand consecutive reads returned neither.
@@ -222,7 +240,9 @@ final class MonitorController: ObservableObject {
         // rather than by hope.
         await writeSub(0x12, pipSideBySide ? 1 : 0)
         await writeSub(0x14, pipPlacement)
-        await writeSub(0x13, pipSize)
+        // Size too, once this app has ever set one. It is a setting like the
+        // other two, so asserting it is what keeps diagram and panel in step.
+        if let size = pipSize { await writeSub(0x13, size.rawValue) }
     }
 
     func applyPiPSideBySide(_ side: Bool) async {
@@ -237,27 +257,23 @@ final class MonitorController: ObservableObject {
     /// Only these two: mode and placement cannot be read at all, so they stay
     /// unknown until set. Sampled rather than read once, because a single read
     /// of 0xE1 returns whichever selector the rotation lands on.
-    /// Read on/off and size if the panel happens to report them.
+    /// Read on/off, which is the only part of PiP the panel will tell us.
     ///
-    /// Returns the size it saw, or nil if 0x13 did not come up. That distinction
-    /// matters: 0x13's share of the rotation is not constant — it was 82% of a
-    /// thousand reads once and absent from thirty reads later — so "not seen" is
-    /// commonplace and must never be mistaken for "changed".
-    @discardableResult
-    func syncPiPFromPanel(samples: Int = 24) async -> Int? {
-        guard case .proxy(_, let index, _) = transport else { return nil }
+    /// 0x13 is sampled too and deliberately ignored. It does come up in the
+    /// rotation, but what it reports is the last COMMAND it was given — enlarge,
+    /// reduce, maximum, minimum — and not the size that resulted. Treating that
+    /// echo as a size is what put a number in the UI that had nothing to do with
+    /// what was on the panel.
+    func syncPiPFromPanel(samples: Int = 24) async {
+        guard case .proxy(_, let index, _) = transport else { return }
         let started = Date()
         guard let map = try? await agent.readSubSelectorMap(
-            monitor: index, code: 0xE1, samples: samples) else { return nil }
+            monitor: index, code: 0xE1, samples: samples) else { return }
         KVMLog.write(String(format: "pip: %d samples in %.2fs, saw %@",
                             samples, Date().timeIntervalSince(started),
                             map.keys.sorted().map { String(format: "%02X", $0) }
                                 .joined(separator: " ")))
         if let raw = map[0x11] { pipOn = (raw & 0xFF) != 0 }
-        guard let raw = map[0x13] else { return nil }
-        let size = Int(raw & 0xFF)
-        pipSize = size
-        return size
     }
 
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.
@@ -318,32 +334,116 @@ final class MonitorController: ObservableObject {
     @Published private(set) var pipBusyControl: String?
     var pipBusy: Bool { pipBusyControl != nil }
 
-    /// Write the size, then READ IT BACK, and only move the UI if it took.
+    /// Set the inset size.
     ///
-    /// Previously the UI advanced on click and the writes queued behind each
-    /// other through the actor, so the diagram ran ahead and the panel caught up
-    /// in a burst several clicks later — it looked like the control did nothing
-    /// and then did everything at once.
+    /// One write. There is nothing to read back — 0x13's read is latched and does
+    /// not follow the write — so the UI shows what it set, which is honest as
+    /// long as it never claims to have checked.
     ///
-    /// Size is one of the two selectors the panel will actually report, so there
-    /// is no excuse for guessing at it. Clicks during a write are ignored: this
-    /// is a cycle button, and queueing them is what produced the burst.
-    func applyPiPSize(_ size: Int) async {
+    /// Clicks during a write are dropped rather than queued. Queueing them is
+    /// what produced the burst where several clicks did nothing and then all
+    /// arrived at once.
+    func applyPiPSize(_ size: PiPSize) async {
         guard !pipBusy else { return }
         pipBusyControl = "size"
-
-        // One write, nothing else. No enable preamble and no confirming read:
-        // 0x13 appears in the rotation unreliably — 82% of a thousand reads once,
-        // absent from thirty later — so a check costs two seconds to usually
-        // learn nothing, and any read it does queue delays the NEXT click behind
-        // it.
         let started = Date()
         pipSize = size
-        await writeSub(0x13, size)
-        KVMLog.write(String(format: "pip size %d: total %.2fs",
-                            size, Date().timeIntervalSince(started)))
+        await writeSub(0x13, size.rawValue)
+        KVMLog.write(String(format: "pip size %@: total %.2fs",
+                            size.label, Date().timeIntervalSince(started)))
         pipBusyControl = nil
     }
+
+    /// Hold the size stepping in one direction until told to stop.
+    ///
+    /// Driven by the jog knob, which reports a DIRECTION and an INTENSITY rather
+    /// than a value — the right model for a panel that will not say what size it
+    /// is and only accepts "one step bigger".
+    ///
+    /// Intensity sets the pause between writes: `jogMaxDelay` just outside the
+    /// dead zone, tapering to none at full deflection. Wide open, the wire is the
+    /// only limit.
+    ///
+    /// No busy flag. The busy guard exists to stop clicks queueing into a burst,
+    /// and here the burst IS the feature; cancellation is what ends it.
+    func startPiPJog(up: Bool, intensity: Double) {
+        jogDelay = UInt64(MonitorController.jogMaxDelay * (1 - min(1, max(0, intensity))))
+        // Already running the right way: just re-rate it. Restarting the task on
+        // every drag event would throw away the write in flight each time.
+        guard up != jogDirection || jogTask == nil else { return }
+        jogTask?.cancel()
+        jogDirection = up
+        // Off the presets the moment it moves: the inset no longer matches one,
+        // and the picker should stop claiming it does.
+        pipSize = nil
+        jogTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.writeSub(0x13, up ? PiPSize.growCommand
+                                             : PiPSize.shrinkCommand)
+                let pause = self.jogDelay
+                if pause > 0 { try? await Task.sleep(nanoseconds: pause) }
+            }
+        }
+    }
+
+    func stopPiPJog() {
+        jogTask?.cancel()
+        jogTask = nil
+        jogDirection = nil
+    }
+
+    /// The pause just outside the dead zone, in nanoseconds.
+    ///
+    /// 300ms, which gives roughly three steps a second at the slow end against
+    /// about eleven wide open. The first attempt used 0.5ms, and the curve was
+    /// implemented correctly and did nothing you could feel: a write is its own
+    /// round trip at ~90ms, so a pause has to be an appreciable fraction of THAT
+    /// to change the rate. The delay is not the interval, it is the extra on top
+    /// of it.
+    private static let jogMaxDelay: Double = 300_000_000
+
+    // MARK: - The monitor's own menu
+    //
+    // Position and how long the menu stays up. Found by writing a different
+    // number to each unmapped continuous sub-selector in one pass and then
+    // reading HP's menu: whichever setting showed 55 named 0x3B, 56 named 0x3C,
+    // 57 named 0x3E. One pass identified three controls that sampling could never
+    // have found — none of them has ever appeared in the read rotation, across
+    // roughly three thousand samples.
+    //
+    // Not readable, so asserted and persisted like the PiP group. The numbers are
+    // the ones HP's menu shows: 0-100 for position, seconds for the timeout.
+
+    @Published var osdMenuH: Int {
+        didSet { UserDefaults.standard.set(osdMenuH, forKey: "osdMenuH") }
+    }
+    @Published var osdMenuV: Int {
+        didSet { UserDefaults.standard.set(osdMenuV, forKey: "osdMenuV") }
+    }
+    @Published var osdMenuTimeout: Int {
+        didSet { UserDefaults.standard.set(osdMenuTimeout, forKey: "osdMenuTimeout") }
+    }
+
+    func applyOSDMenu(horizontal: Int) async {
+        osdMenuH = max(0, min(100, horizontal))
+        await writeSub(0x3B, osdMenuH)
+    }
+
+    func applyOSDMenu(vertical: Int) async {
+        osdMenuV = max(0, min(100, vertical))
+        await writeSub(0x3C, osdMenuV)
+    }
+
+    /// 5 to 60 seconds, the range HP's own slider offers.
+    func applyOSDMenu(timeout seconds: Int) async {
+        osdMenuTimeout = max(5, min(60, seconds))
+        await writeSub(0x3E, osdMenuTimeout)
+    }
+
+    private var jogTask: Task<Void, Never>?
+    private var jogDirection: Bool?
+    private var jogDelay: UInt64 = 0
 
     /// Tell the KVM which panel is the doorway and where to land coming back.
     ///

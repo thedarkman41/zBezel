@@ -80,7 +80,14 @@ enum VCP {
     static let videoBlackLevelGreen = VCPFeature(code: 0x6E, name: "Green Black Level", kind: .continuous)
     static let videoBlackLevelBlue = VCPFeature(code: 0x70, name: "Blue Black Level", kind: .continuous)
 
-    static let sharpness = VCPFeature(code: 0x87, name: "Sharpness", kind: .continuous)
+    /// Seven named steps, exactly as HP's OSD lists them — the two ends are
+    /// words and the middle five are numbers. Declared as 87(01..07) and read
+    /// back as a continuous 1-7, but it is an enumeration on the panel, so a
+    /// slider showing "4" was inventing a scale the monitor does not use.
+    static let sharpness = VCPFeature(
+        code: 0x87, name: "Sharpness", kind: .nonContinuous,
+        values: [0x01: "Soft", 0x02: "Level 2", 0x03: "Level 3", 0x04: "Level 4",
+                 0x05: "Level 5", 0x06: "Level 6", 0x07: "Sharp"])
     static let audioMute = VCPFeature(
         code: 0x8D, name: "Audio Mute / Screen Blank", kind: .nonContinuous,
         values: [0x01: "Muted", 0x02: "Unmuted"])
@@ -96,6 +103,26 @@ enum VCP {
         code: 0xB6, name: "Display Technology", kind: .nonContinuous,
         values: [0x01: "CRT", 0x02: "CRT", 0x03: "Passive LCD", 0x04: "Active LCD",
                  0x05: "LCoS", 0x06: "Plasma", 0x07: "OLED", 0x08: "EL", 0x09: "MEM"])
+
+    static let displayScaling = VCPFeature(
+        code: 0x86, name: "Display Scaling", kind: .nonContinuous,
+        // Names taken from HP's own OSD, not from the MCCS table — the table's
+        // name for 02 was wrong for this panel. 02 and 05 BOTH show as "Fill to
+        // Screen" there; they are distinct values that read back distinctly, and
+        // at native resolution nothing distinguishes them on screen.
+        values: [0x01: "Pixel-for-Pixel", 0x02: "Fill to Screen",
+                 0x05: "Fill to Screen (stretched)"],
+        blurb: "Image Scaling. The monitor greys this out while the source is at "
+             + "the panel's native resolution — there is nothing to scale — so a "
+             + "change here stores and reads back but may do nothing visible.")
+
+    static let greyScaleExpansion = VCPFeature(
+        code: 0x2E, name: "Grey Scale Expansion", kind: .nonContinuous,
+        values: [0x00: "0", 0x01: "1", 0x02: "2", 0x03: "3"],
+        blurb: "Declared, writable, reads back — and controls nothing observable. "
+             + "All four values were set while watching Brightness+ and Image: no "
+             + "OSD field moved and the picture did not change. Kept here for the "
+             + "Advanced listing only; deliberately not given a control.")
 
     static let displayUsageTime = VCPFeature(
         code: 0xC0, name: "Panel Hours", kind: .continuous,
@@ -149,6 +176,7 @@ enum VCP {
             videoBlackLevelRed, videoBlackLevelGreen, videoBlackLevelBlue,
             sharpness, audioMute, horizontalFrequency, verticalFrequency,
             subPixelLayout, displayTechnology, displayUsageTime,
+            displayScaling, greyScaleExpansion,
             applicationEnableKey, controllerType, firmwareLevel,
             osdControl, osdLanguage, displayApplication, vcpVersion, powerMode,
         ]

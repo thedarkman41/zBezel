@@ -2,6 +2,39 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.40 — 2026-08-30
+
+**Read the monitor's menu: correct PIP size, add the Menu controls**
+
+The monitor's own menu turned out to be the specification, and reading it
+corrected two mappings that probing had got backwards.
+
+PIP Size (0xE1 sub-selector 0x13) is HP's PIP Size menu, and its five values are
+that menu's five entries: 0 Enlarge, 1 Reduce, 2 Set to Maximum, 3 Set to
+Minimum, 4 Set to Default. Earlier probing only ever sent 0-3, so value 4 — the
+default — was never tried, and 2 and 3 were labelled "maximum" and "minimum"
+merely because each happened to be bigger or smaller than wherever the inset sat
+at the time.
+
+The size control is now three nested boxes at the panel's real proportions, each
+in its own shade, with a spring-loaded jog knob beneath. The knob reports a
+direction and an intensity rather than a value, which suits a panel that will not
+say what size it is and only accepts "one step bigger": hold it off centre and
+it steps until released, faster the further it is pushed.
+
+Three settings on HP's Menu screen are now controllable, found by writing a
+different number to each unmapped sub-selector at once and then reading the
+menu — whichever setting showed 55 named 0x3B, 56 named 0x3C, 57 named 0x3E. None
+of the three has ever appeared in the read rotation, so sampling could not have
+found them.
+
+Sharpness is seven named steps (Soft, Level 2-6, Sharp), not a slider inventing a
+1-to-7 scale. Image Scaling carries HP's own names, since the MCCS table's name
+for value 02 was wrong for this panel.
+
+0x2E is declared, writable, and controls nothing observable; it keeps its entry
+for the Advanced listing but is deliberately given no control.
+
 ## 0.1.39 — 2026-08-29
 
 **Assert the PiP state instead of trying to read it**

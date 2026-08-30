@@ -307,9 +307,19 @@ struct DisplayTab: View {
                     MonitorSideUnavailable(controller: controller)
                 }
                 if controller.features[0x87]?.readable == true {
-                    FeatureSlider(code: 0x87, label: "Sharpness", controller: controller)
+                    ControlRow(label: "Sharpness") {
+                        FeaturePicker(code: 0x87, controller: controller)
+                    }
                 } else {
                     SliderRow(label: "Sharpness", value: .constant(50), range: 0...100, enabled: false)
+                }
+                // Only drawn when the panel reports them. Both are declared in the
+                // capabilities string, but a declaration is not a promise — the
+                // readable flag is what says the control answered.
+                if controller.features[0x86]?.readable == true {
+                    ControlRow(label: "Scaling") {
+                        FeaturePicker(code: 0x86, controller: controller)
+                    }
                 }
             }
 
@@ -368,6 +378,63 @@ struct DisplayTab: View {
             }
 
 
+        }
+    }
+}
+
+/// A label beside a control, for cards holding more than one picker.
+///
+/// Cards with a single control use the card's own title as the label; these two
+/// share the Image card with the sliders, so they need their own.
+struct ControlRow<Content: View>: View {
+    let label: String
+    @ViewBuilder var content: Content
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.textPrimary)
+            Spacer(minLength: 8)
+            content
+        }
+    }
+}
+
+/// A slider for a setting the monitor will not report.
+///
+/// Writes on release rather than continuously: each write closes HP's menu, so a
+/// live drag would slam the panel dozens of times and the user could never see
+/// the result anyway.
+struct OSDMenuSlider: View {
+    let label: String
+    let value: Int
+    let range: ClosedRange<Int>
+    var suffix: String = ""
+    let onCommit: (Int) -> Void
+
+    @State private var live: Double?
+
+    var body: some View {
+        let shown = live ?? Double(value)
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Text("\(Int(shown))\(suffix)")
+                    .font(.system(size: 12, design: .monospaced))
+                    .foregroundStyle(Theme.textSecond)
+            }
+            Slider(value: Binding(get: { shown },
+                                  set: { live = $0 }),
+                   in: Double(range.lowerBound)...Double(range.upperBound),
+                   onEditingChanged: { editing in
+                       if !editing, let v = live {
+                           onCommit(Int(v.rounded()))
+                           live = nil
+                       }
+                   })
         }
     }
 }
@@ -471,6 +538,34 @@ struct ViewTab: View {
                 }
             }
 
+            // Three settings HP's Menu screen owns, reachable only as 0xE1
+            // sub-selectors and readable through no channel at all — so the
+            // sliders show what this app last set, and start at HP's factory
+            // values rather than pretending to have asked the panel.
+            Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
+                 help: "Where HP's own menu appears and how long it stays up. "
+                     + "Vendor sub-selectors 0x3B, 0x3C and 0x3E — set only, "
+                     + "never reported back.") {
+                if controller.controlsLive {
+                    OSDMenuSlider(label: "Position across", value: controller.osdMenuH,
+                                  range: 0...100) { v in
+                        Task<Void, Never> { await controller.applyOSDMenu(horizontal: v) }
+                    }
+                    OSDMenuSlider(label: "Position down", value: controller.osdMenuV,
+                                  range: 0...100) { v in
+                        Task<Void, Never> { await controller.applyOSDMenu(vertical: v) }
+                    }
+                    OSDMenuSlider(label: "Stays up for", value: controller.osdMenuTimeout,
+                                  range: 5...60, suffix: "s") { v in
+                        Task<Void, Never> { await controller.applyOSDMenu(timeout: v) }
+                    }
+                } else {
+                    SliderRow(label: "Position across", value: .constant(97),
+                              range: 0...100, enabled: false)
+                    MonitorSideUnavailable(controller: controller)
+                }
+            }
+
             Card(title: "On-Screen Display", systemImage: "character.bubble",
                  help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
                 FieldLabel(text: "Language")
@@ -567,11 +662,16 @@ struct MultiScreenTab: View {
                     }
                     diagram("Size") {
                         PiPSizePicker(
-                            size: Binding(get: { controller.pipSize }, set: { _ in }),
+                            current: controller.pipSize,
                             enabled: controller.pipOn && !controller.pipSideBySide,
-                            busy: controller.pipBusyControl == "size") { next in
-                            Task<Void, Never> { await controller.applyPiPSize(next) }
-                        }
+                            busy: controller.pipBusyControl == "size",
+                            onPick: { size in
+                                Task<Void, Never> { await controller.applyPiPSize(size) }
+                            },
+                            onJogBegin: { up, intensity in
+                                controller.startPiPJog(up: up, intensity: intensity)
+                            },
+                            onJogEnd: { controller.stopPiPJog() })
                     }
                     diagram("Side by side") {
                         PiPSideBySidePicker(
