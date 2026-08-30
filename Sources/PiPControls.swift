@@ -106,6 +106,11 @@ struct PiPSizePicker: View {
     var body: some View {
         ScreenOutline(active: enabled) {
             GeometryReader { geo in
+                // Largest at the back, smallest in front, so a click lands on
+                // the smallest box that contains it — which is the one the eye
+                // says it is on. Each box picks its own size directly; before,
+                // the whole diagram was one target that cycled, so clicking a
+                // particular box did nothing in particular.
                 ZStack(alignment: .bottomLeading) {
                     ForEach((0..<steps).reversed(), id: \.self) { step in
                         let scale = CGFloat(step + 1) / CGFloat(steps)
@@ -120,10 +125,10 @@ struct PiPSizePicker: View {
                             )
                             .frame(width: geo.size.width * scale,
                                    height: geo.size.height * scale)
+                            .contentShape(Rectangle())
+                            .onTapGesture { if enabled && !busy { onPick(step) } }
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture { if enabled && !busy { onPick((size + 1) % steps) } }
                 .overlay(alignment: .center) {
                     if busy {
                         ProgressView()

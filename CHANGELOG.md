@@ -2,6 +2,17 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.38 — 2026-08-29
+
+**Size: make each box pick its own size**
+
+The whole diagram was a single target that cycled, so clicking a particular box
+did nothing in particular — the size changed, but never to the one under the
+pointer. Each nested box is now its own target.
+
+They are stacked largest at the back and smallest in front, so a click lands on
+the smallest box containing it, which is the one the eye says it is on.
+
 ## 0.1.37 — 2026-08-29
 
 **Write without reading back: PiP changes go from ten seconds to a tenth**
