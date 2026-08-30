@@ -2,6 +2,35 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.39 — 2026-08-29
+
+**Assert the PiP state instead of trying to read it**
+
+Switching PiP on left the diagram disagreeing with the panel: the inset sat
+bottom-left and largish while the picture showed no corner at all and the
+smallest size.
+
+Placement and mode cannot be read — 0x12 and 0x14 never appear in the monitor's
+selector rotation, a thousand consecutive reads returned neither. The previous
+answer was to draw them as unknown, which was honest and useless: a diagram
+declining to say where the inset is, beside a monitor visibly showing where the
+inset is.
+
+They are asserted now. Switching PiP on writes all four settings, so the panel is
+in the state the diagram claims because the app just put it there. The two ends
+agree by construction rather than by hope.
+
+This only became the right answer once a write cost 0.09s. At the 3s it cost
+this morning, pushing four settings on every enable would have been three
+unbearable seconds; at a third of a second it is not worth noticing. A
+performance fix changed which design was correct, which is not the usual
+direction of that relationship.
+
+The trade is real and worth stating: change PiP from the monitor's own OSD and
+the app will not notice, and will overwrite it the next time PiP is switched on
+here. Given the panel refuses to report two of the four settings, the choice is
+between the app being authoritative or the diagram being decorative.
+
 ## 0.1.38 — 2026-08-29
 
 **Size: make each box pick its own size**

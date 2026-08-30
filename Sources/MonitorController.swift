@@ -104,6 +104,8 @@ final class MonitorController: ObservableObject {
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         vendorMap = VendorMap.load()
+        pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
+        pipSideBySide = defaults.bool(forKey: "pipSideBySide")
 
 
         // The tap runs on the main run loop, but the callback reaches us from a
@@ -164,15 +166,24 @@ final class MonitorController: ObservableObject {
     @Published var pipOn = false
     @Published var pipSize = 0
 
-    /// NOT readable, and therefore not known until this app sets them.
+    /// Not readable — 0x12 and 0x14 never appear in the monitor's rotation; a
+    /// thousand consecutive reads returned neither.
     ///
-    /// 0x12 and 0x14 never appear in the monitor's rotation — a thousand
-    /// consecutive reads returned neither. Storing a last-known value and
-    /// drawing it as fact is what made the diagram disagree with the screen:
-    /// it showed a remembered default while the panel sat somewhere else
-    /// entirely. nil means unknown, and the UI says so rather than guessing.
-    @Published var pipPlacement: Int?
-    @Published var pipSideBySide: Bool?
+    /// So they are not read. They are ASSERTED: switching PiP on pushes all four
+    /// settings, and the panel is then in the state the diagram shows because
+    /// the app just put it there.
+    ///
+    /// The previous attempt drew them as "unknown", which was honest and
+    /// useless — a diagram declining to say where the inset is, beside a monitor
+    /// visibly showing where the inset is. Asserting only became the better
+    /// answer once a write cost 0.09s instead of 3s; at the old price, four
+    /// writes on every enable would have been unbearable.
+    @Published var pipPlacement: Int {
+        didSet { UserDefaults.standard.set(pipPlacement, forKey: "pipPlacement") }
+    }
+    @Published var pipSideBySide: Bool {
+        didSet { UserDefaults.standard.set(pipSideBySide, forKey: "pipSideBySide") }
+    }
 
     /// A bare write, with no read-back of anything else.
     ///
@@ -197,15 +208,27 @@ final class MonitorController: ObservableObject {
     }
 
     func applyPiPOn(_ on: Bool) async {
+        pipBusyControl = "mode"
+        defer { pipBusyControl = nil }
         pipOn = on
         await writeSub(0x11, on ? 1 : 0)
+        guard on else { return }
+
+        // Push the rest so the panel is in the state the diagram claims.
+        //
+        // Two of these cannot be read back, so the only way for picture and
+        // monitor to agree is to make them agree. Four writes at ~0.09s is a
+        // third of a second, and the two ends are then in step by construction
+        // rather than by hope.
+        await writeSub(0x12, pipSideBySide ? 1 : 0)
+        await writeSub(0x14, pipPlacement)
+        await writeSub(0x13, pipSize)
     }
 
     func applyPiPSideBySide(_ side: Bool) async {
         pipBusyControl = "mode"
         defer { pipBusyControl = nil }
         pipSideBySide = side
-        if !pipOn { await applyPiPOn(true) }
         await writeSub(0x12, side ? 1 : 0)
     }
 

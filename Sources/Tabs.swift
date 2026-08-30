@@ -560,7 +560,7 @@ struct MultiScreenTab: View {
                     diagram("Placement") {
                         PiPPlacementPicker(
                             placement: Binding(get: { controller.pipPlacement }, set: { _ in }),
-                            enabled: controller.pipOn && controller.pipSideBySide != true,
+                            enabled: controller.pipOn && !controller.pipSideBySide,
                             busy: controller.pipBusyControl == "placement") { corner in
                             Task<Void, Never> { await controller.applyPiPPlacement(corner) }
                         }
@@ -568,31 +568,23 @@ struct MultiScreenTab: View {
                     diagram("Size") {
                         PiPSizePicker(
                             size: Binding(get: { controller.pipSize }, set: { _ in }),
-                            enabled: controller.pipOn && controller.pipSideBySide != true,
+                            enabled: controller.pipOn && !controller.pipSideBySide,
                             busy: controller.pipBusyControl == "size") { next in
                             Task<Void, Never> { await controller.applyPiPSize(next) }
                         }
                     }
                     diagram("Side by side") {
                         PiPSideBySidePicker(
-                            active: controller.pipSideBySide == true,
+                            active: controller.pipSideBySide,
                             enabled: controller.pipOn,
                             onPick: {
                                 Task<Void, Never> {
-                                    await controller.applyPiPSideBySide(controller.pipSideBySide != true)
+                                    await controller.applyPiPSideBySide(!controller.pipSideBySide)
                                 }
                             },
                             mac: controller.macSnapshot,
                             pc: controller.pcSnapshot)
                     }
-                }
-
-                if controller.pipOn && controller.pipPlacement == nil {
-                    Text("The panel does not report placement or mode, so those two are blank "
-                         + "until set here. On/off and size are read from the monitor.")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Theme.textDim)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if controller.needsScreenRecording {

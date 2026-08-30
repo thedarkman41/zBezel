@@ -41,9 +41,7 @@ private struct ScreenOutline<Content: View>: View {
 /// Quadrants also make the targets the size of a quarter of the picture rather
 /// than the size of the little rectangle drawn inside it.
 struct PiPPlacementPicker: View {
-    /// nil when the panel's placement is not known — it cannot be read back,
-    /// so nothing is filled in until this app has set it.
-    @Binding var placement: Int?
+    @Binding var placement: Int
     var enabled: Bool
     var busy: Bool = false
     var onPick: (Int) -> Void
