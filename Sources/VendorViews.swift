@@ -123,6 +123,10 @@ struct VendorMapperCard: View {
                         ProgressView().controlSize(.small)
                         Text("Reading the monitor…")
                             .font(.system(size: 11.5)).foregroundStyle(Theme.textSecond)
+                        Button("Cancel") { controller.cancelVendorMapping() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(Theme.accent)
                     }
                 }
 

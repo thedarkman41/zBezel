@@ -7,6 +7,11 @@ struct FeatureSlider: View {
     let code: UInt8
     let label: String
     @ObservedObject var controller: MonitorController
+    var tint: Color = Theme.accent
+    /// The value just written, held until the monitor reports it back. Without it
+    /// the knob springs to the old value the instant the drag ends and jumps
+    /// forward again when the read catches up.
+    @State private var pending: UInt16?
     @State private var draft: Double = 0
     @State private var loaded = false
     @State private var dragging = false
@@ -23,13 +28,25 @@ struct FeatureSlider: View {
                 if !editing {
                     // Whatever the knob ended on is the value that counts, even
                     // if no intermediate update was sent (a click on the track).
+                    let committed = UInt16(draft.rounded())
+                    pending = committed
                     Task<Void, Never> {
-                        await controller.setFinal(code: code, value: UInt16(draft.rounded()))
+                        await controller.setFinal(code: code, value: committed)
+                        // Release the hold when the WRITE finishes, not when the
+                        // monitor happens to report the exact value back. Waiting
+                        // for equality froze Contrast solid: the panel answered
+                        // with something else, the hold never lifted, and the
+                        // slider stopped tracking the model entirely.
+                        pending = nil
                     }
                 }
-            })
-        .onAppear { sync(state) }
-        .onChange(of: state?.current) { _, _ in sync(state) }
+            },
+            tint: tint)
+        .onAppear { pending = nil; sync(state) }
+        .onChange(of: state?.current) { _, now in
+            if let p = pending, now == p { pending = nil }
+            sync(state)
+        }
         .onChange(of: draft) { _, newValue in
             // ONLY while the user is actually dragging. SwiftUI also moves this
             // binding during layout and while animating into a synced value, and
@@ -44,8 +61,9 @@ struct FeatureSlider: View {
     }
 
     private func sync(_ state: FeatureState?) {
-        // Never yank the knob out from under a drag in progress.
-        guard let state, state.readable, !dragging else { return }
+        // Never yank the knob out from under a drag in progress, nor back to a
+        // stale value while the one just written is still in flight.
+        guard let state, state.readable, !dragging, pending == nil else { return }
         if !loaded || abs(draft - Double(state.current)) > 0.5 {
             draft = Double(state.current)
             loaded = true
@@ -306,10 +324,17 @@ struct DisplayTab: View {
                     SliderRow(label: "Contrast", value: .constant(75), range: 0...100, enabled: false)
                     MonitorSideUnavailable(controller: controller)
                 }
-                if controller.features[0x87]?.readable == true {
-                    ControlRow(label: "Sharpness") {
-                        FeaturePicker(code: 0x87, controller: controller)
+                if let sharp = controller.features[0x87], sharp.readable {
+                    NamedStepSlider(label: "Sharpness",
+                                    steps: sharp.choices,
+                                    current: sharp.current,
+                                    enabled: controller.controlsLive) { value in
+                        Task<Void, Never> { await controller.set(code: 0x87, value: value) }
                     }
+                    SharpnessPreview(level: sharp.choices.count > 1
+                        ? Double(sharp.choices.firstIndex { $0.value == sharp.current } ?? 0)
+                          / Double(sharp.choices.count - 1)
+                        : 0)
                 } else {
                     SliderRow(label: "Sharpness", value: .constant(50), range: 0...100, enabled: false)
                 }
@@ -382,6 +407,75 @@ struct DisplayTab: View {
     }
 }
 
+/// The Color Mode menu, grouped by what each mode actually is.
+///
+/// A flat list would put Warm beside P3 and imply they are the same kind of
+/// choice. They are not: one is a white-point preference, the other a gamut
+/// target, and the third group is HP's image processing. The sections say so
+/// without a paragraph of explanation, and each entry carries its own — what the
+/// mode is, and what it is for — as a tooltip.
+private struct ColorModeList: View {
+    let current: UInt16
+    var enabled: Bool
+    let onPick: (UInt16) -> Void
+
+    /// The mode just chosen, shown as selected until the monitor confirms it.
+    ///
+    /// The write is a round trip and the panel changes long before the answer
+    /// comes back, so binding the dot purely to the reported value left the click
+    /// looking ignored for the better part of a second while the screen had
+    /// already changed.
+    @State private var pending: UInt16?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            ForEach(Array(HPProfile.colorModeGroups.enumerated()), id: \.element.title) { i, group in
+                Text(group.title.uppercased())
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .kerning(0.6)
+                    .foregroundStyle(Theme.textDim)
+                    .padding(.top, i == 0 ? 0 : 7)
+                    .padding(.bottom, 1)
+                ForEach(group.modes) { row($0) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .onChange(of: current) { _, now in
+            if now == pending { pending = nil }
+        }
+    }
+
+    /// Every row carries its own tooltip. That is the reason this is a list and
+    /// not a pop-up menu: macOS will not reliably show a tooltip on an item
+    /// inside an open menu, so the descriptions were written and unreachable.
+    private func row(_ m: HPProfile.ColorMode) -> some View {
+        let chosen = m.value == (pending ?? current)
+        return HStack(spacing: 8) {
+            Image(systemName: chosen ? "largecircle.fill.circle" : "circle")
+                .font(.system(size: 13))
+                .foregroundStyle(chosen ? Theme.accent : Theme.textDim)
+            Text(m.name)
+                .font(.system(size: 13))
+                .foregroundStyle(enabled ? Theme.textPrimary : Theme.textDim)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 1)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard enabled else { return }
+            pending = m.value
+            onPick(m.value)
+            // Backstop: never let the optimistic dot outlive the write, even if
+            // the monitor answers with a value we did not send.
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if pending == m.value { pending = nil }
+            }
+        }
+        .help(m.help)
+    }
+}
+
 /// A label beside a control, for cards holding more than one picker.
 ///
 /// Cards with a single control use the card's own title as the label; these two
@@ -413,9 +507,13 @@ struct OSDMenuSlider: View {
     let onCommit: (Int) -> Void
 
     @State private var live: Double?
+    /// The value just committed, held until the model reports it. Clearing `live`
+    /// on release without this drops the knob back to the old number for as long
+    /// as the write takes, which reads as a bounce.
+    @State private var pending: Int?
 
     var body: some View {
-        let shown = live ?? Double(value)
+        let shown = live ?? Double(pending ?? value)
         VStack(alignment: .leading, spacing: 5) {
             HStack {
                 Text(label)
@@ -430,11 +528,15 @@ struct OSDMenuSlider: View {
                                   set: { live = $0 }),
                    in: Double(range.lowerBound)...Double(range.upperBound),
                    onEditingChanged: { editing in
-                       if !editing, let v = live {
-                           onCommit(Int(v.rounded()))
-                           live = nil
-                       }
+                       guard !editing, let v = live else { return }
+                       let committed = Int(v.rounded())
+                       pending = committed
+                       live = nil
+                       onCommit(committed)
                    })
+            .onChange(of: value) { _, now in
+                if now == pending { pending = nil }
+            }
         }
     }
 }
@@ -463,25 +565,38 @@ struct ColorTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        CardGrid {
-            Card(title: "Colour Preset", systemImage: "paintpalette",
-                 help: "The nine presets on the monitor's Colour menu (0xDC). "
-                     + "0x14 mirrors the choice but is not what the OSD drives.") {
-                if controller.features[0xDC]?.readable == true {
-                    FeaturePicker(code: 0xDC, controller: controller)
+        // Explicit columns rather than the shared two-up grid. The grid fills
+        // row by row, which put Black Level under Color Mode; the two channel
+        // cards belong together, one under the other.
+        VStack(alignment: .trailing, spacing: 9) {
+        HStack(alignment: .top, spacing: 16) {
+            Card(title: "Color Mode", systemImage: "paintpalette",
+                 help: "The nine modes on the monitor's Colour menu (0xDC). They are "
+                     + "three different kinds of setting, so they are grouped rather "
+                     + "than listed flat. 0x14 mirrors the choice but is not what the "
+                     + "OSD drives.") {
+                if let mode = controller.features[0xDC], mode.readable {
+                    ColorModeList(current: mode.current,
+                                  enabled: controller.controlsLive) { value in
+                        Task<Void, Never> { await controller.set(code: 0xDC, value: value) }
+                    }
                 } else {
                     StyledPicker(options: [(value: UInt16(1), label: "sRGB")],
                                  selection: .constant(UInt16(1)), enabled: false, width: 220)
                     MonitorSideUnavailable(controller: controller)
                 }
             }
+            // Stretch to the height of the column beside it, so the two columns
+            // end level instead of the taller one trailing off on its own.
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
+            VStack(spacing: 16) {
             Card(title: "RGB Gain", systemImage: "slider.horizontal.3",
                  help: "MCCS video gain: red 0x16, green 0x18, blue 0x1A.") {
                 if [0x16, 0x18, 0x1A].contains(where: { controller.features[$0]?.readable == true }) {
-                    FeatureSlider(code: 0x16, label: "Red", controller: controller)
-                    FeatureSlider(code: 0x18, label: "Green", controller: controller)
-                    FeatureSlider(code: 0x1A, label: "Blue", controller: controller)
+                    FeatureSlider(code: 0x16, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
+                    FeatureSlider(code: 0x18, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
+                    FeatureSlider(code: 0x1A, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
                 } else {
                     ForEach(["Red", "Green", "Blue"], id: \.self) { channel in
                         SliderRow(label: channel, value: .constant(50), range: 0...100, enabled: false)
@@ -493,9 +608,9 @@ struct ColorTab: View {
             Card(title: "Black Level", systemImage: "circle.lefthalf.filled",
                  help: "MCCS video black level: red 0x6C, green 0x6E, blue 0x70.") {
                 if [0x6C, 0x6E, 0x70].contains(where: { controller.features[$0]?.readable == true }) {
-                    FeatureSlider(code: 0x6C, label: "Red", controller: controller)
-                    FeatureSlider(code: 0x6E, label: "Green", controller: controller)
-                    FeatureSlider(code: 0x70, label: "Blue", controller: controller)
+                    FeatureSlider(code: 0x6C, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
+                    FeatureSlider(code: 0x6E, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
+                    FeatureSlider(code: 0x70, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
                 } else {
                     ForEach(["Red", "Green", "Blue"], id: \.self) { channel in
                         SliderRow(label: channel, value: .constant(50), range: 0...100, enabled: false)
@@ -504,19 +619,22 @@ struct ColorTab: View {
                 }
             }
 
-            Card(title: "Restore Colour", systemImage: "arrow.uturn.backward",
-                 help: "MCCS restore factory colour defaults (0x08).") {
-                Button("Restore factory colour") {
-                    Task<Void, Never> { await controller.set(code: 0x08, value: 1) }
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.textDim)
-                .disabled(!controller.monitorControlAvailable)
-                if !controller.monitorControlAvailable {
-                    MonitorSideUnavailable(controller: controller)
-                }
             }
+            .frame(maxWidth: .infinity, alignment: .top)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+
+        // A whole card for one button was more furniture than the action
+        // deserved. As a line of text under the columns it is still findable and
+        // stops competing with the settings for attention.
+        Button("Restore factory colour") {
+            Task<Void, Never> { await controller.set(code: 0x08, value: 1) }
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 11.5))
+        .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.textDim)
+        .disabled(!controller.monitorControlAvailable)
+        .help("MCCS restore factory colour defaults (0x08).")
         }
     }
 }
@@ -528,6 +646,42 @@ struct ViewTab: View {
 
     var body: some View {
         CardGrid {
+            // Three settings HP's Menu screen owns, reachable only as 0xE1
+            // sub-selectors and readable through no channel at all — so these
+            // show what this app last set, and start at HP's factory values
+            // rather than pretending to have asked the panel.
+            Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
+                 help: "Where the monitor's own menu appears, how long it stays up, "
+                     + "and how transparent it is. Vendor sub-selectors 0x3B, 0x3C, "
+                     + "0x3E and 0x56 — set only, never reported back.") {
+                if controller.controlsLive {
+                    OSDMenuPreview(
+                        horizontal: controller.osdMenuH,
+                        vertical: controller.osdMenuV,
+                        transparency: controller.osdTransparency,
+                        enabled: true,
+                        onMove: { h, v in
+                            Task<Void, Never> {
+                                await controller.applyOSDMenu(horizontal: h)
+                                await controller.applyOSDMenu(vertical: v)
+                            }
+                        },
+                        onTransparency: { step in
+                            Task<Void, Never> {
+                                await controller.applyOSDMenu(transparency: step)
+                            }
+                        })
+                    OSDMenuSlider(label: "Stays up for", value: controller.osdMenuTimeout,
+                                  range: 5...60, suffix: "s") { v in
+                        Task<Void, Never> { await controller.applyOSDMenu(timeout: v) }
+                    }
+                } else {
+                    SliderRow(label: "Position across", value: .constant(97),
+                              range: 0...100, enabled: false)
+                    MonitorSideUnavailable(controller: controller)
+                }
+            }
+
             Card(title: "On-Screen Display", systemImage: "character.bubble",
                  help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
                 FieldLabel(text: "Language")
@@ -547,15 +701,6 @@ struct ViewTab: View {
                 }
             }
 
-            Card(title: "Volume", systemImage: "speaker.wave.2",
-                 help: "MCCS audio speaker volume (0x62).") {
-                if controller.features[0x62]?.readable == true {
-                    FeatureSlider(code: 0x62, label: "Volume", controller: controller)
-                } else {
-                    SliderRow(label: "Volume", value: .constant(30), range: 0...100, enabled: false)
-                    MonitorSideUnavailable(controller: controller)
-                }
-            }
         }
     }
 }

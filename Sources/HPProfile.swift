@@ -54,6 +54,68 @@ enum HPProfile {
     /// the values are what carry meaning.
     static let subAddressedCodes: Set<UInt8> = [0xE1, 0xE8]
 
+    /// One entry on the monitor's Color Mode menu.
+    struct ColorMode: Identifiable {
+        let value: UInt16
+        let name: String
+        /// What the mode is.
+        let what: String
+        /// What it is for.
+        let bestFor: String
+
+        var id: UInt16 { value }
+        var help: String { "\(what)\n\nBest for: \(bestFor)" }
+    }
+
+    /// The nine modes, grouped by what they actually are.
+    ///
+    /// A flat list is misleading here, because 0xDC mixes three different kinds of
+    /// setting: calibrated colour-space targets, white-point preferences, and HP's
+    /// image processing. Listed together they imply that Warm and P3 are the same
+    /// sort of choice, and they are not — one is a look, the other is a gamut.
+    static let colorModeGroups: [(title: String, modes: [ColorMode])] = [
+        ("Calibrated color spaces", [
+            ColorMode(value: 0x00, name: "Native",
+                what: "Uses the panel's full native colour response without emulating a colour space.",
+                bestFor: "A measured or calibrated workflow, or colour-managed apps with a matching ICC profile."),
+            ColorMode(value: 0x01, name: "sRGB (D65)",
+                what: "Standard SDR colour for the web, general desktop use, and most non-colour-managed content.",
+                bestFor: "The default choice for ordinary Mac use."),
+            ColorMode(value: 0x02, name: "BT.709 (D65)",
+                what: "HD SDR video colour standard with a D65 white point.",
+                bestFor: "Rec.709 and HD video editing or review."),
+            // 0x05, not the 0x21 the capabilities string lists: writing 0x21
+            // works but the panel reports 0x05 back, so a row keyed to 0x21 would
+            // never show as selected. Every other mode round-trips exactly.
+            ColorMode(value: 0x05, name: "P3 (D65)",
+                what: "Wide-gamut Display P3-style mode with a D65 white point.",
+                bestFor: "Wide-gamut photography, Apple-oriented content, and P3-targeted video and design."),
+            ColorMode(value: 0x2B, name: "Color Match",
+                what: "The monitor's colour-matching mode. Pair it with the corresponding ICC profile.",
+                bestFor: "Colour-critical or factory-calibrated work."),
+        ]),
+        ("White balance", [
+            ColorMode(value: 0x13, name: "Warm",
+                what: "Warmer white point, with a reduced blue appearance.",
+                bestFor: "Comfort and preference. Not colour-critical work."),
+            ColorMode(value: 0x15, name: "Neutral",
+                what: "Balanced, default white appearance.",
+                bestFor: "General viewing when no standard-space target is needed."),
+            ColorMode(value: 0x14, name: "Cool",
+                what: "Cooler white point, with a bluer appearance.",
+                bestFor: "Bright rooms and preference. Not colour-critical work."),
+        ]),
+        ("Enhancement", [
+            ColorMode(value: 0x1D, name: "HP Enhance+",
+                what: "HP's image-enhancement processing. May favour perceived sharpness, contrast or saturation over reference accuracy.",
+                bestFor: "Casual desktop and media use, when you prefer the look."),
+        ]),
+    ]
+
+    static func colorMode(for value: UInt16) -> ColorMode? {
+        colorModeGroups.lazy.flatMap(\.modes).first { $0.value == value }
+    }
+
     static func note(for code: UInt8) -> String? {
         if subAddressedCodes.contains(code) {
             return "Sub-addressed: HP packs several settings behind this one code, "

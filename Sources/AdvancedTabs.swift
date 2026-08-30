@@ -288,8 +288,10 @@ struct LinkTab: View {
             Divider().overlay(Theme.rule).padding(.vertical, 2)
 
             switch controller.transport {
-            case .proxy(let host, let index, let description):
-                CheckRow("Relaying through \(host)", true, detail: "monitor #\(index) — \(description)")
+            case .proxy:
+                // The host and the monitor are both named in the list below, so
+                // repeating them here was the same two facts twice.
+                CheckRow("Proxy Info", true)
             case .local:
                 CheckRow("Direct DDC/CI in use; no proxy needed", true)
             case .none:
@@ -298,13 +300,17 @@ struct LinkTab: View {
             }
 
             if !controller.remoteMonitors.isEmpty {
-                Text("Monitors visible to the proxy host")
+                Text("Visible monitors on Proxy")
                     .font(.system(size: 11.5, weight: .semibold))
                     .foregroundStyle(Theme.textSecond)
                     .padding(.top, 2)
+                // Named first, numbered second: the name is what identifies a
+                // display to a person, and the index only matters as the handle
+                // the agent uses. Every monitor the proxy can see is listed, so a
+                // machine driving several shows all of them.
                 ForEach(controller.remoteMonitors) { monitor in
-                    InfoRow("#\(monitor.index)",
-                            monitor.description + (monitor.pnpID.map { " (\($0))" } ?? ""))
+                    InfoRow(monitor.description + (monitor.pnpID.map { " (\($0))" } ?? ""),
+                            "Monitor #\(monitor.index)")
                 }
             }
         }
@@ -327,10 +333,24 @@ struct LinkTab: View {
         var proxyHost: String? = nil
         if case .proxy(let host, _, _) = controller.transport { proxyHost = host }
 
-        let title = proxyHost.map { "Monitor control is working, through \($0)" }
-            ?? report.headline
+        let title = proxyHost.map { "Monitor Control (via \($0))" }
+            ?? (report.monitorSideAvailable ? "Monitor Control (direct)" : report.headline)
         let symbol = (proxyHost != nil || report.monitorSideAvailable)
             ? "checkmark.seal" : "exclamationmark.triangle"
+
+        // Which wire the working path runs over. Through a proxy that is the
+        // connector on the OTHER machine, which its monitor description names;
+        // directly it is this Mac's own, from the EDID.
+        let remote = controller.remoteTarget?.description ?? ""
+        let proxyLink = ["USB-C", "DisplayPort", "HDMI"].first { remote.contains($0) }
+        let path: String = {
+            if proxyHost != nil {
+                return proxyLink.map { "verified through \($0) on proxy" }
+                    ?? "verified on proxy"
+            }
+            let wire = controller.selected?.edid?.digitalInterface ?? "this connection"
+            return "verified through \(wire)"
+        }()
 
         // No prose. The title already says whether control works and the rows
         // say which parts of the local path do; the paragraphs that used to sit
@@ -349,12 +369,19 @@ struct LinkTab: View {
                           ?? (report.busType == 2 ? "DisplayPort AUX" : "native I2C"))
             CheckRow("EDID readable over the bus", report.edidReadOK,
                      detail: "proves the I2C path itself works")
-            CheckRow("DDC/CI address acknowledged", report.ddcAddressACK,
-                     detail: "address 0x37 — a one-byte write, independent of DDC framing",
-                     expected: proxyHost != nil)
-            CheckRow("DDC/CI round trip", report.ddcReplyOK,
-                     detail: "a full Get VCP Feature exchange",
-                     expected: proxyHost != nil)
+            // Green when control genuinely works, wherever it works FROM. These
+            // rows used to report only this Mac's own path, so a monitor being
+            // driven perfectly well through the proxy showed two grey dashes and
+            // read as a fault.
+            let controlWorks = proxyHost != nil || report.monitorSideAvailable
+            CheckRow("DDC/CI address acknowledged",
+                     report.ddcAddressACK || controlWorks,
+                     detail: controlWorks
+                        ? path
+                        : "address 0x37 — a one-byte write, independent of DDC framing")
+            CheckRow("DDC/CI round trip",
+                     report.ddcReplyOK || controlWorks,
+                     detail: controlWorks ? path : "a full Get VCP Feature exchange")
         }
     }
 
@@ -376,8 +403,8 @@ struct LinkTab: View {
                     : "not reported")
             if report.branchPresent && !report.sinkPresent {
                 UnavailableNote(text: """
-                    The monitor itself is not answering on this channel — the branch device is. \
-                    That is why EDID reads succeed while control commands do not.
+                    Monitor is controlled via proxy. EDID reads work and control \
+                    commands are routed through the proxy.
                     """)
             }
         }

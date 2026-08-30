@@ -218,6 +218,10 @@ struct SliderRow: View {
     /// Fires true when a drag starts and false when it ends.
     var onEditingChanged: (Bool) -> Void = { _ in }
     var onCommit: () -> Void = {}
+    /// The filled part of the track. Channel sliders use their own colour, so a
+    /// row of three reads as red, green and blue at a glance rather than as three
+    /// identical blue bars with words above them.
+    var tint: Color = Theme.accent
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -234,10 +238,96 @@ struct SliderRow: View {
                 onEditingChanged(editing)
                 if !editing { onCommit() }
             })
+            .tint(tint)
+            .disabled(!enabled)
+        }
+        .opacity(enabled ? 1 : 0.5)
+    }
+}
+
+/// A slider over named steps rather than numbers.
+///
+/// Laid out exactly like SliderRow — same row, same geometry — but the readout on
+/// the right is the step's NAME where a plain slider shows its value. That suits a
+/// setting whose positions the monitor names ("Soft", "Level 2", "Sharp"): the
+/// spacing is a real progression, so a slider is honest, but the numbers behind it
+/// mean nothing to anyone.
+///
+/// Writes as the knob crosses each detent, so the panel tracks the drag.
+///
+/// While a drag is in progress the knob follows the finger and NOTHING else moves
+/// it. That is the whole trick: each write updates the monitor's reported value,
+/// and if the knob is bound to that value it gets yanked backwards every time one
+/// lands, which reads as the control fighting you. The monitor's value is ignored
+/// until the drag ends.
+///
+/// One write per detent crossed, never one per pixel of travel — each is its own
+/// round trip.
+struct NamedStepSlider: View {
+    let label: String
+    /// In display order, smallest first.
+    let steps: [(value: UInt16, label: String)]
+    let current: UInt16
+    var enabled: Bool = true
+    let onChange: (UInt16) -> Void
+
+    @State private var live: Double?
+    @State private var dragging = false
+    @State private var lastSent: Int?
+    /// The step just written, held until the monitor reports it.
+    @State private var pending: UInt16?
+
+    private var index: Int { steps.firstIndex { $0.value == current } ?? 0 }
+
+    var body: some View {
+        // Under the finger while dragging; under the monitor's control otherwise.
+        let held = pending.flatMap { p in steps.firstIndex { $0.value == p } }
+        let shown = dragging ? (live ?? Double(index)) : Double(held ?? index)
+        let at = Int(shown.rounded())
+        let name = steps.indices.contains(at) ? steps[at].label : "—"
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(label)
+                    .font(.system(size: 13))
+                    .foregroundStyle(enabled ? Theme.textPrimary : Theme.textDim)
+                Spacer()
+                Text(name)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textSecond)
+            }
+            Slider(value: Binding(get: { shown },
+                                  set: { newValue in
+                                      live = newValue
+                                      let i = Int(newValue.rounded())
+                                      guard i != lastSent, steps.indices.contains(i)
+                                      else { return }
+                                      lastSent = i
+                                      let sent = steps[i].value
+                                      pending = sent
+                                      onChange(sent)
+                                      Task { @MainActor in
+                                          try? await Task.sleep(nanoseconds: 1_500_000_000)
+                                          if pending == sent { pending = nil }
+                                      }
+                                  }),
+                   in: 0...Double(max(steps.count - 1, 1)),
+                   step: 1,
+                   onEditingChanged: { editing in
+                       dragging = editing
+                       if editing {
+                           lastSent = index      // where this drag started
+                       } else {
+                           live = nil
+                           lastSent = nil
+                       }
+                   })
             .tint(Theme.accent)
             .disabled(!enabled)
         }
         .opacity(enabled ? 1 : 0.5)
+        .onChange(of: current) { _, now in
+            if now == pending { pending = nil }
+        }
     }
 }
 

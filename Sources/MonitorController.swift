@@ -87,8 +87,22 @@ final class MonitorController: ObservableObject {
     // Vendor-code discovery
     @Published var vendorMap: VendorMap { didSet { vendorMap.save() } }
     @Published private(set) var vendorBaseline: [UInt8: UInt16]?
+    /// Sub-addressed codes, sampled: code -> selector -> value.
+    ///
+    /// These cannot be compared by a single read. 0xE1 answers with whichever
+    /// sub-selector its rotation lands on, so two plain reads taken a minute apart
+    /// are usually different SETTINGS rather than a changed one.
+    private var vendorSubBaseline: [UInt8: [UInt8: UInt16]] = [:]
     @Published private(set) var vendorChanges: [VendorChange] = []
     @Published private(set) var mapperBusy = false
+    /// Set by the Cancel affordance; the sampling loop checks it between chunks.
+    ///
+    /// Sampling a sub-addressed code properly takes hundreds of reads, which is
+    /// most of a minute on this link. A job that long with no way out is a job
+    /// that traps the user.
+    private var vendorCancelled = false
+
+    func cancelVendorMapping() { vendorCancelled = true }
 
     private let agent = RemoteAgent()
 
@@ -664,22 +678,67 @@ final class MonitorController: ObservableObject {
     func snapshotVendorCodes() async {
         guard !vendorCodes.isEmpty, !mapperBusy else { return }
         mapperBusy = true
-        defer { mapperBusy = false }
+        vendorCancelled = false
+        defer { mapperBusy = false; vendorCancelled = false }
         vendorChanges = []
-        vendorBaseline = await reread(codes: vendorCodes)
+        vendorBaseline = await reread(codes: vendorCodes.filter {
+            !HPProfile.subAddressedCodes.contains($0)
+        })
+        vendorSubBaseline = await sampleSubAddressed()
+    }
+
+    /// Sample every sub-addressed code's selector map.
+    ///
+    /// 250 reads per code, because the rotation is lopsided and its bias shifts
+    /// with the panel's state — a selector can be 80% of one pass and absent from
+    /// the next. A small sample makes absence look like a change.
+    private func sampleSubAddressed() async -> [UInt8: [UInt8: UInt16]] {
+        guard case .proxy(_, let index, _) = transport else { return [:] }
+        var out: [UInt8: [UInt8: UInt16]] = [:]
+        for code in vendorCodes where HPProfile.subAddressedCodes.contains(code) {
+            var merged: [UInt8: UInt16] = [:]
+            // In chunks, so Cancel is answered within a second or two rather than
+            // at the end of a quarter-thousand reads.
+            for _ in 0..<5 {
+                if vendorCancelled { return out }
+                if let map = try? await agent.readSubSelectorMap(
+                    monitor: index, code: code, samples: 50) {
+                    merged.merge(map) { _, new in new }
+                }
+            }
+            out[code] = merged
+        }
+        return out
     }
 
     /// Re-read and report what moved since the snapshot.
     func compareVendorCodes() async {
         guard let baseline = vendorBaseline, !mapperBusy else { return }
         mapperBusy = true
-        defer { mapperBusy = false }
+        vendorCancelled = false
+        defer { mapperBusy = false; vendorCancelled = false }
 
-        let now = await reread(codes: vendorCodes)
-        vendorChanges = now.compactMap { code, value in
+        let now = await reread(codes: vendorCodes.filter {
+            !HPProfile.subAddressedCodes.contains($0)
+        })
+        var changes: [VendorChange] = now.compactMap { code, value in
             guard let before = baseline[code], before != value else { return nil }
-            return VendorChange(code: code, before: before, after: value)
+            return VendorChange(code: code, before: before, after: value, selector: nil)
         }
+
+        // Sub-addressed codes are diffed per selector, and only where the selector
+        // turned up in BOTH samples. A selector missing from one pass says nothing
+        // about whether it changed — it says the rotation did not offer it.
+        let after = await sampleSubAddressed()
+        for (code, nowMap) in after {
+            guard let beforeMap = vendorSubBaseline[code] else { continue }
+            for (selector, value) in nowMap {
+                guard let was = beforeMap[selector], was != value else { continue }
+                changes.append(VendorChange(code: code, before: was,
+                                            after: value, selector: selector))
+            }
+        }
+        vendorChanges = changes
         .sorted { $0.code < $1.code }
     }
 

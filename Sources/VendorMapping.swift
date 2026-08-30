@@ -130,15 +130,30 @@ struct VendorChange: Identifiable, Equatable {
     let code: UInt8
     let before: UInt16
     let after: UInt16
-    var id: UInt8 { code }
+    /// Set for a sub-addressed code: WHICH setting behind that code moved.
+    ///
+    /// Previously the selector was taken from the high byte of the later reading
+    /// and applied to both. That is wrong whenever the two readings are different
+    /// sub-selectors, which for 0xE1 is most of the time — a plain read of it
+    /// returns whichever one the monitor's rotation happens to land on. Every
+    /// comparison therefore reported a change, and the change it printed was two
+    /// unrelated settings subtracted from each other.
+    let selector: UInt8?
+
+    var id: String {
+        selector.map { String(format: "%02X.%02X", code, $0) }
+            ?? String(format: "%02X", code)
+    }
 
     var description: String {
-        String(format: "0x%02X: %d → %d", code, before, after)
+        guard let selector else {
+            return String(format: "0x%02X: %d → %d", code, before, after)
+        }
+        return String(format: "0x%02X sub 0x%02X: %d → %d", code, selector, before, after)
     }
-    /// HP's sub-addressed codes carry a selector in the high byte.
+
     var decomposed: String? {
-        guard HPProfile.subAddressedCodes.contains(code) else { return nil }
-        return String(format: "sub 0x%02X: 0x%02X → 0x%02X",
-                      after >> 8, before & 0xFF, after & 0xFF)
+        guard selector != nil else { return nil }
+        return String(format: "0x%02X → 0x%02X", before & 0xFF, after & 0xFF)
     }
 }

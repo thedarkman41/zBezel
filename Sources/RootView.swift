@@ -97,39 +97,7 @@ struct RootView: View {
 
             Spacer(minLength: 12)
 
-            if controller.monitorControlAvailable, case .proxy(let host, _, _) = controller.transport {
-                HStack(spacing: 5) {
-                    Image(systemName: "arrow.triangle.branch")
-                        .font(.system(size: 10, weight: .semibold))
-                    Text("via \(host)")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundStyle(Theme.accent)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(Theme.accent.opacity(0.15)))
-                .padding(.trailing, 10)
-                .help("Monitor control is being relayed through \(host), which has an unobstructed DDC/CI path.")
-            }
-
-            if controller.isProbing || controller.isRefreshing {
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text(controller.probeStatus)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.textSecond)
-                }
-            } else {
-                Button {
-                    Task<Void, Never> { await controller.probe() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(Theme.textSecond)
-                }
-                .buttonStyle(.plain)
-                .help("Re-examine the link and re-read the monitor")
-            }
+            TransportPill(controller: controller)
         }
         .padding(.trailing, 22)
         .frame(height: 60)
@@ -244,5 +212,98 @@ struct LinkBanner: View {
                 .fill(Theme.warning.opacity(0.09))
                 .overlay(RoundedRectangle(cornerRadius: Theme.cardRadius)
                     .strokeBorder(Theme.warning.opacity(0.30), lineWidth: 1)))
+    }
+}
+
+
+/// How the monitor is being reached, and the button that re-reads it — one
+/// control rather than a label sitting next to an unrelated glyph.
+///
+/// While a probe is running the whole pill becomes the progress indicator: a
+/// gradient sweeps across it, thickening from transparent to solid. That says
+/// "working" using the shape that is already there, instead of a spinner and a
+/// line of status text appearing beside it and shifting the toolbar around.
+private struct TransportPill: View {
+    @ObservedObject var controller: MonitorController
+
+    @State private var sweep: CGFloat = -1
+    @State private var spin: Double = 0
+
+    private var busy: Bool { controller.isProbing || controller.isRefreshing }
+
+    private var label: String {
+        if case .proxy(let host, _, _) = controller.transport { return "via \(host)" }
+        return controller.monitorControlAvailable ? "direct" : "no link"
+    }
+
+    private var symbol: String {
+        if case .proxy = controller.transport { return "arrow.triangle.branch" }
+        return controller.monitorControlAvailable ? "cable.connector" : "bolt.horizontal"
+    }
+
+    var body: some View {
+        Button {
+            Task<Void, Never> { await controller.probe() }
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+                    .rotationEffect(.degrees(spin))
+            }
+            .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.warning)
+            .padding(.horizontal, 13)
+            .padding(.vertical, 7)
+            .background(background)
+            .clipShape(Capsule())
+            .overlay(Capsule().strokeBorder(
+                (controller.monitorControlAvailable ? Theme.accent : Theme.warning)
+                    .opacity(0.35), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .help(busy ? controller.probeStatus : "Re-examine the link and re-read the monitor")
+        .onChange(of: busy) { _, running in
+            if running { start() } else { stop() }
+        }
+        .onAppear { if busy { start() } }
+    }
+
+    private var background: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Theme.accent.opacity(0.15))
+                if busy {
+                    // A band that runs the length of the pill, transparent at its
+                    // leading edge and solid at its trailing one, swept across.
+                    Capsule()
+                        .fill(LinearGradient(
+                            colors: [Theme.accent.opacity(0),
+                                     Theme.accent.opacity(0.20),
+                                     Theme.accent.opacity(0.55)],
+                            startPoint: .leading, endPoint: .trailing))
+                        .frame(width: geo.size.width)
+                        .offset(x: sweep * geo.size.width)
+                }
+            }
+        }
+    }
+
+    private func start() {
+        sweep = -1
+        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+            sweep = 1
+        }
+        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
+            spin = 360
+        }
+    }
+
+    private func stop() {
+        withAnimation(.easeOut(duration: 0.25)) { sweep = -1 }
+        spin = 0
     }
 }

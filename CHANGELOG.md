@@ -2,6 +2,85 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.42 — 2026-08-30
+
+**Draw the monitor's menu, unify the transport pill, fix the vendor mapper**
+
+A pass over the controls, mostly making them tell the truth about what the
+monitor is doing.
+
+COLOR MODE. The nine presets are now an expanded list with radio buttons,
+grouped by what each one actually is: calibrated colour spaces, white balance,
+and HP's enhancement processing. A flat list put Warm beside P3 and implied they
+were the same kind of choice. Each row carries its own description and what it
+is for as a tooltip — the reason it is a list rather than a pop-up menu, since
+macOS will not reliably show a tooltip on an item inside an open menu, and those
+descriptions were written and unreachable.
+
+P3 keys on 0x05, not the 0x21 the capabilities string lists. Writing 0x21 works
+but the panel reports 0x05 back, so the row never showed as selected.
+
+THE MONITOR'S MENU, drawn instead of typed. Two numbered sliders described where
+HP's own menu sits; "position across 97" is not a picture of anything. There is
+now a 16:9 screen with a likeness of the menu inside it — title strip, section
+column, settings, input line — that can be dragged anywhere and writes both
+coordinates on release. The panel counts vertical from the BOTTOM, which is why
+the first version put the menu at the top when it was dropped at the bottom.
+
+Underneath it, the transparency slider has a detent at each of the six reachable
+steps, and the mock's opacity follows the knob live so the effect is visible
+before it is written.
+
+SHARPNESS is a seven-detent slider showing the step's NAME where brightness and
+contrast show their number, with a line-pair test target beneath it. Monitor
+sharpness is edge enhancement, not detail: the target softens at low steps and
+rings at high ones, which is what the setting does. It is a simulation drawn by
+the Mac and says so on the card — nothing reports the shape of the panel's
+filter, and a preview implying otherwise would be worse than none.
+
+THE TRANSPORT PILL is one control instead of a label beside an unrelated glyph.
+It carries the refresh action inside it, and during a probe the pill itself
+becomes the progress indicator: a gradient sweeps across it and the glyph turns
+with it. A sweep rather than a filling bar, because a probe has no percentage to
+report. The old spinner and status text appeared beside the pill and shoved the
+toolbar sideways mid-refresh.
+
+THE LINK TAB no longer reads as a fault when everything works. It says "Monitor
+Control (via rigel)" or "(direct)", and the two DDC/CI rows go green whenever
+control genuinely works, naming where it was verified — through USB-C on the
+proxy, or through this Mac's own connector from the EDID. Those rows previously
+reported only this Mac's path, so a monitor being driven perfectly well showed
+two grey dashes.
+
+THE VENDOR MAPPER was reporting a change every single time and the change it
+printed was nonsense. It snapshotted 0xE1 with one plain read, and a plain read
+of 0xE1 returns whichever sub-selector the monitor's rotation lands on — so two
+snapshots were usually different SETTINGS rather than a changed one. The
+decomposition then took the selector from the later reading and applied it to
+both. Sub-addressed codes are now sampled and diffed per selector, and only
+where a selector appeared in both samples: absence says the rotation did not
+offer it, not that nothing changed. That made snapshots take hundreds of reads,
+so there is now a Cancel beside the spinner, answered between chunks.
+
+RGB Gain and Black Level sliders are tinted their own colour, so a row of three
+reads as red, green and blue rather than three identical blue bars with words
+above them. The Volume card is gone; this panel has no speakers and the card
+existed only to say so.
+
+WRITE HOLDS. Every control bound to a value the monitor confirms asynchronously
+now holds what the user set until the write completes. Without it the knob
+springs back to the stale reading the instant the drag ends and jumps forward
+again when the answer arrives. This was one bug in six places — sliders, radio
+rows, the drag — and it was fixed three times individually before being
+recognised as a pattern.
+
+Two of tonight's faults were self-inflicted and are recorded here rather than
+quietly repaired. The first version of that hold only released when the monitor
+reported back the exact value written, so the first time it answered with
+anything else the control froze solid; Contrast was stuck at 0 until it was
+found. And the Monitor Menu card was deleted by an edit that sliced between two
+anchors without checking what sat between them.
+
 ## 0.1.41 — 2026-08-30
 
 **Name the colour presets, add menu transparency**
