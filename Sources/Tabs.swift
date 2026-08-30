@@ -508,6 +508,16 @@ struct ViewTab: View {
 struct MultiScreenTab: View {
     @ObservedObject var controller: MonitorController
 
+    /// Refresh the two stills while this tab is visible, and stop when it is
+    /// not — the task is cancelled on disappear, so nothing captures the screen
+    /// or wakes the PC while nobody is looking at the diagram.
+    private func liveSnapshots() async {
+        while !Task.isCancelled {
+            await controller.refreshSnapshots()
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+        }
+    }
+
     /// A diagram with its name under it.
     private func diagram<C: View>(_ title: String, @ViewBuilder _ content: () -> C) -> some View {
         VStack(spacing: 5) {
@@ -519,6 +529,10 @@ struct MultiScreenTab: View {
     }
 
     var body: some View {
+        grid.task { await liveSnapshots() }
+    }
+
+    private var grid: some View {
         CardGrid {
             Card(title: "Picture in Picture", systemImage: "rectangle.inset.topright.filled",
                  help: """
@@ -554,12 +568,25 @@ struct MultiScreenTab: View {
                     diagram("Side by side") {
                         PiPSideBySidePicker(
                             active: controller.pipSideBySide,
-                            enabled: controller.pipOn) {
-                            Task<Void, Never> {
-                                await controller.applyPiPSideBySide(!controller.pipSideBySide)
-                            }
-                        }
+                            enabled: controller.pipOn,
+                            onPick: {
+                                Task<Void, Never> {
+                                    await controller.applyPiPSideBySide(!controller.pipSideBySide)
+                                }
+                            },
+                            left: controller.macSnapshot,
+                            right: controller.pcSnapshot)
                     }
+                }
+
+                if controller.needsScreenRecording {
+                    Button("Allow screen recording to preview both desktops") {
+                        controller.askForScreenRecording()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .help("macOS only applies this after zBezel is relaunched.")
                 }
             }
 

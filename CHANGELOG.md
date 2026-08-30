@@ -2,6 +2,36 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.30 — 2026-08-29
+
+**Live desktops in the side-by-side diagram**
+
+The two panes now show what each machine is actually displaying, refreshed every
+eight seconds while the MultiScreen tab is open.
+
+The Mac half is the display the PANEL is showing, not the built-in screen. Side
+by side composites what this Mac sends to that panel next to what the PC sends,
+so the built-in would be the wrong picture entirely. The PC half is the capture
+already added for the Mission Control thumbnail, requested over the clipboard
+channel so it cannot delay pointer events.
+
+Captured through ScreenCaptureKit rather than CGDisplayCreateImage. The older
+call still works but is deprecated on macOS 14, a deprecation is a build
+warning, and the ship script refuses to commit anything that warns — which is
+what that gate is for.
+
+Refresh runs from a task tied to the tab's lifetime, so it stops when the tab is
+not on screen. Nothing captures this Mac's display or wakes the PC while nobody
+is looking at the diagram.
+
+Screen Recording is required and is asked for in place, with a button that only
+appears while the permission is missing. macOS applies it after a relaunch,
+which is its rule rather than ours. The still is downscaled to 640px on capture:
+it is drawn a couple of hundred points wide inside a diagram, and a
+full-resolution frame would be megabytes of nothing.
+
+Also confirms the size mapping: 0-3 run smallest to largest, as shipped.
+
 ## 0.1.29 — 2026-08-29
 
 **Picture in Picture, mapped and drawn instead of listed**

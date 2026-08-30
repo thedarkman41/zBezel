@@ -129,6 +129,7 @@ final class MonitorController: ObservableObject {
         kvm.onScreenshot = { [weak self] data in
             guard let image = NSImage(data: data) else { return }
             self?.pcSpace.show(image)
+            self?.pcSnapshot = image
         }
     }
 
@@ -188,6 +189,32 @@ final class MonitorController: ObservableObject {
         if !pipOn { await applyPiPOn(true) }
         if pipSideBySide { await applyPiPSideBySide(false) }
         await writeSub(0x14, corner)
+    }
+
+    // Live stills for the side-by-side diagram: what each machine is showing.
+    @Published private(set) var macSnapshot: NSImage?
+    @Published private(set) var pcSnapshot: NSImage?
+    @Published private(set) var needsScreenRecording = !ScreenSnapshot.isPermitted
+
+    /// Refresh both halves.
+    ///
+    /// The Mac half is the display the PANEL is showing, not the built-in one —
+    /// side by side composites what this Mac sends to that panel next to what
+    /// the PC sends, so the built-in screen would be the wrong picture.
+    ///
+    /// The PC half is asked for over the clipboard channel and arrives
+    /// asynchronously, so this only sends the request.
+    func refreshSnapshots() async {
+        needsScreenRecording = !ScreenSnapshot.isPermitted
+        if let id = selectedID, displays.contains(where: { $0.id == id }) {
+            macSnapshot = await ScreenSnapshot.capture(display: id)
+        }
+        kvm.requestScreenshot(width: 640)
+    }
+
+    func askForScreenRecording() {
+        ScreenSnapshot.requestPermission()
+        needsScreenRecording = !ScreenSnapshot.isPermitted
     }
 
     func applyPiPSize(_ size: Int) async {
