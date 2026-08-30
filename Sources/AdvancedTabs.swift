@@ -7,18 +7,46 @@ struct AdvancedTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        // Firmware and the capabilities string share the right column: firmware
-        // is six short rows and was leaving most of a column empty next to the
-        // tallest card on the tab, while the capabilities string sat below in a
-        // row of its own.
-        CardGrid {
-            VendorMapperCard(controller: controller)
-            VStack(spacing: 16) {
-                monitorIdentityCard
-                capabilitiesCard
+        // Two columns stacked deliberately rather than a row-major grid, which
+        // paired a five-row card with a twenty-row one and left half the tab
+        // black. Each column now holds cards that add up to a similar height, and
+        // the capabilities string — the one thing here that can usefully take
+        // whatever space is left — is the one that stretches.
+        VStack(alignment: .trailing, spacing: 10) {
+            // The lower card in each column stretches, so the two columns end
+            // level however unequal their upper cards are. fixedSize keeps that
+            // from running away: without it both children ask for infinite height
+            // and the whole tab grows to the window.
+            HStack(alignment: .top, spacing: 16) {
+                VStack(spacing: 16) {
+                    VendorMapperCard(controller: controller)
+                    capabilitiesCard
+                        .frame(maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, alignment: .top)
+
+                VStack(spacing: 16) {
+                    monitorIdentityCard
+                    vendorCodeCard
+                        .frame(maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, alignment: .top)
             }
-            vendorCodeCard
-            resetCard
+            .fixedSize(horizontal: false, vertical: true)
+
+            // Three commands that were a whole card with nothing else in it. As a
+            // row of links they are still one click away and stop claiming a
+            // quarter of the tab.
+            HStack(spacing: 16) {
+                if !controller.monitorControlAvailable {
+                    MonitorSideNote(controller: controller)
+                }
+                Spacer(minLength: 0)
+                ResetButton(title: "Restore factory defaults", code: 0x04, controller: controller)
+                ResetButton(title: "Restore brightness & contrast", code: 0x05, controller: controller)
+                ResetButton(title: "Restore factory colour", code: 0x08, controller: controller)
+            }
+            .padding(.horizontal, 2)
         }
     }
 
@@ -107,17 +135,6 @@ struct AdvancedTab: View {
         }
     }
 
-    private var resetCard: some View {
-        Card(title: "Reset", systemImage: "arrow.counterclockwise",
-             help: "MCCS restore-defaults commands. These change the monitor, not macOS.") {
-            ResetButton(title: "Restore factory defaults", code: 0x04, controller: controller)
-            ResetButton(title: "Restore brightness & contrast", code: 0x05, controller: controller)
-            ResetButton(title: "Restore factory colour", code: 0x08, controller: controller)
-            if !controller.monitorControlAvailable {
-                MonitorSideNote(controller: controller)
-            }
-        }
-    }
 }
 
 private struct MonitorSideNote: View {

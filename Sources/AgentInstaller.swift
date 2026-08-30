@@ -148,8 +148,15 @@ final class AgentInstaller: ObservableObject {
                 guard let publicKey = self.localPublicKey() else {
                     return "skipped — no SSH public key found on this Mac"
                 }
-                _ = try await self.remotePowerShell(target, auth, Self.authorizedKeysScript(publicKey))
-                return "public key added to authorized_keys"
+                let output = try await self.remotePowerShell(target, auth, Self.authorizedKeysScript(publicKey))
+                // The script reports which file it chose. Surfacing it matters: the
+                // admin/non-admin split is the difference between a key that works and
+                // one that is silently ignored, and the log is where that gets noticed.
+                let line = Self.lastMeaningfulLine(output)
+                guard line.hasPrefix("ok:") else {
+                    throw InstallError(message: "Could not install the public key:\n" + output)
+                }
+                return "public key added to \(line.dropFirst(3))"
             }
         } else {
             mark(2, .done, detail: "not needed")
@@ -529,18 +536,52 @@ final class AgentInstaller: ObservableObject {
     // MARK: Remote scripts
 
     private static func authorizedKeysScript(_ publicKey: String) -> String {
-        // Note: for an administrator account, Windows OpenSSH reads
-        // administrators_authorized_keys, not the per-user file.
+        // For an account in the local Administrators group, Windows OpenSSH reads
+        // ONLY administrators_authorized_keys and ignores the per-user file. Writing
+        // the wrong one leaves authentication failing with no useful error — the key
+        // is present, readable, correct, and never consulted.
+        //
+        // Decide by SID, never by name. A Microsoft Account appears in the group as
+        // "MicrosoftAccount\someone@example.com" while $env:USERNAME is the five-
+        // character truncation Windows made for the profile (lordchubbus -> lordc),
+        // so a name comparison reports "not an admin" for every MSA-backed account.
+        // Get-LocalGroupMember also throws outright on groups holding MSA or orphaned
+        // SIDs, so fall back to the process token in that case.
         """
         $key = '\(publicKey.replacingOccurrences(of: "'", with: "''"))'
-        $dir = Join-Path $env:USERPROFILE '.ssh'
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        $file = Join-Path $dir 'authorized_keys'
-        if (-not (Test-Path $file)) { New-Item -ItemType File -Path $file | Out-Null }
-        $existing = Get-Content $file -ErrorAction SilentlyContinue
-        if ($existing -notcontains $key) { Add-Content -Path $file -Value $key }
-        icacls $file /inheritance:r /grant "$($env:USERNAME):F" | Out-Null
-        'ok'
+
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $mySid = $me.User.Value
+        $isAdmin = $null
+        try {
+            $admins = Get-LocalGroupMember -Group 'Administrators' -ErrorAction Stop
+            $isAdmin = [bool]($admins | Where-Object { $_.SID.Value -eq $mySid })
+        } catch {
+            $isAdmin = $null
+        }
+        if ($null -eq $isAdmin) {
+            $isAdmin = $me.Groups.Value -contains 'S-1-5-32-544'
+        }
+
+        if ($isAdmin) {
+            $file = 'C:\\ProgramData\\ssh\\administrators_authorized_keys'
+            $dir = Split-Path $file -Parent
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            if (-not (Test-Path $file)) { New-Item -ItemType File -Path $file | Out-Null }
+            $existing = Get-Content $file -ErrorAction SilentlyContinue
+            if ($existing -notcontains $key) { Add-Content -Path $file -Value $key }
+            # sshd refuses this file unless only Administrators and SYSTEM can write it.
+            icacls $file /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null
+        } else {
+            $dir = Join-Path $env:USERPROFILE '.ssh'
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            $file = Join-Path $dir 'authorized_keys'
+            if (-not (Test-Path $file)) { New-Item -ItemType File -Path $file | Out-Null }
+            $existing = Get-Content $file -ErrorAction SilentlyContinue
+            if ($existing -notcontains $key) { Add-Content -Path $file -Value $key }
+            icacls $file /inheritance:r /grant "$($env:USERNAME):F" | Out-Null
+        }
+        'ok:' + $file
         """
     }
 

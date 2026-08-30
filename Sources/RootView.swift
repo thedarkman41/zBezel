@@ -226,10 +226,17 @@ struct LinkBanner: View {
 private struct TransportPill: View {
     @ObservedObject var controller: MonitorController
 
-    @State private var sweep: CGFloat = -1
-    @State private var spin: Double = 0
-
     private var busy: Bool { controller.isProbing || controller.isRefreshing }
+
+    /// Seconds per revolution of the glyph, and per pass of the sweep.
+    ///
+    /// Both are driven by a TimelineView rather than a repeatForever animation.
+    /// A repeating animation in SwiftUI does not end when the value it animates
+    /// is reassigned — it keeps running for the life of the view, which is why
+    /// the first version span on long after the read had finished. A timeline
+    /// simply stops existing when `busy` goes false.
+    private let spinPeriod: Double = 2.2
+    private let sweepPeriod: Double = 1.6
 
     private var label: String {
         if case .proxy(let host, _, _) = controller.transport { return "via \(host)" }
@@ -250,9 +257,7 @@ private struct TransportPill: View {
                     .font(.system(size: 11, weight: .semibold))
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
-                Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
-                    .rotationEffect(.degrees(spin))
+                refreshGlyph
             }
             .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.warning)
             .padding(.horizontal, 13)
@@ -266,10 +271,23 @@ private struct TransportPill: View {
         .buttonStyle(.plain)
         .disabled(busy)
         .help(busy ? controller.probeStatus : "Re-examine the link and re-read the monitor")
-        .onChange(of: busy) { _, running in
-            if running { start() } else { stop() }
+    }
+
+    private var refreshGlyph: some View {
+        Group {
+            if busy {
+                TimelineView(.animation) { context in
+                    let t = context.date.timeIntervalSinceReferenceDate
+                    let phase = t.truncatingRemainder(dividingBy: spinPeriod) / spinPeriod
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .rotationEffect(.degrees(phase * 360))
+                }
+            } else {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 11, weight: .semibold))
+            }
         }
-        .onAppear { if busy { start() } }
     }
 
     private var background: some View {
@@ -277,33 +295,22 @@ private struct TransportPill: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(Theme.accent.opacity(0.15))
                 if busy {
-                    // A band that runs the length of the pill, transparent at its
-                    // leading edge and solid at its trailing one, swept across.
-                    Capsule()
-                        .fill(LinearGradient(
-                            colors: [Theme.accent.opacity(0),
-                                     Theme.accent.opacity(0.20),
-                                     Theme.accent.opacity(0.55)],
-                            startPoint: .leading, endPoint: .trailing))
-                        .frame(width: geo.size.width)
-                        .offset(x: sweep * geo.size.width)
+                    // A band the length of the pill, transparent at its leading
+                    // edge and solid at its trailing one, swept across.
+                    TimelineView(.animation) { context in
+                        let t = context.date.timeIntervalSinceReferenceDate
+                        let phase = t.truncatingRemainder(dividingBy: sweepPeriod) / sweepPeriod
+                        Capsule()
+                            .fill(LinearGradient(
+                                colors: [Theme.accent.opacity(0),
+                                         Theme.accent.opacity(0.20),
+                                         Theme.accent.opacity(0.55)],
+                                startPoint: .leading, endPoint: .trailing))
+                            .frame(width: geo.size.width)
+                            .offset(x: (phase * 2 - 1) * geo.size.width)
+                    }
                 }
             }
         }
-    }
-
-    private func start() {
-        sweep = -1
-        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-            sweep = 1
-        }
-        withAnimation(.linear(duration: 1.1).repeatForever(autoreverses: false)) {
-            spin = 360
-        }
-    }
-
-    private func stop() {
-        withAnimation(.easeOut(duration: 0.25)) { sweep = -1 }
-        spin = 0
     }
 }

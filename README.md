@@ -119,7 +119,11 @@ Build with `./Scripts/build-app.sh`.
   panel off that machine's output, which is the path the relay depends on. Bezel
   warns before doing it; recovering needs the monitor's own buttons.
 - The monitor presents a **different EDID per input** — product code `36D4` on
-  DisplayPort, `36D3` on USB-C — so the two hosts do not agree on its product ID.
+  DisplayPort, `36D3` on USB-C, `36D5` on HDMI — so no two hosts agree on its
+  product ID. Anything keyed on product code must therefore treat these as one
+  monitor; the codes are not a stable identity. The HDMI value was confirmed on
+  Bellatrix, whose agent reports
+  `\\?\DISPLAY#HPN36D5#...` while `0x60` reads `0x11`.
 - The monitor can be reached through the proxy with no local connection at all —
   it does not train the DisplayPort link while displaying another input, so macOS
   often cannot see it even with the cable in. Monitor-side controls work anyway;

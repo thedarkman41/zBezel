@@ -2,6 +2,48 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.43 — 2026-08-30
+
+**Stop cards inflating the window; read PiP state at launch**
+
+The window fits its contents again, and the pill stops spinning.
+
+CARDS NO LONGER INFLATE. A Spacer sat at the bottom of every card to make cards
+in a row match heights, and a Spacer takes every point of height it is offered:
+each card grew to its container, the container grew to the window, and the window
+had no reason to shrink. A tab of six short cards rendered as six tall ones
+separated by black. Cards now hug their content, and where two of them should end
+level — the two lower cards on the Advanced tab — that is asked for explicitly and
+bounded with fixedSize so it cannot run away again.
+
+The Advanced tab is two deliberate columns rather than a row-major grid, which
+had been pairing a five-row card with a twenty-row one. Reset was a whole card
+holding three links and is now a row of them along the bottom. Cards have a
+restrained drop shadow: on a dark ground there is little tonal room beneath the
+background, so anything heavier reads as smudge rather than depth.
+
+THE TRANSPORT PILL span forever. repeatForever in SwiftUI runs for the life of
+the view and reassigning the value it animates does not cancel it, so stopping
+the spin by setting the angle back to zero did nothing. Both the glyph and the
+sweep now run off a TimelineView that only exists while a probe is in flight —
+the animation's lifetime is the condition, so there is nothing to cancel. Also
+slowed from 1.1s to 2.2s a revolution.
+
+PIP STATE IS READ AT LAUNCH, at last. 0x11 does report whether PiP is on, but the
+sub-selector rotation is savagely lopsided: in a 300-read pass with side-by-side
+active, 0x13 took 263 of them and 0x11 appeared three times. The old sync asked
+for 24 samples and therefore missed it almost every launch, leaving the toggle
+off while the panel was plainly split in two. It now samples in chunks and stops
+the moment 0x11 turns up.
+
+The MODE cannot be read — 0x12 did not appear once in that same pass — so it
+stays restored from what this app last set, which is what the preferences have
+been holding correctly all along.
+
+The Link tab's Control Proxy card lists every monitor the proxy can see, named
+first and numbered second, since the name is what identifies a display to a
+person and the index is only the handle the agent uses.
+
 ## 0.1.42 — 2026-08-30
 
 **Draw the monitor's menu, unify the transport pill, fix the vendor mapper**

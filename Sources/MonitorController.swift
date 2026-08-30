@@ -276,23 +276,34 @@ final class MonitorController: ObservableObject {
     /// Only these two: mode and placement cannot be read at all, so they stay
     /// unknown until set. Sampled rather than read once, because a single read
     /// of 0xE1 returns whichever selector the rotation lands on.
-    /// Read on/off, which is the only part of PiP the panel will tell us.
+    /// Read whether PiP is on — the only part of it the panel will tell us.
     ///
-    /// 0x13 is sampled too and deliberately ignored. It does come up in the
-    /// rotation, but what it reports is the last COMMAND it was given — enlarge,
-    /// reduce, maximum, minimum — and not the size that resulted. Treating that
-    /// echo as a size is what put a number in the UI that had nothing to do with
-    /// what was on the panel.
-    func syncPiPFromPanel(samples: Int = 24) async {
+    /// Sampled in chunks and stopped the moment 0x11 turns up, because the
+    /// rotation is savagely lopsided: in one 300-read pass while side-by-side was
+    /// active, 0x13 took 263 of them and 0x11 appeared three times. The old
+    /// 24-sample read therefore missed it almost every launch and left the toggle
+    /// showing off while the panel was plainly split in two.
+    ///
+    /// The MODE — picture-in-picture versus side-by-side — cannot be read at all.
+    /// 0x12 did not appear once in that same 300-sample pass. It stays asserted
+    /// from what this app last set.
+    func syncPiPFromPanel(chunks: Int = 8, samples: Int = 60) async {
         guard case .proxy(_, let index, _) = transport else { return }
         let started = Date()
-        guard let map = try? await agent.readSubSelectorMap(
-            monitor: index, code: 0xE1, samples: samples) else { return }
-        KVMLog.write(String(format: "pip: %d samples in %.2fs, saw %@",
-                            samples, Date().timeIntervalSince(started),
-                            map.keys.sorted().map { String(format: "%02X", $0) }
-                                .joined(separator: " ")))
-        if let raw = map[0x11] { pipOn = (raw & 0xFF) != 0 }
+        var reads = 0
+        for _ in 0..<chunks {
+            guard let map = try? await agent.readSubSelectorMap(
+                monitor: index, code: 0xE1, samples: samples) else { return }
+            reads += samples
+            if let raw = map[0x11] {
+                pipOn = (raw & 0xFF) != 0
+                KVMLog.write(String(format: "pip: 0x11 found after %d reads in %.2fs — %@",
+                                    reads, Date().timeIntervalSince(started),
+                                    pipOn ? "on" : "off"))
+                return
+            }
+        }
+        KVMLog.write("pip: 0x11 never surfaced in \(reads) reads; leaving the toggle as it was")
     }
 
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.

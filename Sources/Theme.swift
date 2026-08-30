@@ -74,7 +74,11 @@ struct Card<Content: View>: View {
             .padding(.top, 16)
             .padding(.bottom, 18)
 
-            Spacer(minLength: 0)
+            // No Spacer here. One used to sit at the bottom to make cards in a
+            // row match heights, and a Spacer takes every point of height it is
+            // offered — so each card grew to its container, the container grew to
+            // the window, and the window had no reason to shrink. A tab of six
+            // short cards rendered as six tall ones separated by black.
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
@@ -83,6 +87,11 @@ struct Card<Content: View>: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: Theme.cardRadius)
                         .strokeBorder(Theme.cardStroke, lineWidth: 1))
+                // Enough to lift the card off the canvas and no more. On a dark
+                // ground a heavy shadow reads as smudge rather than depth, since
+                // there is very little tonal room beneath the background to cast
+                // into.
+                .shadow(color: .black.opacity(0.45), radius: 9, x: 0, y: 3)
         )
     }
 }
