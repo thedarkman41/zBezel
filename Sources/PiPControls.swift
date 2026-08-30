@@ -32,52 +32,50 @@ private struct ScreenOutline<Content: View>: View {
 // MARK: - Placement
 
 /// The four corners, as four corners.
+///
+/// Laid out as four quadrants rather than four positioned boxes. The first
+/// attempt used .position and then .contentShape, which is the wrong order: the
+/// tap area is taken AFTER positioning, so each of the four claimed the whole
+/// diagram and they fought over every click. Nothing responded.
+///
+/// Quadrants also make the targets the size of a quarter of the picture rather
+/// than the size of the little rectangle drawn inside it.
 struct PiPPlacementPicker: View {
-    /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left — the panel's own
-    /// numbering, which is not in any sensible order and is therefore mapped
-    /// here rather than assumed anywhere else.
     /// nil when the panel's placement is not known — it cannot be read back,
     /// so nothing is filled in until this app has set it.
     @Binding var placement: Int?
     var enabled: Bool
     var onPick: (Int) -> Void
 
-    private static let corners: [(value: Int, x: UnitPoint)] = [
-        (1, .topLeading), (2, .topTrailing), (3, .bottomLeading), (0, .bottomTrailing),
-    ]
-
     var body: some View {
         ScreenOutline(active: enabled) {
-            GeometryReader { geo in
-                let inset = geo.size.width * 0.055
-                let w = geo.size.width * 0.26
-                let h = w / screenAspect
-                ZStack {
-                    ForEach(PiPPlacementPicker.corners, id: \.value) { corner in
-                        let chosen = placement == corner.value
-                        RoundedRectangle(cornerRadius: 2)
-                            .fill(chosen ? Theme.accent : Color.clear)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 2)
-                                    .stroke(chosen ? Theme.accent : Theme.textDim, lineWidth: 1)
-                            )
-                            .frame(width: w, height: h)
-                            .position(point(for: corner.x, in: geo.size, box: CGSize(width: w, height: h),
-                                            inset: inset))
-                            .contentShape(Rectangle())
-                            .onTapGesture { if enabled { onPick(corner.value) } }
-                    }
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    quadrant(1, .topLeading)
+                    quadrant(2, .topTrailing)
+                }
+                HStack(spacing: 0) {
+                    quadrant(3, .bottomLeading)
+                    quadrant(0, .bottomTrailing)
                 }
             }
         }
         .opacity(enabled ? 1 : 0.4)
     }
 
-    private func point(for anchor: UnitPoint, in size: CGSize,
-                       box: CGSize, inset: CGFloat) -> CGPoint {
-        let x = anchor.x < 0.5 ? inset + box.width / 2 : size.width - inset - box.width / 2
-        let y = anchor.y < 0.5 ? inset + box.height / 2 : size.height - inset - box.height / 2
-        return CGPoint(x: x, y: y)
+    private func quadrant(_ value: Int, _ alignment: Alignment) -> some View {
+        let chosen = placement == value
+        return RoundedRectangle(cornerRadius: 2)
+            .fill(chosen ? Theme.accent : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 2)
+                    .stroke(chosen ? Theme.accent : Theme.textDim, lineWidth: 1)
+            )
+            .aspectRatio(screenAspect, contentMode: .fit)
+            .padding(6)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment)
+            .contentShape(Rectangle())            // the whole quadrant is the target
+            .onTapGesture { if enabled { onPick(value) } }
     }
 }
 
@@ -92,6 +90,8 @@ struct PiPSizePicker: View {
     @Binding var size: Int
     var steps: Int = 4
     var enabled: Bool
+    /// A write is in flight and being verified; clicks are dropped meanwhile.
+    var busy: Bool = false
     var onPick: (Int) -> Void
 
     var body: some View {
@@ -114,10 +114,17 @@ struct PiPSizePicker: View {
                     }
                 }
                 .contentShape(Rectangle())
-                .onTapGesture { if enabled { onPick((size + 1) % steps) } }
+                .onTapGesture { if enabled && !busy { onPick((size + 1) % steps) } }
+                .overlay(alignment: .center) {
+                    if busy {
+                        ProgressView()
+                            .controlSize(.small)
+                            .colorScheme(.dark)
+                    }
+                }
             }
         }
-        .opacity(enabled ? 1 : 0.4)
+        .opacity(enabled ? (busy ? 0.7 : 1) : 0.4)
     }
 }
 

@@ -2,6 +2,34 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.33 — 2026-08-29
+
+**PiP controls: fix the dead corners, and verify the size instead of assuming it**
+
+THE CORNERS DID NOTHING
+
+The four placement targets were positioned and THEN given a tap shape, which is
+the wrong order — the shape is taken after positioning, so all four claimed the
+whole diagram and fought over every click. Rebuilt as four quadrants, which fixes
+the hit testing and incidentally makes each target a quarter of the picture
+rather than the small rectangle drawn inside it.
+
+THE SIZE MOVED IN THE UI AND NOT ON THE PANEL, THEN ALL AT ONCE
+
+The UI advanced on click while the writes queued behind one another through the
+actor, so the diagram ran ahead and the monitor caught up in a burst several
+clicks later. It read as a control that did nothing and then did everything.
+
+Size is one of the two selectors this panel will actually report, so it is now
+written, given a moment to settle, read back, and only then reflected — and if
+the monitor reports something else, that is said rather than hidden. Clicks
+during a write are dropped rather than queued, since queueing them is what
+produced the burst, and the diagram shows that it is working.
+
+Placement takes the same lock. It cannot be verified — the panel will not report
+it — but a queue of writes to something that needs seconds per change is what
+caused the problem in the first place, whether or not the result can be read.
+
 ## 0.1.32 — 2026-08-29
 
 **Stop the PiP diagram claiming things it cannot know**

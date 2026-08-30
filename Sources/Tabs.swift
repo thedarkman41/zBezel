@@ -562,7 +562,8 @@ struct MultiScreenTab: View {
                     diagram("Size") {
                         PiPSizePicker(
                             size: Binding(get: { controller.pipSize }, set: { _ in }),
-                            enabled: controller.pipOn && controller.pipSideBySide != true) { next in
+                            enabled: controller.pipOn && controller.pipSideBySide != true,
+                            busy: controller.pipBusy) { next in
                             Task<Void, Never> { await controller.applyPiPSize(next) }
                         }
                     }

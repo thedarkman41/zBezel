@@ -203,11 +203,18 @@ final class MonitorController: ObservableObject {
     }
 
     /// 0 bottom-right, 1 top-left, 2 top-right, 3 bottom-left.
+    /// Placement cannot be read back, so this cannot be verified the way size
+    /// is — but it still takes the same lock, because queued writes to a panel
+    /// that needs seconds per change is what made the size control misbehave.
     func applyPiPPlacement(_ corner: Int) async {
-        pipPlacement = corner
+        guard !pipBusy else { return }
+        pipBusy = true
+        defer { pipBusy = false }
+
         if !pipOn { await applyPiPOn(true) }
         if pipSideBySide == true { await applyPiPSideBySide(false) }
         await writeSub(0x14, corner)
+        pipPlacement = corner
     }
 
     // Live stills for the side-by-side diagram: what each machine is showing.
@@ -236,10 +243,36 @@ final class MonitorController: ObservableObject {
         needsScreenRecording = !ScreenSnapshot.isPermitted
     }
 
+    /// True while a PiP write is in flight, so the UI can say so and further
+    /// clicks are dropped rather than queued.
+    @Published private(set) var pipBusy = false
+
+    /// Write the size, then READ IT BACK, and only move the UI if it took.
+    ///
+    /// Previously the UI advanced on click and the writes queued behind each
+    /// other through the actor, so the diagram ran ahead and the panel caught up
+    /// in a burst several clicks later — it looked like the control did nothing
+    /// and then did everything at once.
+    ///
+    /// Size is one of the two selectors the panel will actually report, so there
+    /// is no excuse for guessing at it. Clicks during a write are ignored: this
+    /// is a cycle button, and queueing them is what produced the burst.
     func applyPiPSize(_ size: Int) async {
-        pipSize = size
+        guard !pipBusy else { return }
+        pipBusy = true
+        defer { pipBusy = false }
+
         if !pipOn { await applyPiPOn(true) }
         await writeSub(0x13, size)
+
+        // Settle before reading: a read taken during the change reports the
+        // transition rather than the result, which is true of every setting on
+        // this panel.
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        await syncPiPFromPanel()
+        if pipSize != size {
+            kvmError = "The monitor did not take PiP size \(size) — it reports \(pipSize)."
+        }
     }
 
     /// Tell the KVM which panel is the doorway and where to land coming back.
