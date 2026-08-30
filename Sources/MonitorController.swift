@@ -191,7 +191,7 @@ final class MonitorController: ObservableObject {
         }
         let started = Date()
         let raw = UInt16(Int(selector) << 8 | (value & 0xFF))
-        _ = try? await agent.write(monitor: index, code: 0xE1, value: raw)
+        try? await agent.writeOnly(monitor: index, code: 0xE1, value: raw)
         KVMLog.write(String(format: "pip: write 0x%02X=%d took %.2fs",
                             selector, value, Date().timeIntervalSince(started)))
     }

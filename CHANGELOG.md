@@ -2,6 +2,40 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.37 — 2026-08-29
+
+**Write without reading back: PiP changes go from ten seconds to a tenth**
+
+Two independent costs, each about eight times, and they multiply.
+
+THE CHANNEL
+
+Every DDC call spawned ssh plus a PowerShell login shell plus a .NET start before
+any DDC work happened. Down a channel already open the identical command is
+0.079s against 0.648s. The agent has had a relay mode for this since it was
+written and nothing used it.
+
+THE READ-BACK
+
+`set` follows every write with a read of the same code. That is right for a value
+the caller wants confirmed, and wrong for a write that makes the panel
+reconfigure: the read then lands while the monitor is busy and the retry logic
+waits it out. It is why the same placement write measured 8.09s once and 0.61s
+immediately after — the variance was the read waiting on a display mid-change,
+not the write.
+
+Added `setraw`, which writes and returns. Measured over five writes each:
+
+    set     mean 0.71s
+    setraw  mean 0.09s
+
+Nothing is given up. 0xE1 answers a read with whichever sub-setting it chooses,
+so the read-back could never confirm these writes in the first place — it was
+paying for a receipt that was never legible.
+
+Used only for the sub-addressed writes. Brightness and the rest keep their
+read-back, where the value on screen should follow the panel.
+
 ## 0.1.36 — 2026-08-29
 
 **Use the relay: monitor control is eight times faster**

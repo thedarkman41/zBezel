@@ -375,6 +375,17 @@ actor RemoteAgent {
         return result
     }
 
+    /// Write and read nothing back.
+    ///
+    /// For codes where the read-back cannot tell you anything — 0xE1 answers
+    /// with whichever sub-setting it chooses — and where the write makes the
+    /// panel reconfigure, so the read lands while it is busy and waits it out.
+    /// Measured: 0.71s per write with the read-back, 0.09s without.
+    func writeOnly(monitor: Int, code: UInt8, value: UInt16) throws {
+        _ = try run(["setraw", String(monitor), String(format: "%02X", code), String(value)],
+                    timeout: 20)
+    }
+
     @discardableResult
     func write(monitor: Int, code: UInt8, value: UInt16) throws -> RemoteReading? {
         let json = try run(["set", String(monitor), String(format: "%02X", code), String(value)],

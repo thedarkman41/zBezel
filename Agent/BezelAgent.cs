@@ -255,6 +255,7 @@ internal static class BezelAgent
             case "get":    CmdGet(targets, args);    return true;
             case "setget": CmdSetGet(targets, args); return true;
             case "set":    CmdSet(targets, args);    return true;
+            case "setraw": CmdSetRaw(targets, args); return true;
             case "probe":  CmdProbe(targets, args);  return true;
             case "cursor":   CmdCursor();            return true;
             case "keystate": CmdKeyState();          return true;
@@ -545,6 +546,32 @@ internal static class BezelAgent
         System.Threading.Thread.Sleep(60);
         Console.WriteLine("{\"ok\":true,\"wrote\":" + ReadOne(t, code) + ","
                           + LinkFields(1) + "}");
+        return 0;
+    }
+
+    /// Write and do not read anything back.
+    ///
+    /// `set` follows every write with a read of the same code, which is right
+    /// for a value the caller wants confirmed. It is wrong for a write that
+    /// makes the panel reconfigure itself: the read then lands while the monitor
+    /// is busy, and the retry logic waits it out. Measured on this panel, a PiP
+    /// placement write took 8.09s that way and the same write again took 0.61s —
+    /// the variance is the read waiting on a display that is mid-change, not the
+    /// write.
+    ///
+    /// Nothing is lost by not reading: 0xE1 answers with whichever sub-setting
+    /// it feels like naming, so the read-back could never confirm the write in
+    /// the first place.
+    private static int CmdSetRaw(List<Target> targets, string[] args)
+    {
+        if (args.Length < 4) { Fail("setraw needs an index, a VCP code and a value"); return 1; }
+        var t = Pick(targets, args[1]);
+        byte code = ParseCode(args[2]);
+        uint value = uint.Parse(args[3], CultureInfo.InvariantCulture);
+
+        bool wrote = SetVCPFeature(t.Handle, code, value);
+        Console.WriteLine("{\"ok\":" + (wrote ? "true" : "false")
+                          + ",\"code\":" + code + ",\"wrote\":" + value + "}");
         return 0;
     }
 
