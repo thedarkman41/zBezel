@@ -2,6 +2,68 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.44 — 2026-08-31
+
+**Reach several machines, lock the panel, carry files across**
+
+The KVM reaches more than one machine, and a drag can carry a file across.
+
+MACHINES, NOT A MACHINE. The pointer's destinations are a list now, each with
+the monitor input its cable is on, editable on the Input tab. Crossing the
+panel's right edge with more than one of them puts a chooser on the glass —
+tiles stacked against the right edge at the height the pointer left, sliding out
+like a drawer. Click one and the pointer carries on to it.
+
+WHICH EDGE IS THE DOORWAY depends on what the panel is showing. Showing this
+Mac, the panel is ordinary desktop and the doorway is its far side. Showing
+another machine, the desktop stops at the built-in screen, so leaving THAT is
+the crossing — and the pointer arrives on the machine already visible rather
+than travelling across a panel it cannot see. Coming in that way it enters at
+the far machine's LEFT edge, the way it would cross between two desktops;
+through the panel's own edge it keeps its place on the glass, because that is
+the same sheet of glass either way.
+
+THE LOCK. A padlock on the far machine's screen, drawn by the agent because
+nothing the Mac draws is visible while that machine is on the panel. Click it
+and the panel stays there when the pointer goes home; the badge parks in the
+corner and stops following the pointer around, being a status light rather than
+a button. While a lock is held, this app performs NO automatic input switching
+at all — one gate that every crossing goes through, rather than a condition at
+each of the three call sites, which is how the panel kept moving after being
+told not to. Changing the input by hand releases the lock, caught in set() where
+every control converges.
+
+A lock is also the most reliable thing we have about which input is live. The
+monitor will not say: 0x60 reports the last input it was COMMANDED to, not the
+one on screen, and it drifts every time the panel moves without us. Presence in
+the Mac's display list is the other honest signal, and it outranks the tracked
+command.
+
+FILES CROSS WITH THE POINTER. Drag off the edge and the file is copied by scp
+into C:\Temp while a wireframe page follows the cursor on the far machine; on
+release the agent asks UI Automation what is under the pointer, resolves it to a
+folder -- an Explorer window through Shell.Application's LocationURL, or the
+Desktop when the window is Progman -- and moves the file there. It never
+overwrites; a same-named file becomes "name (2)".
+
+Windows will not accept a drop synthesised from outside a process, so this is
+not a drop: it is a copy, a question, and a move. It behaves like one.
+
+The Mac's own drag is cancelled with Escape when the pointer leaves, rather than
+completed. Without that the Finder never sees a button-up and the icon is still
+stuck to the cursor on return; completing it instead would drop the file
+wherever the Mac's pointer happened to be parked, which is nowhere the user
+chose. Events this app posts are stamped so its own tap lets them through.
+
+A DEAD CHANNEL RECONNECTS. The first failed write drops the handle and reopens
+it a second later, throttled. Restarting an agent underneath a running KVM used
+to leave the app claiming control of a machine it had not reached in minutes:
+the input switch is a local DDC write, so the panel still moved, and only the
+pointer stayed behind.
+
+The agent is compiled against UIAutomationClient, UIAutomationTypes and
+WindowsBase, referenced by full path -- csc does not find them by name.
+
 ## 0.1.43 — 2026-08-30
 
 **Stop cards inflating the window; read PiP state at launch**

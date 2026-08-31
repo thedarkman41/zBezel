@@ -19,12 +19,18 @@
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Globalization;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
+using System.IO;
+using System.Reflection;
+using System.Threading;
+using System.Windows.Automation;
+using System.Windows.Forms;
 
 internal static class BezelAgent
 {
@@ -324,7 +330,7 @@ internal static class BezelAgent
     /// for hours and has no caller waiting on a reply to complain to.
     private static readonly object LogLock = new object();
 
-    private static void Log(string message)
+    internal static void Log(string message)
     {
         try
         {
@@ -1090,6 +1096,29 @@ internal static class BezelAgent
         {
             case "A":
                 if (parts.Length >= 3) SendAbsolute(Num(parts[1]), Num(parts[2]));
+                break;
+
+            case "DROP":
+                // The release. Work out what the pointer is over, move the staged
+                // file there, and put the ghost away.
+                DragGhost.Hide();
+                BezelAgent.Log("drop -> " + DropTarget.Deliver());
+                break;
+
+            case "D":
+                // The drag ghost. "D" alone hides it; anything after is the label
+                // of what is being carried.
+                if (parts.Length >= 2 && parts[1] != "-")
+                    DragGhost.Show(string.Join(" ", parts, 1, parts.Length - 1));
+                else DragGhost.Hide();
+                break;
+
+            case "L":
+                // The lock badge. -1 hides it, 0 shows it open, 1 shows it shut.
+                // Drawn here rather than on the Mac because while this machine is
+                // on the panel, nothing the Mac draws is visible.
+                if (parts.Length >= 4) LockOverlay.Set(Num(parts[1]), Num(parts[2]), Num(parts[3]));
+                else if (parts.Length >= 2) LockOverlay.Set(Num(parts[1]), -1, -1);
                 break;
 
             case "S":
@@ -1900,5 +1929,468 @@ internal static class BezelAgent
             Console.Out.Flush();
         }
         return 0;
+    }
+}
+
+
+/// A padlock on the glass, telling the user whether leaving this machine will
+/// take the monitor back with them.
+///
+/// It lives on THIS machine because this machine is what the panel is showing;
+/// anything the Mac drew would be behind a screen the user cannot see.
+///
+/// Click-through by construction (WS_EX_TRANSPARENT). The Mac already knows
+/// where the pointer is on this desktop — it is the one putting it there — so it
+/// recognises a click on the badge and never sends it. That saves hit-testing
+/// here and, more usefully, means the badge cannot swallow a click meant for the
+/// application beneath it.
+internal static class LockOverlay
+{
+    /// Big enough to hit without aiming. The first attempt was 84 and read as a
+    /// decoration rather than a control.
+    internal const int Size = 140;
+
+    private static Thread _ui;
+    private static Form _form;
+    private static bool _locked;
+
+    /// -1 hide, 0 unlocked, 1 locked. x/y place its top-left corner; -1 leaves
+    /// it where it is.
+    public static void Set(int state, int x, int y)
+    {
+        if (state < 0) { Hide(); return; }
+        _locked = state != 0;
+        EnsureUI();
+        var f = _form;
+        if (f == null) { BezelAgent.Log("lock: no overlay form"); return; }
+        try
+        {
+            f.BeginInvoke((MethodInvoker)delegate
+            {
+                if (x >= 0 && y >= 0) f.Location = new Point(x, y);
+                f.Visible = true;
+                f.TopMost = true;
+                f.Invalidate();
+            });
+            BezelAgent.Log("lock: badge " + (_locked ? "locked" : "unlocked"));
+        }
+        catch (Exception e) { BezelAgent.Log("lock: " + e.Message); }
+    }
+
+    public static void Hide()
+    {
+        var f = _form;
+        if (f == null) return;
+        try { f.BeginInvoke((MethodInvoker)delegate { f.Visible = false; }); }
+        catch (InvalidOperationException) { }
+    }
+
+    private static void EnsureUI()
+    {
+        if (_ui != null) return;
+        _ui = new Thread(delegate ()
+        {
+            var screen = Screen.PrimaryScreen.Bounds;
+            var form = new BadgeForm
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(screen.Left + 40,
+                                     screen.Top + (screen.Height - Size) / 2),
+                Size = new Size(Size, Size),
+                Visible = false
+            };
+            // Touching Handle forces the window into existence. A Form that has
+            // never been shown has no handle, and BeginInvoke on it throws — which
+            // is exactly how this failed silently the first time.
+            var forced = form.Handle;
+            GC.KeepAlive(forced);
+            _form = form;
+            Application.Run(new ApplicationContext(form));
+        });
+        _ui.IsBackground = true;
+        _ui.SetApartmentState(ApartmentState.STA);
+        _ui.Start();
+
+        // The form has to exist before anything can BeginInvoke onto it.
+        for (int i = 0; i < 100 && (_form == null || !_form.IsHandleCreated); i++)
+            Thread.Sleep(20);
+    }
+
+    private sealed class BadgeForm : Form
+    {
+        public BadgeForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Color.Black;
+            TransparencyKey = Color.Magenta;
+            Opacity = 0.5;
+            DoubleBuffered = true;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000   // WS_EX_LAYERED
+                            | 0x00000020   // WS_EX_TRANSPARENT — clicks fall through
+                            | 0x08000000   // WS_EX_NOACTIVATE — never takes focus
+                            | 0x00000080;  // WS_EX_TOOLWINDOW — no Alt-Tab entry
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.Magenta);
+
+            var w = ClientSize.Width;
+            var h = ClientSize.Height;
+            using (var plate = new SolidBrush(Color.FromArgb(210, 20, 20, 22)))
+                g.FillRectangle(plate, 0, 0, w, h);
+
+            var pen = new Pen(Color.White, 8f);
+            pen.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+            pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+
+            // Body.
+            var body = new Rectangle(w / 2 - 34, h / 2 - 4, 68, 50);
+            using (var fill = new SolidBrush(Color.White))
+                g.FillRectangle(fill, body);
+
+            // Shackle: upright when shut, tipped open when not — the difference
+            // has to be legible at a glance from across a desk.
+            if (_locked)
+                g.DrawArc(pen, w / 2 - 22, h / 2 - 46, 44, 52, 180, 180);
+            else
+                g.DrawArc(pen, w / 2 - 2, h / 2 - 50, 44, 52, 180, 150);
+
+            pen.Dispose();
+        }
+    }
+}
+
+
+/// What the pointer is carrying, drawn on this machine while it crosses.
+///
+/// A wireframe page with the file's name, following the cursor. It exists so a
+/// drag that started on the Mac still looks like a drag over here — without it
+/// the pointer simply arrives empty-handed and the user has no reason to believe
+/// anything is in flight.
+///
+/// It follows the cursor from THIS side, on a timer, rather than being told where
+/// to go by the Mac. The Mac already sends a position for every mouse move; a
+/// second message per move to drag a window along with it would double the
+/// traffic on a pipe whose whole job is to be quick.
+internal static class DragGhost
+{
+    private const int W = 220;
+    private const int H = 150;
+
+    private static Thread _ui;
+    private static GhostForm _form;
+    private static string _label = "";
+
+    public static void Show(string label)
+    {
+        _label = label ?? "";
+        EnsureUI();
+        var f = _form;
+        if (f == null) { BezelAgent.Log("ghost: no form"); return; }
+        try
+        {
+            f.BeginInvoke((MethodInvoker)delegate
+            {
+                f.Visible = true;
+                f.TopMost = true;
+                f.Follow();
+                f.Invalidate();
+            });
+            BezelAgent.Log("ghost: carrying " + _label);
+        }
+        catch (Exception e) { BezelAgent.Log("ghost: " + e.Message); }
+    }
+
+    public static void Hide()
+    {
+        var f = _form;
+        if (f == null) return;
+        try { f.BeginInvoke((MethodInvoker)delegate { f.Visible = false; }); }
+        catch (InvalidOperationException) { }
+    }
+
+    private static void EnsureUI()
+    {
+        if (_ui != null) return;
+        _ui = new Thread(delegate ()
+        {
+            var form = new GhostForm { Size = new Size(W, H), Visible = false };
+            var forced = form.Handle;
+            GC.KeepAlive(forced);
+            _form = form;
+            Application.Run(new ApplicationContext(form));
+        });
+        _ui.IsBackground = true;
+        _ui.SetApartmentState(ApartmentState.STA);
+        _ui.Start();
+        for (int i = 0; i < 100 && (_form == null || !_form.IsHandleCreated); i++)
+            Thread.Sleep(20);
+    }
+
+    private sealed class GhostForm : Form
+    {
+        private readonly System.Windows.Forms.Timer _tick;
+
+        // 8.5 x 11 at 20 points per inch, plus a strip for the name.
+        private const int PageW = 170;
+        private const int PageH = 220;
+        private const int LabelH = 30;
+
+        public GhostForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            StartPosition = FormStartPosition.Manual;
+            // White, and translucent by Opacity alone. NO TransparencyKey: a
+            // layered window applies the colour key AFTER the alpha, so a keyed
+            // colour at 72% opacity no longer matches the key and shows through —
+            // which is where the pink came from. Clipping the window to the shape
+            // of the page does the same job with none of that.
+            BackColor = Color.White;
+            Opacity = 0.62;
+            DoubleBuffered = true;
+            Size = new Size(PageW + 20, PageH + LabelH);
+
+            _tick = new System.Windows.Forms.Timer { Interval = 16 };
+            _tick.Tick += delegate { Follow(); };
+            _tick.Start();
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
+            {
+                shape.AddPath(PagePath(), false);
+                shape.AddRectangle(new Rectangle(0, PageH + 4, PageW + 20, LabelH - 4));
+                Region = new Region(shape);
+            }
+        }
+
+        /// A page with the top-right corner turned down.
+        private static System.Drawing.Drawing2D.GraphicsPath PagePath()
+        {
+            const int x = 10, y = 4, fold = 34;
+            var p = new System.Drawing.Drawing2D.GraphicsPath();
+            p.AddLines(new[] {
+                new Point(x, y),
+                new Point(x + PageW - fold, y),
+                new Point(x + PageW, y + fold),
+                new Point(x + PageW, y + PageH - 8),
+                new Point(x, y + PageH - 8),
+                new Point(x, y)
+            });
+            p.CloseFigure();
+            return p;
+        }
+
+        public void Follow()
+        {
+            if (!Visible) return;
+            var p = Cursor.Position;
+            Location = new Point(p.X + 16, p.Y + 16);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000 | 0x00000020 | 0x08000000 | 0x00000080;
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(Color.White);
+
+            const int x = 10, y = 4, fold = 34;
+            using (var edge = new Pen(Color.FromArgb(150, 90, 90, 95), 2f))
+            {
+                g.DrawPath(edge, PagePath());
+                g.DrawLines(edge, new[] {
+                    new Point(x + PageW - fold, y),
+                    new Point(x + PageW - fold, y + fold),
+                    new Point(x + PageW, y + fold)
+                });
+            }
+
+            using (var rule = new Pen(Color.FromArgb(120, 90, 90, 95), 2f))
+                for (int i = 0; i < 7; i++)
+                    g.DrawLine(rule, x + 18, y + fold + 22 + i * 22,
+                                     x + PageW - 18, y + fold + 22 + i * 22);
+
+            if (_label.Length > 0)
+                using (var font = new Font("Segoe UI", 10f))
+                using (var text = new SolidBrush(Color.FromArgb(230, 25, 25, 28)))
+                {
+                    var fmt = new StringFormat {
+                        Alignment = StringAlignment.Center,
+                        Trimming = StringTrimming.EllipsisCharacter,
+                        FormatFlags = StringFormatFlags.NoWrap };
+                    g.DrawString(_label, font, text,
+                                 new RectangleF(0, PageH + 6, PageW + 20, LabelH - 6), fmt);
+                }
+        }
+    }
+
+}
+
+
+/// Where a dragged file actually lands.
+///
+/// Windows will not accept a drop synthesised from outside the process, so the
+/// file is not dropped at all: it is copied to a staging folder while the drag is
+/// in flight, and on release we ask the desktop what is under the pointer and
+/// move it there. The user sees a drag and a drop; underneath it is a question
+/// and a file move.
+///
+/// UI Automation answers the question. AutomationElement.FromPoint names whatever
+/// is beneath the cursor — a folder icon, a file list, the desktop itself — and
+/// that name, resolved against the folder being displayed, is the destination.
+internal static class DropTarget
+{
+    internal const string Staging = @"C:\Temp";
+
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] private static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hwnd, StringBuilder text, int max);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT { public int X; public int Y; }
+
+    /// Move everything staged to wherever the pointer is, and say where that was.
+    public static string Deliver()
+    {
+        string destination = Resolve();
+        try
+        {
+            if (!Directory.Exists(Staging)) return destination + " (nothing staged)";
+            Directory.CreateDirectory(destination);
+            int moved = 0;
+            foreach (var file in Directory.GetFiles(Staging))
+            {
+                var target = Path.Combine(destination, Path.GetFileName(file));
+                target = Unique(target);
+                File.Move(file, target);
+                moved++;
+            }
+            return destination + " (" + moved + " item" + (moved == 1 ? "" : "s") + ")";
+        }
+        catch (Exception e) { return destination + " — FAILED: " + e.Message; }
+    }
+
+    /// Never overwrite. A drop that silently replaced something would be a very
+    /// expensive surprise.
+    private static string Unique(string path)
+    {
+        if (!File.Exists(path)) return path;
+        var dir = Path.GetDirectoryName(path);
+        var stem = Path.GetFileNameWithoutExtension(path);
+        var ext = Path.GetExtension(path);
+        for (int i = 2; i < 500; i++)
+        {
+            var candidate = Path.Combine(dir, stem + " (" + i + ")" + ext);
+            if (!File.Exists(candidate)) return candidate;
+        }
+        return path;
+    }
+
+    /// The folder under the cursor.
+    public static string Resolve()
+    {
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var pos = Cursor.Position;
+
+        string container = ContainerFor(pos) ?? desktop;
+
+        // If the thing directly under the cursor is a folder inside that
+        // container, the drop belongs in it rather than beside it.
+        try
+        {
+            var element = AutomationElement.FromPoint(
+                new System.Windows.Point(pos.X, pos.Y));
+            if (element != null)
+            {
+                var name = element.Current.Name;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    var nested = Path.Combine(container, name);
+                    if (Directory.Exists(nested)) return nested;
+                }
+            }
+        }
+        catch (Exception e) { BezelAgent.Log("drop: automation said " + e.Message); }
+
+        return container;
+    }
+
+    /// Which folder the window under the cursor is showing.
+    private static string ContainerFor(Point pos)
+    {
+        var hwnd = GetAncestor(WindowFromPoint(new POINT { X = pos.X, Y = pos.Y }), 2 /*GA_ROOT*/);
+        if (hwnd == IntPtr.Zero) return null;
+
+        var cls = new StringBuilder(256);
+        GetClassName(hwnd, cls, cls.Capacity);
+        var name = cls.ToString();
+
+        // The desktop is a window like any other; it just happens to be the one
+        // showing the Desktop folder.
+        if (name == "Progman" || name == "WorkerW")
+            return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
+        if (name != "CabinetWClass" && name != "ExplorerWClass") return null;
+
+        // Ask the shell which of its open windows this is, and what it is showing.
+        // Late-bound so the agent needs no interop assembly for a feature that is
+        // only reached during a drop.
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("Shell.Application");
+            var shell = Activator.CreateInstance(shellType);
+            var windows = shellType.InvokeMember("Windows", BindingFlags.InvokeMethod,
+                                                 null, shell, null);
+            var count = (int)windows.GetType().InvokeMember("Count",
+                            BindingFlags.GetProperty, null, windows, null);
+            for (int i = 0; i < count; i++)
+            {
+                var w = windows.GetType().InvokeMember("Item", BindingFlags.InvokeMethod,
+                            null, windows, new object[] { i });
+                if (w == null) continue;
+                var h = w.GetType().InvokeMember("HWND", BindingFlags.GetProperty,
+                            null, w, null);
+                if (new IntPtr(Convert.ToInt64(h)) != hwnd) continue;
+                var url = (string)w.GetType().InvokeMember("LocationURL",
+                            BindingFlags.GetProperty, null, w, null);
+                if (string.IsNullOrEmpty(url)) return null;
+                return new Uri(url).LocalPath;
+            }
+        }
+        catch (Exception e) { BezelAgent.Log("drop: shell said " + e.Message); }
+        return null;
     }
 }

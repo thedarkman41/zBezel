@@ -307,7 +307,7 @@ else
         CSC='C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
         scp -q "${SSH_MUX[@]}" "$REPO_DIR/Agent/BezelAgent.cs" "$PROXY_HOST:bezel/BezelAgent.check.cs"
         CS_OUT="$(ssh "${SSH_MUX[@]}" "$PROXY_HOST" \
-            "& '$CSC' /nologo /warn:4 /warnaserror /target:exe /out:\"\$HOME\\bezel\\BezelAgent.check.exe\" \"\$HOME\\bezel\\BezelAgent.check.cs\" 2>&1 | Out-String" 2>&1 || true)"
+            "& '$CSC' /nologo /warn:4 /warnaserror /target:exe /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll' /out:\"\$HOME\\bezel\\BezelAgent.check.exe\" \"\$HOME\\bezel\\BezelAgent.check.cs\" 2>&1 | Out-String" 2>&1 || true)"
         ssh "${SSH_MUX[@]}" "$PROXY_HOST" \
             'Remove-Item "$HOME\bezel\BezelAgent.check.cs","$HOME\bezel\BezelAgent.check.exe" -ErrorAction SilentlyContinue' 2>/dev/null || true
         if printf '%s' "$CS_OUT" | grep -qiE 'error|warning'; then

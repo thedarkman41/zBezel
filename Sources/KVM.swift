@@ -78,6 +78,11 @@ enum KVMLog {
 /// setting changes, which would take the clipboard with it as a side effect of
 /// an unrelated action.
 final class KVMTransport {
+    /// How to get back if the channel dies. Set on every connect.
+    private var lastHost: String?
+    private var lastExePath = ""
+    private var reconnecting = false
+
     /// The agent subcommand this channel runs.
     private let command: String
 
@@ -112,6 +117,8 @@ final class KVMTransport {
 
     func connect(host: String, exePath: String) {
         _ = KVMTransport.ignoreSIGPIPE
+        lastHost = host
+        lastExePath = exePath
         disconnect()
         readyLock.lock(); readyFlag = false; readyLock.unlock()
 
@@ -205,9 +212,32 @@ final class KVMTransport {
                 self.sentCount += 1
                 if self.sentCount <= 8 { KVMLog.write("sent[\(self.sentCount)] \(line)") }
             } catch {
+                // A dead pipe means the far agent went away — it was restarted,
+                // the machine slept, or the network dropped. Nothing else in this
+                // class notices, so the UI went on claiming control of a machine
+                // that had not heard from us in minutes. Say so, and reconnect.
                 self.lastError = "send failed: \(error.localizedDescription)"
                 KVMLog.write("send FAILED: \(line) — \(error.localizedDescription)")
+                self.input = nil
+                self.scheduleReconnect()
             }
+        }
+    }
+
+    /// Bring the channel back after the far side has vanished.
+    ///
+    /// Throttled, because a burst of pointer events against a dead pipe would
+    /// otherwise queue a reconnect per event. The first failure is the one that
+    /// matters; the rest are the same failure arriving repeatedly.
+    private func scheduleReconnect() {
+        guard !reconnecting, let host = lastHost else { return }
+        reconnecting = true
+        let exe = lastExePath
+        KVMLog.write("channel to \(host) died; reconnecting")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            self.reconnecting = false
+            self.connect(host: host, exePath: exe)
         }
     }
 
@@ -237,7 +267,139 @@ final class KVMController {
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private let transport = KVMTransport(command: "kvm")
+    /// One machine the pointer can reach, in the order it is reached.
+    ///
+    /// The Mac is not in this list; it is where the chain starts. Crossing the
+    /// panel's right edge enters the first entry, and pushing past THAT machine's
+    /// right edge enters the next — the arrangement of the desks, described once.
+    struct Machine: Codable, Equatable, Identifiable {
+        var name: String
+        var host: String
+        /// The monitor's Input Select value for this machine's cable.
+        var input: UInt16
+        var width: Double = 1920
+        var height: Double = 1080
+
+        var id: String { host }
+        var size: CGSize { CGSize(width: width, height: height) }
+    }
+
+    /// The machines this pointer can reach. Order is only the order they are
+    /// offered in; the pointer does not walk through them in a line.
+    var machines: [Machine] = []
+
+    /// Whether the panel is currently showing THIS Mac.
+    ///
+    /// The monitor will not say which input is live — 0x60 reports the last input
+    /// it was commanded to, not the one on screen. What is reliable is the Mac's
+    /// own display list: when the panel switches away from DisplayPort it stops
+    /// being one of this Mac's displays.
+    ///
+    /// It decides which edge is the doorway. Showing the Mac, the panel is just
+    /// more desktop and the doorway is its far edge. Showing another machine, the
+    /// panel is not the Mac's at all — the desktop ends at the built-in screen,
+    /// and that is where the pointer should leave.
+    var panelShowsMac = true
+
+    /// The input the panel was last told to show, so the machine already on
+    /// screen can be handed control without a switch.
+    var currentInput: UInt16 = 0x0F
+
+    /// Ask the user which machine to go to. Called on the main queue.
+    ///
+    /// Only when the panel is showing the Mac and there is more than one machine
+    /// to choose between: with one machine there is no question, and when the
+    /// panel is already showing a machine the answer is that machine.
+    /// Carries the point the pointer left at, so the tiles can appear beside it.
+    var presentChooser: ((CGPoint) -> Void)?
+
+    /// True while the chooser is on screen. The pointer stays on the Mac and
+    /// events pass through untouched — the user needs it to click a tile — and
+    /// the edge is not armed, or it would re-trigger the moment they arrive.
+    private(set) var choosing = false
+    private var pendingCrossing: (point: CGPoint, doorway: CGRect)?
+    /// Set by the chooser so the crossing it resumes does not ask again.
+    private var chosenIndex: Int?
+
+    /// Whether the panel stays on this machine when the pointer goes home.
+    ///
+    /// Shown as a padlock ON the far machine, because that is the screen the user
+    /// is looking at. Clicking it is recognised here rather than there: the Mac
+    /// is the one placing the pointer, so it knows when a click lands on the
+    /// badge, and the badge itself is click-through and never steals one meant
+    /// for the application underneath.
+    /// Which machine the panel is pinned to, if any.
+    ///
+    /// A lock is a statement about the MONITOR, not about a visit: while it is
+    /// held the panel shows that machine and nothing else, so leaving does not
+    /// switch back and arriving does not ask where to go. That also makes it the
+    /// most reliable thing we have about which input is live — better than the
+    /// tracked command, which drifts, and better than the display list, which
+    /// only says whether the Mac is on screen.
+    private(set) var lockedIndex: Int?
+
+    /// True between a dragging crossing and the release that ends it. The ghost
+    /// on the far machine is showing, and the button-up has to put it away.
+    private var carrying = false
+
+    /// Stamped on events this class posts to the Mac, so the tap can recognise
+    /// its own work and let it through. Without it they would be captured and
+    /// forwarded to the far machine like any other input — the tap has no other
+    /// way to tell them from the user's.
+    private static let selfStamp: Int64 = 0x7A42455A
+
+    var remoteLocked: Bool { lockedIndex != nil }
+
+    /// The badge's side, matching the agent's own constant.
+    private static let badgeSide: CGFloat = 140
+
+    /// Where the badge is sitting on the far desktop. The Mac chooses this — it
+    /// places the badge — so it also knows where a click on it would land.
+    private var badgeOrigin = CGPoint.zero
+    private var badgeVisible = false
+
+    private var lockRect: CGRect {
+        CGRect(origin: badgeOrigin,
+               size: CGSize(width: KVMController.badgeSide, height: KVMController.badgeSide))
+    }
+
+    /// Put the badge beside the point the pointer just arrived at, so it is a
+    /// short hop away rather than across the desk. Below and to the left, since
+    /// arrivals come in at the right edge; clamped so it cannot hang off screen.
+    /// The corner the badge sits in once locked, and stays in.
+    ///
+    /// A locked badge is a status light, not a button waiting to be pressed, so
+    /// it must not follow the pointer around: something that moves to meet you
+    /// reads as needing attention, and this needs none until you go looking for
+    /// it.
+    private func parkBadge() {
+        let side = KVMController.badgeSide
+        badgeOrigin = CGPoint(x: 24, y: max(remoteSize.height - side - 24, 8))
+    }
+
+    private func placeBadge(near point: CGPoint) {
+        let side = KVMController.badgeSide
+        let x = min(max(point.x - side - 24, 8), max(remoteSize.width - side - 8, 8))
+        let y = min(max(point.y + 24, 8), max(remoteSize.height - side - 8, 8))
+        badgeOrigin = CGPoint(x: x, y: y)
+    }
+    /// Which of them the pointer is on. Meaningless while `side == .here`.
+    private var machineIndex = 0
+
+    /// How far past a machine's right edge the pointer must be pushed to move on
+    /// to the next. Mirrors returnThreshold, and for the same reason: an edge
+    /// crossing has to be deliberate, not a stray pixel of overshoot.
+    static let advanceThreshold: CGFloat = 24
+
+    /// One connection per machine, opened when the KVM is armed so that a
+    /// crossing costs no SSH handshake.
+    private var transports: [String: KVMTransport] = [:]
+    private var transport: KVMTransport {
+        if let existing = transports[host] { return existing }
+        let fresh = KVMTransport(command: "kvm")
+        transports[host] = fresh
+        return fresh
+    }
     private let clipTransport = KVMTransport(command: "clipboard")
     private let clipboard = ClipboardBridge()
 
@@ -420,12 +582,22 @@ final class KVMController {
             }
         }
 
-        transport.connect(host: host, exePath: exePath)
+        // Every machine in the chain, not just the first: a crossing should cost
+        // a line on an open pipe, not an SSH handshake.
+        for machine in machines {
+            let pipe = transports[machine.host] ?? KVMTransport(command: "kvm")
+            transports[machine.host] = pipe
+            pipe.connect(host: machine.host, exePath: exePath)
+        }
+        if machines.isEmpty { transport.connect(host: host, exePath: exePath) }
         clipTransport.connect(host: host, exePath: exePath)
         clipboard.start()
         isEnabled = true
         side = .here
-        status = "armed — pointer at the right edge crosses to \(host)"
+        let first = machines.first?.name ?? host
+        status = machines.count > 1
+            ? "armed — right edge crosses to \(first), and on through \(machines.count) machines"
+            : "armed — pointer at the right edge crosses to \(first)"
         onChange?()
         return nil
     }
@@ -436,7 +608,7 @@ final class KVMController {
         if side == .there { handBack() }
         clipboard.stop()
         removeTap()
-        transport.disconnect()
+        for pipe in transports.values { pipe.disconnect() }
         clipTransport.disconnect()
         isEnabled = false
         status = "off"
@@ -501,19 +673,29 @@ final class KVMController {
             if let port = tap { CGEvent.tapEnable(tap: port, enable: true) }
             return nil
         }
+        // Our own synthetic events pass straight through, always.
+        if event.getIntegerValueField(.eventSourceUserData) == KVMController.selfStamp {
+            return Unmanaged.passUnretained(event)
+        }
         guard isEnabled else { return Unmanaged.passUnretained(event) }
 
         if side == .here {
             // Only looking for the crossing; everything passes through.
             if type == .mouseMoved || type == .leftMouseDragged
                 || type == .rightMouseDragged || type == .otherMouseDragged {
-                // The doorway is the PANEL's right edge, not the desktop's.
-                // They coincide in the usual layout, but only by accident of
-                // the panel being the rightmost display — put it on the left
-                // and the desktop edge would be the wrong wall entirely.
-                let doorway = portalBounds ?? macBounds
+                // Which edge is the doorway depends on what the panel is
+                // showing. While it shows the Mac it is ordinary desktop and the
+                // doorway is its far side; while it shows another machine the
+                // desktop stops at the built-in screen, so leaving THAT is the
+                // crossing — the pointer should arrive on the machine already
+                // visible rather than travelling across a panel it cannot see.
+                // A locked panel is showing that machine, so the Mac's desktop
+                // effectively ends at the built-in screen even though the panel
+                // is still in its display list.
+                let panelIsMine = panelShowsMac && lockedIndex == nil
+                let doorway = panelIsMine ? (portalBounds ?? macBounds) : mainBounds
                 let where_ = event.location
-                if where_.x >= doorway.maxX - 1 {
+                if where_.x >= doorway.maxX - 1, !choosing {
                     handOver(at: where_, doorway: doorway)
                     return nil
                 }
@@ -588,7 +770,24 @@ final class KVMController {
             // single stray pixel. The accumulator is allowed to go negative so
             // that push has to be sustained; what gets SENT is always clamped
             // to the remote desktop.
-            if remotePoint.x < KVMController.returnThreshold { handBack(); return }
+            if remotePoint.x < KVMController.returnThreshold {
+                // A lock is a two-place arrangement: this machine and the Mac.
+                // Walking the chain would take the pointer through machines whose
+                // desktops are not on screen — the panel is pinned here — so it
+                // would be travelling blind across a machine it cannot see.
+                if lockedIndex == nil, machineIndex > 0 {
+                    step(to: machineIndex - 1, enteringFromLeft: false)
+                } else {
+                    handBack()
+                }
+                return
+            }
+            if lockedIndex == nil,
+               remotePoint.x > remoteSize.width - 1 + KVMController.advanceThreshold,
+               machineIndex + 1 < machines.count {
+                step(to: machineIndex + 1, enteringFromLeft: true)
+                return
+            }
 
             remotePoint.x = min(remotePoint.x, remoteSize.width - 1)
             remotePoint.y = min(max(remotePoint.y, 0), remoteSize.height - 1)
@@ -601,8 +800,54 @@ final class KVMController {
             // from comparing positions, so warping does not disturb tracking.
             CGWarpMouseCursorPosition(parkingSpot)
 
-        case .leftMouseDown:   transport.send("B 1 1")
-        case .leftMouseUp:     transport.send("B 1 0")
+        case .leftMouseDown:
+            // A click on the badge is a command to this app, not input for the
+            // far machine, so it is swallowed rather than forwarded.
+            if badgeVisible, lockRect.contains(remotePoint) {
+                lockedIndex = (lockedIndex == nil) ? machineIndex : nil
+                // Locked, it stops being a thing to click and becomes a thing to
+                // notice, so it goes to the corner and out of the way. Unlocked,
+                // it returns to the hand that is about to use it.
+                if lockedIndex != nil { parkBadge() } else { placeBadge(near: remotePoint) }
+                transport.send("L \(remoteLocked ? 1 : 0) "
+                             + "\(Int(badgeOrigin.x)) \(Int(badgeOrigin.y))")
+                KVMLog.write("lock \(remoteLocked ? "engaged" : "released") on \(host)")
+                status = remoteLocked
+                    ? "controlling \(host) — locked: the panel stays here"
+                    : "controlling \(host) — its left edge brings you back"
+                onChange?()
+                return
+            }
+            // A click anywhere else dismisses the badge and gives up the lock:
+            // the question has been answered by ignoring it. The click itself
+            // still goes through — the user was clicking on something.
+            if badgeVisible {
+                // Put the badge away, but leave the lock exactly as it was. The
+                // lock is a decision; dismissing the badge is just tidying the
+                // screen. Releasing it here meant a locked panel silently
+                // unlocked itself the moment the user clicked on anything.
+                badgeVisible = false
+                transport.send("L -1")
+                KVMLog.write("badge dismissed; lock stays \(remoteLocked ? "engaged" : "off")")
+                onChange?()
+            }
+            transport.send("B 1 1")
+        case .leftMouseUp:
+            // Its down was swallowed; sending the up alone would land as a click
+            // with no press on the far machine.
+            if carrying {
+                // The drop. The file is already on its way — the copy started at
+                // the crossing — so this only takes the ghost away.
+                carrying = false
+                // The agent works out what the pointer is over and moves the
+                // staged file there. It hides the ghost itself, so there is no
+                // separate D command and no window between the two.
+                transport.send("DROP")
+                releaseMacDrag()
+                KVMLog.write("drop requested on \(host)")
+            }
+            if badgeVisible, lockRect.contains(remotePoint) { return }
+            transport.send("B 1 0")
         case .rightMouseDown:  transport.send("B 2 1")
         case .rightMouseUp:    transport.send("B 2 0")
         case .otherMouseDown:  transport.send("B 3 1")
@@ -637,7 +882,82 @@ final class KVMController {
 
     // MARK: Crossings
 
+    /// Move the pointer from one machine in the chain to its neighbour.
+    ///
+    /// The vertical position is carried across as a FRACTION of each desktop, so
+    /// the pointer stays at the same height on the glass even though the machines
+    /// run at different resolutions. Modifiers are released on the machine being
+    /// left: crossing while holding Command and releasing it on the next machine
+    /// leaves the first one believing it is still held.
+    private func step(to index: Int, enteringFromLeft: Bool) {
+        guard machines.indices.contains(index) else { return }
+        for vk in KeyMap.allModifierVKs { transport.send("K \(vk) 0") }
+
+        let fraction = remoteSize.height > 1
+            ? min(max(remotePoint.y / (remoteSize.height - 1), 0), 1) : 0.5
+        let leaving = machines.indices.contains(machineIndex)
+            ? machines[machineIndex].name : host
+
+        activate(machines[index], at: index)
+
+        remotePoint = CGPoint(
+            x: enteringFromLeft ? 0 : remoteSize.width - 1,
+            y: fraction * (remoteSize.height - 1))
+        transport.send("A \(Int(remotePoint.x)) \(Int(remotePoint.y))")
+
+        KVMLog.write("stepped \(enteringFromLeft ? "right" : "left") "
+                   + "from \(leaving) to \(host) at "
+                   + "\(Int(remotePoint.x)),\(Int(remotePoint.y))")
+        switchPanel(to: pcInput, why: "stepped to \(host)")
+        status = "controlling \(machines[index].name)"
+            + (index > 0 ? " — left edge goes back to \(machines[index - 1].name)"
+                         : " — its left edge brings you back")
+        onChange?()
+    }
+
+    /// Point the single-remote machinery at one entry in the chain.
+    ///
+    /// The rest of this class was written for exactly one far machine and still
+    /// is; the chain simply re-aims it. Keeping host, size and input as the live
+    /// pair rather than threading an index through every send site kept the
+    /// change to the edges where it belongs.
+    private func activate(_ machine: Machine, at index: Int) {
+        machineIndex = index
+        host = machine.host
+        pcInput = machine.input
+        if machine.size.width > 1, machine.size.height > 1 {
+            remoteSize = machine.size
+        }
+    }
+
     private func handOver(at point: CGPoint, doorway: CGRect) {
+        // Whichever machine is already on screen gets the pointer, with no input
+        // switch: the user is looking at it, so handing control anywhere else
+        // would be a surprise. Only when the panel is showing the Mac is there a
+        // choice to make about where to go.
+        let onScreen = machines.firstIndex { $0.input == currentInput }
+        if let chosen = chosenIndex, machines.indices.contains(chosen) {
+            chosenIndex = nil
+            activate(machines[chosen], at: chosen)
+        } else if let locked = lockedIndex, machines.indices.contains(locked) {
+            // Locked: there is no question to ask. The panel is showing that
+            // machine and the pointer goes straight back to it.
+            activate(machines[locked], at: locked)
+        } else if !panelShowsMac, let onScreen {
+            activate(machines[onScreen], at: onScreen)
+        } else if machines.count > 1, let ask = presentChooser {
+            // More than one place to go and nothing on screen to imply which.
+            // Hold the crossing, nudge the pointer off the edge so it is not
+            // sitting on the trigger, and ask.
+            pendingCrossing = (point, doorway)
+            choosing = true
+            CGWarpMouseCursorPosition(CGPoint(x: doorway.maxX - 40, y: point.y))
+            status = "choose a machine"
+            DispatchQueue.main.async { ask(point); self.onChange?() }
+            return
+        } else if let first = machines.first {
+            activate(first, at: 0)
+        }
         // Keep the spot on the glass.
         //
         // The panel is about to stop showing the Mac and start showing the PC,
@@ -648,8 +968,22 @@ final class KVMController {
         // coordinates would not.
         let relX = doorway.width  > 0 ? (point.x - doorway.minX) / doorway.width  : 1
         let relY = doorway.height > 0 ? (point.y - doorway.minY) / doorway.height : 0.5
-        remotePoint = CGPoint(x: min(max(relX, 0), 1) * (remoteSize.width  - 1),
-                              y: min(max(relY, 0), 1) * (remoteSize.height - 1))
+
+        // WHERE the pointer lands depends on which wall it came through.
+        //
+        // Through the panel's own right edge, the panel is about to stop showing
+        // the Mac and start showing this machine — same glass — so the pointer
+        // belongs at the same spot on it, proportionally.
+        //
+        // Through the built-in screen's right edge, the machine is on the panel
+        // NEXT to that screen. The pointer is arriving from its left, so it
+        // enters at its left edge, the way it would cross between two desktops.
+        // Carrying the fraction over would drop it on the far side, having
+        // apparently skipped the whole screen.
+        let fromBuiltIn = (lockedIndex != nil) || !panelShowsMac
+        remotePoint = CGPoint(
+            x: fromBuiltIn ? 0 : min(max(relX, 0), 1) * (remoteSize.width - 1),
+            y: min(max(relY, 0), 1) * (remoteSize.height - 1))
 
         // Decouple the hardware from the cursor so it stops at the edge instead
         // of grinding along it, and hide it — deltas still arrive.
@@ -672,15 +1006,144 @@ final class KVMController {
                    + "\(Int(remotePoint.x)),\(Int(remotePoint.y)) "
                    + "of \(Int(remoteSize.width))x\(Int(remoteSize.height))")
         transport.send("A \(Int(remotePoint.x)) \(Int(remotePoint.y))")
+        // A locked panel stays locked across a second visit; anything else and
+        // the badge would contradict what the monitor is about to do.
+        // Locked, it stays in its corner across every arrival; only an unlocked
+        // badge comes to meet the pointer.
+        if lockedIndex != nil { parkBadge() } else { placeBadge(near: remotePoint) }
+        badgeVisible = true
+        transport.send("L \(remoteLocked ? 1 : 0) "
+                     + "\(Int(badgeOrigin.x)) \(Int(badgeOrigin.y))")
+
+        // If this crossing was a drag, the files go too.
+        //
+        // Read on the main queue, and immediately: the drag pasteboard lives only
+        // for the length of the gesture, so a moment later there is nothing to
+        // find. The copy itself runs elsewhere and takes as long as it takes.
+        let target = host
+        DispatchQueue.main.async { [weak self] in
+            let files = DragTransfer.draggedFiles()
+            guard !files.isEmpty else { return }
+            KVMLog.write("drag carried \(files.count) file(s) to \(target)")
+            // Show what is being carried, so the drag looks like a drag over
+            // there too. It follows the cursor on that machine's own timer.
+            let label = files.count == 1
+                ? files[0].lastPathComponent
+                : "\(files.count) items"
+            self?.carrying = true
+            self?.transport.send("D \(label)")
+            DragTransfer.send(files, to: target,
+                              progress: { line in
+                                  Task { @MainActor in
+                                      self?.status = line
+                                      self?.onChange?()
+                                  }
+                              },
+                              done: { line in
+                                  Task { @MainActor in
+                                      self?.status = line
+                                      self?.onChange?()
+                                      KVMLog.write("drag copy: \(line)")
+                                  }
+                              })
+        }
 
         // Send the pointer first, then the panel. The pointer is already on the
         // far machine as far as the user is concerned, and the input switch
         // costs the better part of a second through the proxy.
-        if switchesInput {
-            KVMLog.write("switching panel to the PC input (0x\(String(pcInput, radix: 16)))")
-            setMonitorInput?(pcInput)
+        // Skip the switch only when we are CERTAIN the panel is already showing
+        // this machine: the panel is not showing the Mac, and the input we last
+        // commanded is this machine's.
+        //
+        // The tracked input drifts — the lock deliberately leaves the panel on
+        // another machine, and the panel can come back to the Mac by itself with
+        // nothing to tell us. Trusting it alone meant the app skipped the very
+        // switch the user had just asked for, over and over. A redundant DDC
+        // write costs a tenth of a second; a missed one costs the feature.
+        // A lock on THIS machine is proof the panel is already showing it.
+        let certainlyThere = !panelShowsMac && pcInput == currentInput
+        if certainlyThere {
+            KVMLog.write("panel already on 0x\(String(pcInput, radix: 16)); no switch")
+        } else {
+            switchPanel(to: pcInput, why: "arrived at \(host)")
         }
-        status = "controlling \(host) — its left edge brings you back"
+        status = "controlling \(machines.first?.name ?? host)"
+            + (machines.count > 1
+               ? " — right edge goes on to \(machines[1].name)"
+               : " — its left edge brings you back")
+        onChange?()
+    }
+
+    /// The user picked a machine from the chooser.
+    func chooseMachine(at index: Int) {
+        guard choosing, machines.indices.contains(index),
+              let crossing = pendingCrossing else { return }
+        choosing = false
+        pendingCrossing = nil
+        chosenIndex = index
+        handOver(at: crossing.point, doorway: crossing.doorway)
+    }
+
+    /// End the drag still running on the Mac.
+    ///
+    /// The pointer left in the middle of a gesture, so Finder never saw a mouse
+    /// up and still believes it is dragging — come back and the icon is still
+    /// stuck to the cursor. Escape first, which CANCELS the drag rather than
+    /// completing it: a plain mouse up would drop the file wherever the Mac's
+    /// pointer happens to be parked, which is not somewhere the user chose.
+    private func releaseMacDrag() {
+        let source = CGEventSource(stateID: .hidSystemState)
+        for down in [true, false] {
+            if let key = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: down) {
+                key.setIntegerValueField(.eventSourceUserData, value: KVMController.selfStamp)
+                key.post(tap: .cghidEventTap)
+            }
+        }
+        let here = CGEvent(source: nil)?.location ?? parkingSpot
+        if let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                            mouseCursorPosition: here, mouseButton: .left) {
+            up.setIntegerValueField(.eventSourceUserData, value: KVMController.selfStamp)
+            up.post(tap: .cghidEventTap)
+        }
+        KVMLog.write("cancelled the Mac's drag")
+    }
+
+    /// Every automatic input change goes through here.
+    ///
+    /// While a lock is held the panel belongs to the user, not to the pointer:
+    /// nothing this class does moves it. Gating at one point rather than at each
+    /// call site means a new crossing path cannot quietly reintroduce a switch —
+    /// there were three call sites and each had its own condition, which is how
+    /// the panel kept moving when it had been told not to.
+    private func switchPanel(to input: UInt16, why reason: String) {
+        guard switchesInput else { return }
+        if let locked = lockedIndex {
+            KVMLog.write("locked on \(machines.indices.contains(locked) ? machines[locked].name : "a machine")"
+                       + "; NOT switching to 0x\(String(input, radix: 16)) (\(reason))")
+            return
+        }
+        KVMLog.write("switching panel to 0x\(String(input, radix: 16)) — \(reason)")
+        setMonitorInput?(input)
+    }
+
+    /// Let go of the panel. Called when the user changes the input themselves —
+    /// having done that by hand, they have overruled the lock.
+    func clearLock() {
+        guard lockedIndex != nil else { return }
+        lockedIndex = nil
+        badgeVisible = false
+        transport.send("L -1")
+        KVMLog.write("lock cleared: the input was changed by hand")
+        onChange?()
+    }
+
+    /// The chooser was dismissed without a choice. Nothing has moved, so there is
+    /// nothing to undo — just re-arm the edge.
+    func cancelChoice() {
+        guard choosing else { return }
+        choosing = false
+        pendingCrossing = nil
+        status = "armed — pointer at the right edge chooses a machine"
         onChange?()
     }
 
@@ -709,10 +1172,7 @@ final class KVMController {
 
         side = .here
         KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
-        if switchesInput {
-            KVMLog.write("switching panel to the Mac input (0x\(String(macInput, radix: 16)))")
-            setMonitorInput?(macInput)
-        }
+        switchPanel(to: macInput, why: "returned to the Mac")
         status = "armed — the panel's right edge crosses to \(host)"
         onChange?()
     }

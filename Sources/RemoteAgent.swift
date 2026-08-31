@@ -418,6 +418,31 @@ actor RemoteAgent {
                 CGRect(x: vx, y: vy, width: vw, height: vh))
     }
 
+    /// Ask ANY host how big its desktop is, without disturbing this agent's own
+    /// connection.
+    ///
+    /// The KVM chain has a machine per host and none of them is necessarily the
+    /// DDC proxy, so sizing them cannot go through the configured connection.
+    /// One short-lived ssh each, paid once when the KVM is armed.
+    static func desktopSize(host: String, exePath: String) -> CGSize? {
+        guard !host.isEmpty else { return nil }
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        task.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                          host, "& \"\(exePath)\" client cursor"]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do { try task.run() } catch { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let v = json["virtual"] as? [String: Any],
+              let w = v["w"] as? Int, let h = v["h"] as? Int,
+              w > 1, h > 1 else { return nil }
+        return CGSize(width: w, height: h)
+    }
+
     /// Drop the shared SSH connection, e.g. when the host setting changes.
     func disconnect() {
         stopRelay()

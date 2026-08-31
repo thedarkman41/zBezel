@@ -120,6 +120,10 @@ final class MonitorController: ObservableObject {
         let defaults = UserDefaults.standard
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
+        kvmMachines = MonitorController.loadKVMMachines(
+            proxyHost: defaults.string(forKey: "proxyHost") ?? "")
+        lastCommandedInput = UInt16(defaults.object(forKey: "lastCommandedInput") as? Int
+                                    ?? 0x0F)
         vendorMap = VendorMap.load()
         pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
         // -1 means this app has never set a size, which is not the same as
@@ -532,11 +536,43 @@ final class MonitorController: ObservableObject {
     /// needs it to map the way back.
     func syncKVMPortal() {
         var portal: CGDirectDisplayID?
-        if let id = selectedID, displays.contains(where: { $0.id == id }) {
+        let present = selectedID.map { id in displays.contains { $0.id == id } } ?? false
+        if let id = selectedID, present {
             portal = id
         }
         kvm.configurePortal(display: portal)
+
+        // Present in this Mac's display list means the panel is showing this Mac.
+        // Gone means it is showing something else — the monitor itself will not
+        // say which input is live, and 0x60 answers with the last one it was
+        // commanded to rather than the one on screen.
+        kvm.panelShowsMac = present
+        // Presence in the display list OUTRANKS what we last commanded. The lock
+        // deliberately leaves the panel on another machine, so the commanded
+        // value stays on that input; when the panel later returns to the Mac by
+        // itself — Auto Switch, or the monitor's own buttons — nothing tells us,
+        // and the app goes on believing the panel is elsewhere. It then skips the
+        // very switch the user is asking for, because it thinks it is already
+        // there. The display list is the one thing here that cannot lie.
+        kvm.currentInput = present ? kvm.macInput : lastCommandedInput
+        if present && lastCommandedInput != kvm.macInput {
+            lastCommandedInput = kvm.macInput
+            KVMLog.write("panel is back on this Mac; corrected the tracked input")
+        }
     }
+
+    /// The input the panel was last told to show.
+    ///
+    /// Tracked here because it cannot be read back. Persisted so a relaunch does
+    /// not start out believing the panel is on DisplayPort when it is not.
+    @Published var lastCommandedInput: UInt16 {
+        didSet {
+            UserDefaults.standard.set(Int(lastCommandedInput), forKey: "lastCommandedInput")
+            kvm.currentInput = lastCommandedInput
+        }
+    }
+
+    private let machineChooser = MachineChooser()
 
     /// Wire the panel-switching side of the KVM. Kept out of init because it
     /// needs the monitor profile, which is not known until a probe has run.
@@ -544,7 +580,23 @@ final class MonitorController: ObservableObject {
         kvm.macInput = HPProfile.inputNames.first { $0.value == "DisplayPort"  }?.key ?? 0x0F
         kvm.pcInput  = HPProfile.inputNames.first { $0.value == "USB-C1 Video" }?.key ?? 0x13
         kvm.setMonitorInput = { [weak self] value in
-            Task { @MainActor in self?.requestMonitorInput(value) }
+            Task { @MainActor in self?.requestMonitorInput(value, byHand: false) }
+        }
+        // Put the question on the panel the pointer just reached, which is the
+        // screen the user is looking at when they ask it.
+        kvm.presentChooser = { [weak self] exit in
+            guard let self else { return }
+            self.machineChooser.show(on: self.selectedID,
+                                     machines: self.kvmMachines,
+                                     near: exit,
+                                     pick: { [weak self] index in
+                                         self?.kvm.chooseMachine(at: index)
+                                         self?.syncKVMState()
+                                     },
+                                     cancel: { [weak self] in
+                                         self?.kvm.cancelChoice()
+                                         self?.syncKVMState()
+                                     })
         }
     }
 
@@ -567,8 +619,17 @@ final class MonitorController: ObservableObject {
     /// So: one writer at a time, the most recent request wins, and a reversal
     /// inside the coalescing window asks for nothing at all — which is what
     /// changing your mind that quickly should mean.
-    func requestMonitorInput(_ value: UInt16) {
+    /// Put the panel on an input.
+    ///
+    /// `byHand` is the difference between the KVM moving the panel as the pointer
+    /// travels and the user choosing an input themselves. Choosing one by hand
+    /// overrules any lock: the lock exists to stop the panel following the
+    /// pointer home, and someone reaching for the input list has plainly decided
+    /// where they want the panel to be.
+    func requestMonitorInput(_ value: UInt16, byHand: Bool = true) {
+        if byHand { kvm.clearLock() }
         desiredInput = value
+        lastCommandedInput = value
         guard !inputSwitchRunning else { return }
         inputSwitchRunning = true
 
@@ -598,6 +659,31 @@ final class MonitorController: ObservableObject {
     /// sends absolute positions, so without that number they would mean
     /// different things at each end and the pointer would land in the wrong
     /// place — badly on a 4K display driven from a smaller Mac screen.
+    /// The machines the pointer can reach, left to right.
+    ///
+    /// Persisted as JSON because it is a list the user arranges, not a single
+    /// setting. Seeded on first run from the proxy host, since a machine that can
+    /// drive the monitor's controls is by definition one plugged into it.
+    @Published var kvmMachines: [KVMController.Machine] {
+        didSet {
+            if let data = try? JSONEncoder().encode(kvmMachines) {
+                UserDefaults.standard.set(data, forKey: "kvmMachines")
+            }
+        }
+    }
+
+    static func loadKVMMachines(proxyHost: String) -> [KVMController.Machine] {
+        if let data = UserDefaults.standard.data(forKey: "kvmMachines"),
+           let list = try? JSONDecoder().decode([KVMController.Machine].self, from: data),
+           !list.isEmpty {
+            return list
+        }
+        guard !proxyHost.isEmpty else { return [] }
+        return [KVMController.Machine(name: proxyHost, host: proxyHost,
+                                      input: HPProfile.inputNames
+                                        .first { $0.value == "USB-C1 Video" }?.key ?? 0x13)]
+    }
+
     func setKVM(_ on: Bool) async {
         // Remember the choice even if bringing it up fails, so a host that was
         // simply asleep does not silently switch the feature off for good.
@@ -611,16 +697,31 @@ final class MonitorController: ObservableObject {
             wireKVMInputs()
             syncKVMPortal()
             await agent.update(config: .init(host: proxyHost, enabled: true))
-            var size: CGSize?
-            do {
-                size = try await agent.cursor().bounds.size
-            } catch {
-                // Not fatal: fall back to the last known size and let the user
-                // see why the reading failed rather than refusing to start.
-                kvmError = "Could not read \(proxyHost)'s screen size "
-                         + "(\(error.localizedDescription)); using the last known size."
+
+            // Size every machine in the chain, not just the proxy. A machine
+            // whose size cannot be read keeps whatever it had: a wrong size makes
+            // the pointer reach an edge early or late, which is annoying, while
+            // refusing to start makes the whole feature unavailable.
+            let exe = #"$HOME\bezel\BezelAgent.exe"#
+            var chain = kvmMachines
+            var unreachable: [String] = []
+            for i in chain.indices {
+                if let size = RemoteAgent.desktopSize(host: chain[i].host, exePath: exe) {
+                    chain[i].width = size.width
+                    chain[i].height = size.height
+                } else if chain[i].width <= 1 {
+                    unreachable.append(chain[i].name)
+                }
             }
-            if let problem = kvm.enable(host: proxyHost,
+            kvmMachines = chain
+            kvm.machines = chain
+            if !unreachable.isEmpty {
+                kvmError = "Could not read the screen size of "
+                         + unreachable.joined(separator: ", ")
+                         + "; using the last known size."
+            }
+            let size = chain.first?.size
+            if let problem = kvm.enable(host: chain.first?.host ?? proxyHost,
                                         exePath: #"$HOME\bezel\BezelAgent.exe"#,
                                         remoteSize: size) {
                 kvmError = problem
@@ -1330,6 +1431,14 @@ final class MonitorController: ObservableObject {
     /// Write, then confirm against the monitor. For discrete controls, where one
     /// write per interaction is the whole story.
     func set(code: UInt8, value: UInt16) async {
+        // Every path that changes the input from the interface arrives here — the
+        // menu bar list and the Input tab both call set() rather than
+        // requestMonitorInput. Choosing an input by hand overrules a lock, and
+        // catching it at this one point means a new control cannot forget to.
+        if code == VCP.inputSelect.code {
+            kvm.clearLock()
+            lastCommandedInput = value
+        }
         if case .proxy = transport {
             // The proxy path writes and reads everything back in one exchange,
             // so a separate confirm would just be another second on the wire.

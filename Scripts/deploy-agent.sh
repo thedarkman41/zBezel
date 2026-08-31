@@ -24,7 +24,7 @@ echo "==> compiling on $HOST"
 # The running service holds the executable open, so stop it before rebuilding.
 ssh "$HOST" "Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 600
-& '$CSC' /nologo /optimize+ /warn:4 /warnaserror /target:exe /out:\"\$HOME\\bezel\\BezelAgent.exe\" \"\$HOME\\bezel\\BezelAgent.cs\"
+& '$CSC' /nologo /optimize+ /warn:4 /warnaserror /target:exe /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll' /out:\"\$HOME\\bezel\\BezelAgent.exe\" \"\$HOME\\bezel\\BezelAgent.cs\"
 if (-not (Test-Path \"\$HOME\\bezel\\BezelAgent.exe\")) { throw 'compile failed' }"
 
 echo "==> registering the logon service"

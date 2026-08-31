@@ -117,6 +117,7 @@ struct InputTab: View {
             imageOptimizationCard
             displayPortCard
             usbCCard
+            KVMMachinesCard(controller: controller)
         }
         .onAppear(perform: syncFromCurrent)
         .onChange(of: controller.currentMode?.id) { _, _ in syncFromCurrent() }
@@ -819,6 +820,100 @@ struct MultiScreenTab: View {
                 .buttonStyle(.plain)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.accent)
+            }
+        }
+    }
+}
+
+
+/// The machines the pointer travels through, in the order it reaches them.
+///
+/// An ordered list rather than a single "PC host", because the pointer walks a
+/// row of desks: off the Mac's panel into the first machine, off ITS right edge
+/// into the next. Each needs the monitor input its cable is on, which is what
+/// the panel is switched to when the pointer arrives.
+private struct KVMMachinesCard: View {
+    @ObservedObject var controller: MonitorController
+    @State private var newHost = ""
+    @State private var newInput: UInt16 = 0x11      // HDMI: the usual spare
+
+    private var inputChoices: [(value: UInt16, label: String)] {
+        HPProfile.inputNames.map { ($0.key, $0.value) }.sorted { $0.0 < $1.0 }
+    }
+
+    var body: some View {
+        Card(title: "KVM Machines", systemImage: "rectangle.on.rectangle.angled",
+             help: "The pointer leaves the Mac at the panel's right edge and "
+                 + "enters the first machine. Pushing past that machine's right "
+                 + "edge enters the next. Each machine's input is what the "
+                 + "monitor is switched to when the pointer arrives there.") {
+            if controller.kvmMachines.isEmpty {
+                Text("No machines yet. Add the host you can already reach over SSH.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim)
+            }
+            ForEach(Array(controller.kvmMachines.enumerated()), id: \.element.id) { i, machine in
+                HStack(spacing: 8) {
+                    Text("\(i + 1)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.textDim)
+                        .frame(width: 14, alignment: .trailing)
+                    Text(machine.host)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textPrimary)
+                    Spacer(minLength: 8)
+                    if machine.width > 1 {
+                        Text("\(Int(machine.width))×\(Int(machine.height))")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundStyle(Theme.textDim)
+                    }
+                    StyledPicker(options: inputChoices,
+                                 selection: Binding(
+                                    get: { machine.input },
+                                    set: { controller.kvmMachines[i].input = $0 }),
+                                 enabled: !controller.kvmEnabled, width: 150)
+                    Button {
+                        controller.kvmMachines.remove(at: i)
+                    } label: {
+                        Image(systemName: "minus.circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textDim)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(controller.kvmEnabled)
+                    .help("Remove \(machine.host) from the chain")
+                }
+            }
+
+            Divider().overlay(Theme.rule).padding(.vertical, 2)
+
+            HStack(spacing: 8) {
+                TextField("ssh host", text: $newHost)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .padding(.horizontal, 8).padding(.vertical, 5)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.35)))
+                    .frame(width: 140)
+                StyledPicker(options: inputChoices, selection: $newInput,
+                             enabled: true, width: 150)
+                Spacer(minLength: 0)
+                Button("Add") {
+                    let host = newHost.trimmingCharacters(in: .whitespaces)
+                    guard !host.isEmpty,
+                          !controller.kvmMachines.contains(where: { $0.host == host }) else { return }
+                    controller.kvmMachines.append(
+                        KVMController.Machine(name: host, host: host, input: newInput))
+                    newHost = ""
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.accent)
+            }
+
+            if controller.kvmEnabled {
+                Text("Switch the KVM off to change the chain.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.textDim)
             }
         }
     }
