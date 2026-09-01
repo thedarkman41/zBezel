@@ -10,6 +10,7 @@ struct InstallerView: View {
     @State private var usePassword = false
     @State private var password = ""
     @State private var showLog = false
+    @State private var confirmDisableSac = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -121,6 +122,54 @@ struct InstallerView: View {
                     .foregroundStyle(Theme.textDim)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            smartAppControlSection
+        }
+    }
+
+    /// Smart App Control refuses to load the agent, because the agent is compiled
+    /// on the target and is therefore unsigned. Turning it off is the escape
+    /// hatch, not the plan — it cannot be undone without reinstalling Windows,
+    /// so it is defaulted off and asks again before doing it.
+    private var smartAppControlSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider().padding(.vertical, 4)
+            Toggle("Turn off Smart App Control if it would block the agent",
+                   isOn: Binding(
+                    get: { target.disableSmartAppControl },
+                    set: { wanted in
+                        // Only the switching-on direction needs confirming.
+                        if wanted { confirmDisableSac = true }
+                        else { target.disableSmartAppControl = false }
+                    }))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecond)
+                .toggleStyle(.checkbox)
+
+            Text("""
+                 Windows 11 ships Smart App Control in an evaluation mode and may switch it on by \
+                 itself, after which it refuses to run anything unsigned — including this agent, \
+                 which is compiled on the machine and so has no signature. Leave this off unless \
+                 the install has already failed for that reason. Signing the agent fixes it on \
+                 every machine and can be undone; this cannot.
+                 """)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .alert("Turn off Smart App Control?", isPresented: $confirmDisableSac) {
+            Button("Cancel", role: .cancel) { target.disableSmartAppControl = false }
+            Button("Turn It Off", role: .destructive) { target.disableSmartAppControl = true }
+        } message: {
+            Text("""
+                 This cannot be undone. Microsoft provides no way to switch Smart App Control back \
+                 on short of reinstalling Windows.
+
+                 Afterwards this machine will run unsigned programs from anywhere, and will need a \
+                 restart before the agent works.
+
+                 It is only done if the machine is actually blocking the agent.
+                 """)
         }
     }
 

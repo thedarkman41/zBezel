@@ -28,9 +28,34 @@ final class AgentInstaller: ObservableObject {
         var user: String = ""
         var port: Int = 22
         var installKey: Bool = true
+        /// Opt-in, and deliberately not defaulted on. See `disableSacScript`.
+        var disableSmartAppControl: Bool = false
 
         var destination: String { user.isEmpty ? host : "\(user)@\(host)" }
     }
+
+    /// Smart App Control's state, read during preflight.
+    ///
+    /// Windows 11 ships this in `evaluation` on a fresh install and decides for
+    /// itself whether to switch on. So a machine that installs fine today can
+    /// start refusing the agent tomorrow, with no change on our side — which is
+    /// exactly what happened on the first machine this was tried on.
+    enum SmartAppControl: Equatable {
+        case off, on, evaluation, absent
+
+        var blocksUnsignedBinaries: Bool { self == .on }
+
+        var describedForLog: String {
+            switch self {
+            case .off:        return "off"
+            case .on:         return "ON — blocks unsigned binaries"
+            case .evaluation: return "evaluation — may switch itself on later"
+            case .absent:     return "not present on this Windows build"
+            }
+        }
+    }
+
+    @Published private(set) var smartAppControl: SmartAppControl = .absent
 
     enum Auth: Equatable {
         case key
@@ -177,6 +202,27 @@ final class AgentInstaller: ObservableObject {
                     sessionDetail = String(text.dropFirst("CONSOLE=".count))
                     session = sessionDetail != "none"
                 }
+                if text.hasPrefix("SAC=") {
+                    switch String(text.dropFirst("SAC=".count)) {
+                    case "0":  self.smartAppControl = .off
+                    case "1":  self.smartAppControl = .on
+                    case "2":  self.smartAppControl = .evaluation
+                    default:   self.smartAppControl = .absent
+                    }
+                }
+            }
+
+            // Fail here rather than at step 7. Smart App Control does not stop
+            // the copy or the compile — it stops the agent from ever running,
+            // so without this check the install appears to succeed for five more
+            // steps and then reports a bewildering "the agent did not answer".
+            if self.smartAppControl.blocksUnsignedBinaries && !target.disableSmartAppControl {
+                throw InstallError(message:
+                    "Smart App Control is ON, and it will refuse to run the agent: the agent is "
+                  + "compiled on this machine and is therefore unsigned. Either sign the agent with "
+                  + "a certificate that has established reputation, or tick \"Turn off Smart App "
+                  + "Control\" and install again — but note that turning it off cannot be undone "
+                  + "without reinstalling Windows.")
             }
             guard csc else {
                 throw InstallError(message:
@@ -189,7 +235,21 @@ final class AgentInstaller: ObservableObject {
                   + "the Windows Monitor Configuration API sees no monitors from an SSH session. Sign in on the "
                   + "machine itself, then install again.")
             }
-            return "csc.exe present, console session \(sessionDetail)"
+            return "csc.exe present, console session \(sessionDetail), "
+                 + "Smart App Control \(self.smartAppControl.describedForLog)"
+        }
+
+        // 3a — the one-way door, only if it was ticked and is actually needed.
+        if target.disableSmartAppControl && smartAppControl.blocksUnsignedBinaries {
+            note("Turning Smart App Control off. This cannot be undone without reinstalling Windows.")
+            let output = try await remotePowerShell(target, onward, Self.disableSacScript)
+            guard output.contains("SACNOW=0") else {
+                throw InstallError(message:
+                    "Could not turn Smart App Control off:\n" + output)
+            }
+            note("✓ Smart App Control disabled — the machine must be restarted before the agent will run.")
+        } else if target.disableSmartAppControl {
+            note("Smart App Control was already \(smartAppControl.describedForLog); left alone.")
         }
 
         // 4 — payload.
@@ -590,6 +650,31 @@ final class AgentInstaller: ObservableObject {
     if (Test-Path $csc) { "CSC=yes" } else { "CSC=no" }
     $console = (Get-Process explorer -ErrorAction SilentlyContinue | Select-Object -First 1).SessionId
     if ($null -ne $console) { "CONSOLE=$console" } else { "CONSOLE=none" }
+    $sac = (Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy" `
+              -Name VerifiedAndReputablePolicyState -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
+    if ($null -eq $sac) { "SAC=absent" } else { "SAC=$sac" }
+    """
+
+    /// Turns Smart App Control off.
+    ///
+    /// This is a ONE-WAY DOOR. Microsoft's documented behaviour is that Smart
+    /// App Control cannot be re-enabled once disabled without reinstalling
+    /// Windows. Nothing here can put it back, so it is opt-in, defaulted off,
+    /// and confirmed separately in the UI.
+    ///
+    /// It exists because the agent is compiled on the target by csc.exe and is
+    /// therefore unsigned by construction, which is precisely what Smart App
+    /// Control refuses to load. Signing the agent with a certificate that has
+    /// real reputation is the better fix and the only one that scales to new
+    /// machines without spending this door on each of them.
+    private static let disableSacScript = """
+    $k = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy"
+    $before = (Get-ItemProperty $k -Name VerifiedAndReputablePolicyState -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
+    New-Item -Path $k -Force | Out-Null
+    Set-ItemProperty -Path $k -Name VerifiedAndReputablePolicyState -Value 0 -Type DWord -Force
+    $after = (Get-ItemProperty $k -Name VerifiedAndReputablePolicyState).VerifiedAndReputablePolicyState
+    "SACWAS=$before"
+    "SACNOW=$after"
     """
 
     private static let compileScript = """
