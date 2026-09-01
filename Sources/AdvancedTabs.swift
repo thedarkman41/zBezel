@@ -259,6 +259,11 @@ struct LinkTab: View {
             CardGrid {
                 verdictCard
                 proxyCard
+                // Next to the proxy card on purpose: this is what to reach for
+                // when that host has rebooted and nobody has signed in, so the
+                // agent never started and the KVM cannot get past the login
+                // screen to fix it.
+                WakeConsoleCard(controller: controller)
                 busCard
                 dpcdCard
             }

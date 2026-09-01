@@ -16,12 +16,47 @@ mkdir -p "$BIN" "$RES" "$OBJ"
 # The DDC/AUX transport is C: IOKit's i2c headers are absent from the Swift module map.
 clang -c -O2 -Wall -o "$OBJ/ddc.o" "$REPO/Sources/ddc.c"
 
+# FreeRDP, built statically by Scripts/build-freerdp.sh. Static on purpose:
+# Homebrew's build drags in six ffmpeg libraries, X11, uriparser and jansson,
+# and every one of those would have to be copied into the bundle, have its
+# install-name rewritten, and be re-signed on a volume that already stamps
+# com.apple.FinderInfo onto everything. Archives leave nothing to ship.
+FREERDP="$REPO/build/freerdp"
+if [[ ! -f "$FREERDP/lib/libfreerdp3.a" ]]; then
+    cat >&2 <<'MISSING'
+error: FreeRDP is not built.
+
+  Scripts/build-freerdp.sh
+
+Needed for the remote-desktop path — reaching a machine whose login screen the
+KVM cannot type at. Builds once, takes a few minutes, lands in build/freerdp.
+MISSING
+    exit 1
+fi
+
+OPENSSL="$(brew --prefix openssl@3)"
+JANSSON="$(brew --prefix jansson)"
+
+clang -c -O2 -Wall -o "$OBJ/rdp.o" "$REPO/Sources/rdp.c" \
+    -I"$FREERDP/include/freerdp3" -I"$FREERDP/include/winpr3"
+
 swiftc -O -parse-as-library \
   -import-objc-header "$REPO/Sources/Bridging.h" \
+  -I "$FREERDP/include/freerdp3" -I "$FREERDP/include/winpr3" \
   -o "$BIN/zBezel" \
   "$REPO"/Sources/*.swift \
-  "$OBJ/ddc.o" \
-  -framework IOKit -framework CoreGraphics -framework AppKit -framework SwiftUI
+  "$OBJ/ddc.o" "$OBJ/rdp.o" \
+  "$FREERDP/lib/libfreerdp-client3.a" \
+  "$FREERDP/lib/libfreerdp3.a" \
+  "$FREERDP/lib/libwinpr3.a" \
+  "$FREERDP/lib/libremdesk-common.a" \
+  "$FREERDP/lib/librdpsnd-common.a" \
+  "$OPENSSL/lib/libssl.a" "$OPENSSL/lib/libcrypto.a" \
+  "$JANSSON/lib/libjansson.a" \
+  -lz -lresolv \
+  -framework IOKit -framework CoreGraphics -framework AppKit -framework SwiftUI \
+  -framework CoreServices -framework Security -framework AudioToolbox \
+  -framework AVFoundation -framework CoreAudio -framework CoreMedia
 
 # The agent sources ride along in the bundle so a Windows machine can be set up
 # from a clean install without needing this repo.
