@@ -49,3 +49,40 @@ Start-Sleep -Seconds 2
 $proc = Get-Process BezelAgent -ErrorAction SilentlyContinue
 if ($proc) { "SERVICE RUNNING pid=$($proc.Id) session=$($proc.SessionId)" }
 else { "SERVICE NOT RUNNING" }
+
+# ---------------------------------------------------------------------------
+# Second task: the console reclaim, as SYSTEM.
+#
+# This is what makes a keyboardless machine recoverable. RDP in from elsewhere,
+# authenticate, disconnect — the session survives as Disconnected — then trigger
+# this and it lands on the physical console, where the Monitor Configuration API
+# can see the real panel. From an RDP session it cannot: it enumerates the
+# virtual RDP display instead.
+#
+# It is a SEPARATE task, and SYSTEM, because moving a session needs
+# SeTcbPrivilege. An elevated administrator token does not carry it — measured,
+# not assumed: whoami /priv in an elevated SSH session lists 24 privileges and
+# SeTcbPrivilege is not among them. The logon task above is Interactive and
+# could never do this.
+#
+# There is no trigger. It is only ever started on demand:
+#     schtasks /run /tn BezelReclaimConsole
+# which is reachable over plain SSH, and deliberately so — when nobody is logged
+# in, the agent's own relay is not running either, so SSH is the only path left.
+$reclaimName = "BezelReclaimConsole"
+$exe         = Join-Path $dir "BezelAgent.exe"
+
+$reclaimAction = New-ScheduledTaskAction -Execute $exe -Argument "reclaim" -WorkingDirectory $dir
+$reclaimPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" `
+                        -LogonType ServiceAccount -RunLevel Highest
+$reclaimSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                        -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                        -ExecutionTimeLimit (New-TimeSpan -Minutes 5)
+
+Register-ScheduledTask -TaskName $reclaimName -Action $reclaimAction `
+    -Principal $reclaimPrincipal -Settings $reclaimSettings `
+    -Description "Moves a disconnected RDP session onto the console. Needs SeTcbPrivilege, hence SYSTEM." `
+    -Force | Out-Null
+
+$reclaimTask = Get-ScheduledTask -TaskName $reclaimName -ErrorAction SilentlyContinue
+if ($reclaimTask) { "RECLAIM TASK REGISTERED" } else { "RECLAIM TASK MISSING" }

@@ -19,6 +19,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.IO.Pipes;
@@ -427,7 +428,7 @@ internal static class BezelAgent
         // Before anything reads a coordinate or a metric.
         MakeDpiAware();
         Console.OutputEncoding = Encoding.UTF8;
-        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe"); return 1; }
+        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe|reclaim"); return 1; }
 
         // serve/client/relay never touch a monitor themselves, and the client runs
         // in session 0 where there are never any monitors — so enumerating first
@@ -440,6 +441,9 @@ internal static class BezelAgent
             case "relay":  return CmdRelay(args);
             case "kvm":       return CmdKvm();
             case "clipboard": return CmdClipboard();
+            // Reclaim never touches a monitor, and must work when no session
+            // exists yet — so it dispatches here, before enumeration.
+            case "reclaim":   return CmdReclaim();
         }
 
         List<Target> targets;
@@ -1601,6 +1605,163 @@ internal static class BezelAgent
                 System.Threading.Thread.Sleep(500);
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Console reclaim
+    // ---------------------------------------------------------------------
+
+    private const int WTSActive = 0, WTSDisconnected = 4;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WTS_SESSION_INFO
+    {
+        public uint SessionId;
+        [MarshalAs(UnmanagedType.LPWStr)] public string pWinStationName;
+        public int State;
+    }
+
+    [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool WTSEnumerateSessionsW(
+        IntPtr hServer, int Reserved, int Version, out IntPtr ppSessionInfo, out int pCount);
+
+    [DllImport("wtsapi32.dll")]
+    private static extern void WTSFreeMemory(IntPtr pMemory);
+
+    [DllImport("wtsapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool WTSQuerySessionInformationW(
+        IntPtr hServer, uint sessionId, int wtsInfoClass, out IntPtr ppBuffer, out int pBytesReturned);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint WTSGetActiveConsoleSessionId();
+
+    private static string SessionUser(uint id)
+    {
+        IntPtr buf; int len;
+        // 5 = WTSUserName
+        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 5, out buf, out len)) return "";
+        try { return Marshal.PtrToStringUni(buf) ?? ""; }
+        finally { WTSFreeMemory(buf); }
+    }
+
+    /// Move a disconnected session onto the physical console.
+    ///
+    /// The point of this is a machine with no reachable keyboard: RDP in from
+    /// elsewhere, authenticate, disconnect — the session survives as
+    /// Disconnected — then run this and it lands on the console, where the
+    /// Monitor Configuration API can finally see the real panel. An RDP session
+    /// is no good for that; it enumerates the virtual RDP display instead.
+    ///
+    /// MUST run as SYSTEM. The move needs SeTcbPrivilege, which an elevated
+    /// administrator token does not carry — measured, not assumed: whoami /priv
+    /// in an elevated SSH session lists 24 privileges and SeTcbPrivilege is not
+    /// among them. install-service.ps1 therefore registers this half as a
+    /// separate task with a ServiceAccount principal.
+    ///
+    /// Enumeration is done through wtsapi32 because it is structured. The move
+    /// itself shells out to tscon.exe rather than calling WTSConnectSession:
+    /// the API's two session-id parameters are documented ambiguously enough
+    /// that getting them backwards is a real risk, and tscon's argument order
+    /// is unambiguous and is what every operator has tested.
+    private static int CmdReclaim()
+    {
+        IntPtr info; int count;
+        if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out info, out count))
+        {
+            Fail("WTSEnumerateSessions failed: " + Marshal.GetLastWin32Error());
+            return 1;
+        }
+
+        var sessions = new List<WTS_SESSION_INFO>();
+        try
+        {
+            int size = Marshal.SizeOf(typeof(WTS_SESSION_INFO));
+            for (int i = 0; i < count; i++)
+            {
+                var p = new IntPtr(info.ToInt64() + i * size);
+                sessions.Add((WTS_SESSION_INFO)Marshal.PtrToStructure(p, typeof(WTS_SESSION_INFO)));
+            }
+        }
+        finally { WTSFreeMemory(info); }
+
+        uint console = WTSGetActiveConsoleSessionId();
+
+        var sb = new StringBuilder();
+        sb.Append("{\"ok\":true,\"console\":").Append(console).Append(",\"sessions\":[");
+        for (int i = 0; i < sessions.Count; i++)
+        {
+            var s = sessions[i];
+            if (i > 0) sb.Append(',');
+            sb.Append("{\"id\":").Append(s.SessionId)
+              .Append(",\"station\":\"").Append(Esc(s.pWinStationName))
+              .Append("\",\"state\":").Append(s.State)
+              .Append(",\"user\":\"").Append(Esc(SessionUser(s.SessionId))).Append("\"}");
+        }
+        sb.Append(']');
+
+        // Already sitting on the console with a user in it? Then there is
+        // nothing to reclaim, and saying so is more useful than moving something.
+        foreach (var s in sessions)
+        {
+            if (s.SessionId == console && s.State == WTSActive && SessionUser(s.SessionId) != "")
+            {
+                sb.Append(",\"moved\":false,\"reason\":\"console already active\"}");
+                Console.WriteLine(sb.ToString());
+                return 0;
+            }
+        }
+
+        // Session 0 is services and is permanently disconnected; the rdp-tcp
+        // listener shows up too. Neither is a user session.
+        WTS_SESSION_INFO? target = null;
+        foreach (var s in sessions)
+        {
+            if (s.State != WTSDisconnected) continue;
+            if (s.SessionId == 0 || s.SessionId >= 65536) continue;
+            if (SessionUser(s.SessionId) == "") continue;
+            target = s;
+            break;
+        }
+
+        if (target == null)
+        {
+            sb.Append(",\"moved\":false,\"reason\":\"no disconnected user session\"}");
+            Console.WriteLine(sb.ToString());
+            return 2;
+        }
+
+        var t = target.Value;
+        string output;
+        int exit;
+        try
+        {
+            var psi = new ProcessStartInfo("tscon.exe", t.SessionId + " /dest:console")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            using (var proc = Process.Start(psi))
+            {
+                output = (proc.StandardOutput.ReadToEnd() + proc.StandardError.ReadToEnd()).Trim();
+                proc.WaitForExit(30000);
+                exit = proc.ExitCode;
+            }
+        }
+        catch (Exception e)
+        {
+            sb.Append(",\"moved\":false,\"reason\":\"").Append(Esc(e.Message)).Append("\"}");
+            Console.WriteLine(sb.ToString());
+            return 1;
+        }
+
+        sb.Append(",\"moved\":").Append(exit == 0 ? "true" : "false")
+          .Append(",\"from\":").Append(t.SessionId)
+          .Append(",\"exit\":").Append(exit)
+          .Append(",\"tscon\":\"").Append(Esc(output)).Append("\"}");
+        Console.WriteLine(sb.ToString());
+        return exit == 0 ? 0 : 1;
     }
 
     /// The session-0 half: reads events from the Mac on stdin and hands them to
