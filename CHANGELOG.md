@@ -2,6 +2,27 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.47 — 2026-09-01
+
+**Refuse to call a deploy done when the old agent binary survived**
+
+deploy-agent.sh stopped the agent, compiled, and checked only that an
+executable existed afterwards. On Bellatrix the compile failed with "cannot
+access the file because it is being used by another process" -- zBezel on
+the Mac keeps a `BezelAgent kvm` channel open over SSH and respawns it
+within a second of it dying, and the respawn arrived inside the script's
+600 ms grace -- and the script went on to register and verify the OLD
+binary, printing Done. The two machines had diverged with one compiler
+line in the scrollback to say so, which is the exact failure this script
+exists to prevent.
+
+It now sweeps every BezelAgent process, builds, and treats an executable
+older than the script's own start as no build at all: one more sweep and
+retry, then a hard failure.
+
+shipit.sh's Co-Authored-By trailer names the model actually writing the
+commits.
+
 ## 0.1.46 — 2026-09-01
 
 **Give every drag its own ghost, and pin the bar to the window**

@@ -408,7 +408,7 @@ fi
     [ -n "$BODY" ] && { echo; echo "$BODY"; }
     [ -n "$VERSION" ] && { echo; echo "Version: $VERSION"; }
     echo
-    echo "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+    echo "Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
     # A trailing no-op so this group ALWAYS exits 0: with pipefail, a false
     # test as the last command would kill the script AFTER the commit landed.
     :

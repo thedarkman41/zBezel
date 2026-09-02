@@ -22,10 +22,23 @@ scp -q "$REPO/Agent/BezelAgent.cs" \
 
 echo "==> compiling on $HOST"
 # The running service holds the executable open, so stop it before rebuilding.
-ssh "$HOST" "Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Milliseconds 600
-& '$CSC' /nologo /optimize+ /warn:4 /warnaserror /target:exe /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll' /out:\"\$HOME\\bezel\\BezelAgent.exe\" \"\$HOME\\bezel\\BezelAgent.cs\"
-if (-not (Test-Path \"\$HOME\\bezel\\BezelAgent.exe\")) { throw 'compile failed' }"
+# Every BezelAgent process, not just the service: zBezel on the Mac keeps a
+# `BezelAgent kvm` channel open over SSH and respawns it within a second of it
+# dying, and one that came back during the build held the file and left the
+# OLD binary in place with nothing but a compiler line to say so. So the build
+# is retried once after a second sweep, and a stale binary is a failure — the
+# whole point of this script is that both machines run the same code.
+ssh "$HOST" "\$started = Get-Date
+\$exe = \"\$HOME\\bezel\\BezelAgent.exe\"
+\$build = { & '$CSC' /nologo /optimize+ /warn:4 /warnaserror /target:exe /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll' /out:\"\$exe\" \"\$HOME\\bezel\\BezelAgent.cs\" }
+foreach (\$attempt in 1, 2) {
+    Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Milliseconds 800
+    & \$build
+    if ((Test-Path \$exe) -and ((Get-Item \$exe).LastWriteTime -ge \$started)) { break }
+    if (\$attempt -eq 2) { throw 'compile failed: BezelAgent.exe was not rebuilt (still held open, or a compile error above)' }
+    Write-Host '   binary still held open; sweeping again'
+}"
 
 echo "==> registering the logon service"
 ssh "$HOST" 'powershell -ExecutionPolicy Bypass -File "$HOME\bezel\install-service.ps1"'
