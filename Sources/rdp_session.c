@@ -13,8 +13,11 @@
 #include <freerdp/graphics.h>
 #include <freerdp/error.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/gdi/gfx.h>
 #include <freerdp/codec/color.h>
 #include <freerdp/input.h>
+#include <freerdp/event.h>
+#include <freerdp/channels/rdpgfx.h>
 #include <winpr/winpr.h>
 #include <winpr/synch.h>
 #include <winpr/sysinfo.h>
@@ -194,9 +197,31 @@ static BOOL zb_authenticate(freerdp *instance, char **u, char **p, char **d, rdp
     return TRUE;   /* already in settings */
 }
 
+/// The RDP Graphics Pipeline (RDPGFX) is a dynamic channel: it appears after
+/// the connection sequence, and its surface commands — H.264 among them — have
+/// to be pointed at our software-GDI framebuffer, or the desktop simply never
+/// draws. gdi_graphics_pipeline_init wires the channel's output into the same
+/// primary surface our BeginPaint/EndPaint already watch, so the frame path
+/// downstream is unchanged whether a region arrived as H.264 or RemoteFX.
+static void zb_channel_connected(void *context, const ChannelConnectedEventArgs *e)
+{
+    rdpContext *ctx = (rdpContext *)context;
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
+        gdi_graphics_pipeline_init(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+}
+
+static void zb_channel_disconnected(void *context, const ChannelDisconnectedEventArgs *e)
+{
+    rdpContext *ctx = (rdpContext *)context;
+    if (strcmp(e->name, RDPGFX_DVC_CHANNEL_NAME) == 0)
+        gdi_graphics_pipeline_uninit(ctx->gdi, (RdpgfxClientContext *)e->pInterface);
+}
+
 static BOOL zb_pre_connect(freerdp *instance)
 {
-    (void)instance;
+    // Before the channels come up, so the GFX channel's arrival is caught.
+    PubSub_SubscribeChannelConnected(instance->context->pubSub, zb_channel_connected);
+    PubSub_SubscribeChannelDisconnected(instance->context->pubSub, zb_channel_disconnected);
     return TRUE;
 }
 
@@ -413,14 +438,21 @@ zbezel_rdp_session *zbezel_rdp_open(const char *host, uint16_t port,
     freerdp_settings_set_uint32(set, FreeRDP_DesktopWidth, (UINT32)s->want_width);
     freerdp_settings_set_uint32(set, FreeRDP_DesktopHeight, (UINT32)s->want_height);
 
-    // The remote's compression, which is the point of this path. RemoteFX and
-    // NSCodec are built into FreeRDP and need no external decoder; H.264 would
-    // need FreeRDP rebuilt with openh264, so the graphics pipeline stays off.
+    // The remote's compression, which is the point of this path. The Graphics
+    // Pipeline carries H.264 (AVC420/AVC444) — the efficient desktop codec —
+    // decoded by openh264, which FreeRDP dlopens at runtime; RemoteFX and
+    // NSCodec stay on beneath it as the fallback the server drops to if the
+    // pipeline or the H.264 decoder is not there. AVC444 sends luma and chroma
+    // in full where the newer server offers it; AVC420 is the floor.
+    freerdp_settings_set_bool(set, FreeRDP_SupportGraphicsPipeline, TRUE);
+    freerdp_settings_set_bool(set, FreeRDP_GfxH264, TRUE);
+    freerdp_settings_set_bool(set, FreeRDP_GfxAVC444, TRUE);
+    freerdp_settings_set_bool(set, FreeRDP_GfxAVC444v2, TRUE);
+    freerdp_settings_set_bool(set, FreeRDP_GfxSmallCache, TRUE);
     freerdp_settings_set_bool(set, FreeRDP_RemoteFxCodec, TRUE);
     freerdp_settings_set_bool(set, FreeRDP_NSCodec, TRUE);
     freerdp_settings_set_bool(set, FreeRDP_FastPathOutput, TRUE);
     freerdp_settings_set_bool(set, FreeRDP_FrameMarkerCommandEnabled, TRUE);
-    freerdp_settings_set_bool(set, FreeRDP_SupportGraphicsPipeline, FALSE);
 
     // No redirection: this is a viewer, not a full remote desktop.
     freerdp_settings_set_bool(set, FreeRDP_AudioPlayback, FALSE);

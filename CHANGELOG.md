@@ -2,6 +2,31 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.52 — 2026-09-02
+
+**H.264 for the Control viewer, via openh264**
+
+The Control (RDP-pixel) path now negotiates the RDP Graphics Pipeline with
+H.264 — AVC420 and AVC444 — the efficient desktop codec, on top of the RemoteFX
+and NSCodec fallbacks it already had. The decoder is openh264, Cisco's BSD
+implementation, which FreeRDP dlopens at runtime: no dylib to bundle and
+re-sign on the file-provider volume, and the H.264 path simply stays dark if
+openh264 is ever absent, with RemoteFX still carrying the picture. One loaded
+dylib, against the six ffmpeg libraries the stock FreeRDP build would drag in.
+
+Two parts. build-freerdp.sh detects a brew openh264 and rebuilds the static
+FreeRDP with WITH_OPENH264 and WITH_OPENH264_LOADING, so libfreerdp carries the
+openh264 backend but links nothing. rdp_session.c turns on the graphics
+pipeline (GfxH264 / GfxAVC444 / GfxAVC444v2) and, crucially, subscribes to the
+channel-connected event so the RDPGFX dynamic channel is wired into the same
+software-GDI framebuffer the frame path already watches — without that the
+pipeline's surfaces have nowhere to land and the desktop never draws. The
+frame delivery downstream is unchanged whether a region arrived as H.264 or
+RemoteFX.
+
+Builds and links clean (every gfx/openh264 symbol resolved). The live render
+against rigel is pending a moment when the Mac's desktop is free to drive.
+
 ## 0.1.51 — 2026-09-02
 
 **A parity dot on each KVM machine, so drift is visible**

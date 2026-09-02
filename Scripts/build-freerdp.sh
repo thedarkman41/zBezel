@@ -37,6 +37,22 @@ fi
 SRC="$WORK/FreeRDP-${VERSION}"
 OPENSSL="$(brew --prefix openssl@3)"
 
+# H.264 for the Control viewer (RemoteFX/NSCodec are built in; H.264/AVC444 is
+# the better desktop codec but needs a decoder). openh264 is Cisco's, BSD, and
+# small. WITH_OPENH264_LOADING means FreeRDP dlopens libopenh264.dylib at
+# runtime rather than the app linking it: no dylib to bundle and re-sign on the
+# file-provider volume, and the H.264 path simply stays dark if it is ever
+# absent (RemoteFX still carries the picture). One dylib, loaded, versus the six
+# ffmpeg libraries the stock build would drag in.
+OPENH264="$(brew --prefix openh264 2>/dev/null || true)"
+H264_FLAGS=()
+if [[ -n "$OPENH264" && -f "$OPENH264/include/wels/codec_api.h" ]]; then
+    H264_FLAGS=(-DWITH_OPENH264=ON -DWITH_OPENH264_LOADING=ON -DOPENH264_ROOT="$OPENH264")
+    echo "==> openh264 found at $OPENH264 — enabling H.264 (runtime-loaded)"
+else
+    echo "==> openh264 not found — H.264 off (brew install openh264 to enable)"
+fi
+
 echo "==> configuring (static, no ffmpeg/X11/SDL/server)"
 cmake -S "$SRC" -B "$SRC/build-static" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
@@ -44,6 +60,7 @@ cmake -S "$SRC" -B "$SRC/build-static" -G Ninja \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DBUILD_SHARED_LIBS=OFF \
     -DBUILD_TESTING=OFF \
+    "${H264_FLAGS[@]}" \
     -DWITH_SAMPLE=OFF \
     -DWITH_SERVER=OFF \
     -DWITH_PROXY=OFF \
