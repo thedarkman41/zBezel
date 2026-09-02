@@ -2,6 +2,30 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.51 — 2026-09-02
+
+**A parity dot on each KVM machine, so drift is visible**
+
+The KVM Machines card now shows a status dot beside each machine name, from an
+occasional SSH probe (every three minutes, and when the card appears):
+
+- green — the deployed agent's source matches what this app ships, so a
+  redeploy would change nothing;
+- amber — the agent is running but its source differs; a redeploy would update
+  it;
+- grey — reachable, but no agent is running there;
+- grey dot AND a greyed name — the machine is not reachable over SSH at all.
+
+"Source parity" is a SHA-256 of the agent C# on the box against the copy bundled
+in this app — the exact bytes the installer would send. The probe is one
+PowerShell line (the far shell is PowerShell), and ssh's own exit 255 is what
+distinguishes "the box is off" from "reachable but no agent". Verified against
+rigel and bellatrix, both of which return a matching hash today.
+
+Scoped to Sources/AgentParity.swift, the KVM Machines card, and the parity
+methods in the controller; another session's in-flight Vendor work in the same
+controller file was deliberately left unstaged.
+
 ## 0.1.50 — 2026-09-02
 
 **Control a machine over RDP, UAC and all, in a window on the Mac**

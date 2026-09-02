@@ -858,9 +858,18 @@ private struct KVMMachinesCard: View {
                         .font(.system(size: 11, design: .monospaced))
                         .foregroundStyle(Theme.textDim)
                         .frame(width: 14, alignment: .trailing)
+                    // Source-code parity at a glance: green = the deployed agent
+                    // matches what this app ships, amber = running but a redeploy
+                    // would change it, grey = not running (or, with a grey name,
+                    // the box is unreachable).
+                    let health = controller.machineHealth[machine.host] ?? .unknown
+                    Circle()
+                        .fill(dotColor(health))
+                        .frame(width: 7, height: 7)
+                        .help(healthDescription(health))
                     Text(machine.host)
                         .font(.system(size: 13))
-                        .foregroundStyle(Theme.textPrimary)
+                        .foregroundStyle(health == .unreachable ? Theme.textDim : Theme.textPrimary)
                     Spacer(minLength: 8)
                     if machine.width > 1 {
                         Text("\(Int(machine.width))×\(Int(machine.height))")
@@ -946,6 +955,27 @@ private struct KVMMachinesCard: View {
                     .font(.system(size: 10.5))
                     .foregroundStyle(Theme.textDim)
             }
+        }
+        // Refresh the parity dots when the card comes into view, throttled so a
+        // tab flick does not fan out a burst of SSH probes.
+        .onAppear { controller.checkParityNow() }
+    }
+
+    private func dotColor(_ health: MachineHealth) -> Color {
+        switch health {
+        case .ok:          return Theme.ok
+        case .mismatch:    return Theme.warning
+        case .notRunning, .unreachable, .unknown: return Theme.textDim
+        }
+    }
+
+    private func healthDescription(_ health: MachineHealth) -> String {
+        switch health {
+        case .ok:          return "Agent source matches this app — a redeploy would change nothing."
+        case .mismatch:    return "Agent is running but its source differs from this app. Redeploy to match."
+        case .notRunning:  return "Reachable, but no agent is running there."
+        case .unreachable: return "Not reachable over SSH — the machine may be off or asleep."
+        case .unknown:     return "Checking…"
         }
     }
 }

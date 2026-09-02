@@ -782,6 +782,64 @@ final class MonitorController: ObservableObject {
             if let data = try? JSONEncoder().encode(kvmMachines) {
                 UserDefaults.standard.set(data, forKey: "kvmMachines")
             }
+            // A machine added or removed is worth an immediate parity read, so
+            // its dot is not blank until the next scheduled sweep.
+            checkParity()
+        }
+    }
+
+    // MARK: - Agent source-code parity
+
+    /// Per host: does the deployed agent match the source this app ships, is it
+    /// merely running, or is the box even reachable. Drives the KVM row's dot.
+    @Published private(set) var machineHealth: [String: MachineHealth] = [:]
+
+    private var parityTimer: Timer?
+    private var parityRef: String?
+    private var parityInFlight: Set<String> = []
+    private var lastParityCheck = Date.distantPast
+
+    /// Start the occasional parity sweep. The interval is generous on purpose:
+    /// this is a background reassurance, not a live meter, and every tick is an
+    /// SSH round trip per machine.
+    func startParityMonitor() {
+        parityRef = AgentParity.bundledSourceHash()
+        parityTimer?.invalidate()
+        parityTimer = Timer.scheduledTimer(withTimeInterval: 180, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkParity() }
+        }
+        checkParity()
+    }
+
+    /// A check on demand (the card appeared), throttled so re-showing the tab
+    /// does not fire a burst of SSH probes.
+    func checkParityNow(throttle: TimeInterval = 25) {
+        guard Date().timeIntervalSince(lastParityCheck) >= throttle else { return }
+        checkParity()
+    }
+
+    private func checkParity() {
+        guard let ref = parityRef ?? AgentParity.bundledSourceHash() else { return }
+        parityRef = ref
+        lastParityCheck = Date()
+
+        // Forget machines no longer in the chain.
+        let hosts = Set(kvmMachines.map(\.host))
+        for key in machineHealth.keys where !hosts.contains(key) { machineHealth[key] = nil }
+
+        for machine in kvmMachines {
+            let host = machine.host
+            guard !host.isEmpty, !parityInFlight.contains(host) else { continue }
+            parityInFlight.insert(host)
+            if machineHealth[host] == nil { machineHealth[host] = .unknown }
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let health = AgentParity.probe(host: host, reference: ref)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.machineHealth[host] = health
+                    self.parityInFlight.remove(host)
+                }
+            }
         }
     }
 
@@ -1285,6 +1343,7 @@ final class MonitorController: ObservableObject {
         refreshDisplays()
         await probe()
         await restoreKVMIfPreviouslyOn()
+        startParityMonitor()
     }
 
     /// Put the KVM back the way it was left.
