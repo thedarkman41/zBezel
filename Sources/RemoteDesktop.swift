@@ -87,6 +87,18 @@ final class RemoteDesktop: ObservableObject {
             if name == "HOST_KEY_MISMATCH" {
                 note("HOST KEY MISMATCH — refusing. Either the machine was rebuilt, or this is not it.")
                 step = .failed("The host key for \(host) has changed. Clear the pin only if you know why.")
+            } else if name == "ERRCONNECT_LOGON_FAILURE" {
+                // The server answered and refused the credentials, which is a
+                // very different problem from not reaching it — and the usual
+                // cause is not a wrong password. A Microsoft Account will not
+                // authenticate under the short local name Windows invented for
+                // its profile folder.
+                note("connect failed: \(name) — the server rejected these credentials")
+                let hint = (domain?.isEmpty ?? true) && !user.contains("@")
+                    ? " If \(user) is a Microsoft account, use the full address as the user "
+                    + "and set the domain to MicrosoftAccount. A PIN is not the password."
+                    : " Check the password enrolled as \(BeaconSecrets.secretName(forHost: host))."
+                step = .failed("\(host) rejected the sign-in." + hint)
             } else {
                 note("connect failed: \(name) (0x\(String(code, radix: 16)))")
                 step = .failed("RDP connection failed: \(name)")

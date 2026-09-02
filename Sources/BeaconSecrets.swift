@@ -96,12 +96,36 @@ enum BeaconSecrets {
     /// Register this app's identity so Beacon can show its Trust button.
     /// Idempotent; call it at startup. A secret fetch works without it, since
     /// authorization is by signing identifier rather than by trust.
+    ///
+    /// The result goes to a file as well as the log. This is the one call whose
+    /// failure is otherwise invisible — the app carries on perfectly happily
+    /// while store-secret.sh keeps insisting the app has never registered, and
+    /// there is nothing on screen to say why.
     @discardableResult
     static func register(as name: String = "zBezel") -> String {
-        guard let reply = roundTrip(request: "register \(name)\n", recvTimeout: 5) else {
-            return "unavailable"
+        let reply = roundTrip(request: "register \(name)\n", recvTimeout: 5)
+        let status = reply?.status ?? "unavailable (Beacon not running, or the socket refused us)"
+        note("register \(name) -> \(status)")
+        return status
+    }
+
+    /// Appends to ~/Library/Logs/zBezel-beacon.log.
+    static func note(_ line: String) {
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        let text = "\(stamp)  \(line)\n"
+        NSLog("zBezel beacon: %@", line)
+
+        let dir = NSHomeDirectory() + "/Library/Logs"
+        let path = dir + "/zBezel-beacon.log"
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        guard let data = text.data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            defer { try? handle.close() }
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
         }
-        return reply.status
     }
 
     /// Ask whether the padlock is open without attempting a real fetch. Useful

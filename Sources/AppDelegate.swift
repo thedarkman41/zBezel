@@ -19,6 +19,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Tell Beacon who we are, so its panel can offer a Trust button and
+        // store-secret.sh can resolve "--app zBezel" to a signing identifier.
+        // Idempotent by design; the contract says to call it every startup.
+        //
+        // Off the main thread: Beacon may not be running, and while a failed
+        // connect() returns immediately, this is not worth blocking launch on.
+        // A secret fetch does not depend on the outcome — the broker authorizes
+        // by signature, not by trust — so nothing here is fatal.
+        DispatchQueue.global(qos: .utility).async {
+            let state = BeaconSecrets.register()
+            NSLog("zBezel beacon: register -> %@", state)
+        }
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.image = NSImage(systemSymbolName: "display", accessibilityDescription: "zBezel")
         item.button?.imagePosition = .imageLeading

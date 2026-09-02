@@ -46,6 +46,29 @@ struct WakeConsoleCard: View {
                 .disabled(!canWake)
             }
 
+            // A Microsoft Account does not sign in under the short local name
+            // Windows made for its profile folder: NLA wants the account's real
+            // identity, which means domain "MicrosoftAccount" and the full
+            // address as the user. Leave both blank for an ordinary local
+            // account. (And note a PIN is not the password — NLA needs the
+            // password, which is easy to forget if you only ever type a PIN.)
+            HStack(spacing: 8) {
+                Text("Domain")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textPrimary)
+                    .frame(width: 46, alignment: .leading)
+                TextField("blank, or MicrosoftAccount", text: $domain)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(width: 150)
+                if domain.isEmpty && user.contains("@") {
+                    Text("looks like a Microsoft account")
+                        .font(.system(size: 10.5))
+                        .foregroundStyle(.orange)
+                        .help("Set the domain to MicrosoftAccount for an address like this.")
+                }
+            }
+
             Divider().overlay(Theme.rule).padding(.vertical, 2)
 
             statusLine
