@@ -85,10 +85,11 @@ static DWORD zb_verify_certificate(freerdp *instance, const char *host, UINT16 p
 /// this FreeRDP falls back to reading a password off the terminal, which in a
 /// GUI app means a tcgetattr failure on a socket and a connection that dies
 /// somewhere confusing.
-static BOOL zb_authenticate(freerdp *instance, char **username, char **password, char **domain)
+static BOOL zb_authenticate(freerdp *instance, char **username, char **password, char **domain,
+                            rdp_auth_reason reason)
 {
-    (void)instance; (void)username; (void)password; (void)domain;
-    return TRUE;   /* already set in settings; do not prompt */
+    (void)instance; (void)username; (void)password; (void)domain; (void)reason;
+    return TRUE;   /* already set in settings; do not prompt, whatever asked */
 }
 
 static BOOL zb_client_new(freerdp *instance, rdpContext *context)
@@ -98,7 +99,7 @@ static BOOL zb_client_new(freerdp *instance, rdpContext *context)
     instance->PostConnect         = zb_post_connect;
     instance->PostDisconnect      = zb_post_disconnect;
     instance->VerifyCertificateEx = zb_verify_certificate;
-    instance->Authenticate        = zb_authenticate;
+    instance->AuthenticateEx      = zb_authenticate;
     return TRUE;
 }
 

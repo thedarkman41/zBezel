@@ -2,6 +2,17 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.45 — 2026-09-01
+
+**Answer FreeRDP's AuthenticateEx, so the gate is warning-clean again**
+
+FreeRDP 3.25 deprecated the Authenticate callback for AuthenticateEx, which
+adds a reason (NLA, TLS, gateway, smartcard PIN). The vendored build now
+carries that deprecation, and shipit's gate refuses any warning from the
+app build -- so nothing could be committed until this moved. The answer is
+the same whatever the reason: the credentials are already in settings from
+Beacon's broker, and there is nobody at a terminal to prompt.
+
 ## 0.1.44 — 2026-08-31
 
 **Reach several machines, lock the panel, carry files across**
