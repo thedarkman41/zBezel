@@ -2,6 +2,33 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.49 — 2026-09-01
+
+**A View button, so a machine's screen is one click away**
+
+Each row of the KVM Machines card gains an eye. Clicking it opens a window
+showing that machine's console, live, whatever the monitor is switched to --
+so the box the pointer is NOT on is no longer invisible.
+
+Underneath: the button asks that machine's agent to start its MJPEG stream
+(the `stream` verb added with the screenshot work), opens an SSH tunnel of
+its own on a free local port -- the same key that opens the KVM channel, so
+nothing on the network can reach the stream -- and loads the picture in a
+WKWebView, which renders a multipart image stream natively. Closing the
+window drops the tunnel; the agent stops capturing the instant nobody is
+connected and stops listening after ten idle minutes, so an abandoned view
+leaves nothing running on the far side. View-only on purpose: driving the
+machine is the KVM's job.
+
+CAPTURE NOW DEGRADES GRACEFULLY. A user process cannot photograph the secure
+desktop -- a UAC prompt or the sign-in screen -- and CopyFromScreen throws
+"the handle is invalid" there, which the stream server was swallowing into an
+empty reply and a broken image. It now returns a captioned card ("a secure
+desktop is up ... use Wake Console for the sign-in screen; a UAC prompt
+clears when answered") and picks the real desktop back up on the next frame
+once the prompt is gone. The `screenshot` verb still returns the raw error,
+so a script gets the truth. WebKit is now linked for the viewer window.
+
 ## 0.1.48 — 2026-09-01
 
 **Wake the console for real, and give the Mac eyes on the screen**

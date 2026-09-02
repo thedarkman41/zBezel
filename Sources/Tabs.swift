@@ -872,6 +872,18 @@ private struct KVMMachinesCard: View {
                                     get: { machine.input },
                                     set: { controller.kvmMachines[i].input = $0 }),
                                  enabled: !controller.kvmEnabled, width: 150)
+                    // Eyes on that machine, whatever the panel is showing. Live,
+                    // view-only, through its agent and an SSH tunnel of its own.
+                    Button {
+                        ConsoleViewer.shared.open(host: machine.host, name: machine.name,
+                                                  size: CGSize(width: machine.width, height: machine.height))
+                    } label: {
+                        Image(systemName: "eye")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("View \(machine.host)'s screen, live")
                     Button {
                         controller.kvmMachines.remove(at: i)
                     } label: {

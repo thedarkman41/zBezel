@@ -54,7 +54,7 @@ swiftc -O -parse-as-library \
   "$OPENSSL/lib/libssl.a" "$OPENSSL/lib/libcrypto.a" \
   "$JANSSON/lib/libjansson.a" \
   -lz -lresolv \
-  -framework IOKit -framework CoreGraphics -framework AppKit -framework SwiftUI \
+  -framework IOKit -framework CoreGraphics -framework AppKit -framework SwiftUI -framework WebKit \
   -framework CoreServices -framework Security -framework AudioToolbox \
   -framework AVFoundation -framework CoreAudio -framework CoreMedia
 

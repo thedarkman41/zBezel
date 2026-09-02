@@ -1480,25 +1480,78 @@ internal static class BezelAgent
                 src = scaled;
             }
 
-            try
+            try { width = src.Width; height = src.Height; return EncodeJpeg(src, quality); }
+            finally { if (scaled != null) scaled.Dispose(); }
+        }
+    }
+
+    private static byte[] EncodeJpeg(Image src, long quality)
+    {
+        ImageCodecInfo jpeg = null;
+        foreach (var codec in ImageCodecInfo.GetImageEncoders())
+            if (codec.MimeType == "image/jpeg") { jpeg = codec; break; }
+        using (var ms = new MemoryStream())
+        {
+            if (jpeg == null) { src.Save(ms, ImageFormat.Png); return ms.ToArray(); }
+            using (var ps = new EncoderParameters(1))
             {
-                width = src.Width; height = src.Height;
-                ImageCodecInfo jpeg = null;
-                foreach (var codec in ImageCodecInfo.GetImageEncoders())
-                    if (codec.MimeType == "image/jpeg") { jpeg = codec; break; }
-                using (var ms = new MemoryStream())
+                ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality,
+                                                   Math.Max(1L, Math.Min(100L, quality)));
+                src.Save(ms, jpeg, ps);
+            }
+            return ms.ToArray();
+        }
+    }
+
+    /// A frame to show when the real screen cannot be had — chiefly the secure
+    /// desktop (a UAC prompt or the sign-in screen), which Windows forbids a
+    /// user process from capturing (CopyFromScreen throws "handle is invalid").
+    /// The stream keeps flowing a captioned card and picks the real desktop
+    /// back up on the next frame once the prompt is gone, so a viewer sees
+    /// WHY it went blank instead of a broken image. This is precisely what a
+    /// real RDP session would still show, because RDP renders the secure
+    /// desktop into its own session — a difference worth naming on the card.
+    internal static byte[] PlaceholderJpeg(string message, int maxWidth, long quality, out int width, out int height)
+    {
+        int w = maxWidth > 0 ? maxWidth : 1280;
+        int h = Math.Max(1, w * 9 / 16);
+        using (var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.FromArgb(20, 20, 24));
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
+                using (var title = new Font("Segoe UI", Math.Max(9f, w / 64f), FontStyle.Bold))
+                using (var body = new Font("Segoe UI", Math.Max(7f, w / 100f)))
+                using (var dim = new SolidBrush(Color.FromArgb(150, 160, 170)))
+                using (var faint = new SolidBrush(Color.FromArgb(110, 120, 130)))
                 {
-                    if (jpeg == null) { src.Save(ms, ImageFormat.Png); return ms.ToArray(); }
-                    using (var ps = new EncoderParameters(1))
-                    {
-                        ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality,
-                                                           Math.Max(1L, Math.Min(100L, quality)));
-                        src.Save(ms, jpeg, ps);
-                    }
-                    return ms.ToArray();
+                    var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    var top = new RectangleF(0, h * 0.36f, w, h * 0.14f);
+                    var bot = new RectangleF(w * 0.1f, h * 0.5f, w * 0.8f, h * 0.28f);
+                    g.DrawString(Environment.MachineName + " — screen not visible", title, dim, top, fmt);
+                    g.DrawString(message, body, faint, bot, fmt);
                 }
             }
-            finally { if (scaled != null) scaled.Dispose(); }
+            width = w; height = h;
+            return EncodeJpeg(bmp, quality);
+        }
+    }
+
+    /// Capture, or the placeholder card explaining why not. The stream uses
+    /// this so it never dies on a UAC prompt; the `screenshot` verb calls the
+    /// raw CaptureJpeg so a script gets the real error.
+    internal static byte[] CaptureOrPlaceholder(int maxWidth, long quality, out int width, out int height)
+    {
+        try { return CaptureJpeg(maxWidth, quality, out width, out height); }
+        catch (Exception e)
+        {
+            string why = e.Message.IndexOf("handle is invalid", StringComparison.OrdinalIgnoreCase) >= 0
+                ? "A secure desktop is up (UAC prompt or sign-in screen). Windows does not let this "
+                  + "agent capture it. Use Wake Console for the sign-in screen; a UAC prompt clears when answered."
+                : "Capture failed: " + e.Message;
+            return PlaceholderJpeg(why, maxWidth, quality, out width, out height);
         }
     }
 
@@ -2361,6 +2414,14 @@ internal static class ScreenStream
     private static long _quality;
     private static int _watching;
     private static long _framesSent;
+    private static int _idleSince;
+
+    /// Ten minutes with nobody watching and the listener goes away by itself.
+    /// A viewer that closes its window drops the tunnel and nothing more, so
+    /// without this a stream started once would listen forever. Harmless on
+    /// loopback, but "harmless and forever" is how a machine ends up with
+    /// six of them.
+    private const int IdleStopMs = 600000;
 
     public static string Start(int port, int fps, int maxWidth, long quality)
     {
@@ -2381,9 +2442,13 @@ internal static class ScreenStream
             }
             _running = true;
             _framesSent = 0;
+            _idleSince = Environment.TickCount;
             var t = new Thread(AcceptLoop);
             t.IsBackground = true;
             t.Start();
+            var idle = new Thread(IdleWatch);
+            idle.IsBackground = true;
+            idle.Start();
         }
         BezelAgent.Log("stream: listening on 127.0.0.1:" + _port + " at " + _fps + " fps, width " + _maxWidth);
         return "{\"ok\":true,\"streaming\":true,\"port\":" + _port + ",\"fps\":" + _fps
@@ -2407,6 +2472,22 @@ internal static class ScreenStream
     {
         return "{\"ok\":true,\"streaming\":" + (_running ? "true" : "false") + ",\"port\":" + _port
              + ",\"watching\":" + _watching + ",\"framesSent\":" + _framesSent + "}";
+    }
+
+    private static void IdleWatch()
+    {
+        while (_running)
+        {
+            Thread.Sleep(15000);
+            if (!_running) break;
+            if (_watching > 0) { _idleSince = Environment.TickCount; continue; }
+            if (Environment.TickCount - _idleSince > IdleStopMs)
+            {
+                BezelAgent.Log("stream: nobody has watched for ten minutes; stopping");
+                Stop();
+                break;
+            }
+        }
     }
 
     private static void AcceptLoop()
@@ -2449,7 +2530,7 @@ internal static class ScreenStream
                         {
                             int t0 = Environment.TickCount;
                             int w, h;
-                            byte[] jpeg = BezelAgent.CaptureJpeg(_maxWidth, _quality, out w, out h);
+                            byte[] jpeg = BezelAgent.CaptureOrPlaceholder(_maxWidth, _quality, out w, out h);
                             var head = Encoding.ASCII.GetBytes("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
                                                                + jpeg.Length + "\r\n\r\n");
                             s.Write(head, 0, head.Length);
@@ -2466,7 +2547,7 @@ internal static class ScreenStream
                 else if (path.StartsWith("/frame"))
                 {
                     int w, h;
-                    byte[] jpeg = BezelAgent.CaptureJpeg(_maxWidth, _quality, out w, out h);
+                    byte[] jpeg = BezelAgent.CaptureOrPlaceholder(_maxWidth, _quality, out w, out h);
                     WriteHead(s, "200 OK", "image/jpeg", jpeg.Length);
                     s.Write(jpeg, 0, jpeg.Length);
                     s.Flush();
