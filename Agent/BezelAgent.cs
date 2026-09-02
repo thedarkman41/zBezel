@@ -236,9 +236,30 @@ internal static class BezelAgent
             enumAttempts = 0;              // served from cache
             return targetsCache;
         }
-        targetsCache = EnumerateSettled();
+        // A session with no display attached can never enumerate a monitor, so
+        // riding out a hotplug there spends six seconds waiting for something
+        // that cannot arrive — and every Mac-side probe of a detached host pays
+        // it. Off the console, or disconnected, ask once and answer. The full
+        // settle loop stays for the on-console case, which is the only one where
+        // a monitor really can be mid-re-enumeration.
+        targetsCache = SessionHasNoDisplay() ? EnumerateSettled(1, 0) : EnumerateSettled();
         targetsCachedAt = DateTime.UtcNow;
         return targetsCache;
+    }
+
+    /// True when this process sits in a session that cannot own a display:
+    /// not the console session, or the console session while it is disconnected.
+    /// A failed probe answers false, so an unknown session keeps the patient path.
+    private static bool SessionHasNoDisplay()
+    {
+        try
+        {
+            uint id = OwnSessionId();
+            int console = ConsoleSessionId();
+            if (console < 0 || id != (uint)console) return true;
+            return SessionState(id) == WTSDisconnected;
+        }
+        catch (Exception) { return false; }
     }
 
 
@@ -256,7 +277,8 @@ internal static class BezelAgent
         {
             case "health":
                 Console.WriteLine("{\"ok\":true,\"monitors\":" + targets.Count + ","
-                                  + LinkFields(targets.Count) + "}");
+                                  + LinkFields(targets.Count) + ","
+                                  + SessionFields() + "}");
                 return true;
             case "list":   CmdList(targets);         return true;
             case "caps":   CmdCaps(targets, args);   return true;
@@ -479,7 +501,10 @@ internal static class BezelAgent
               .Append("\",\"deviceId\":\"").Append(Esc(t.DeviceID))
               .Append("\"}");
         }
-        sb.Append("]}");
+        // An empty array means "no monitor here"; the session says whether that
+        // is because there is nothing attached or because this session has no
+        // display to attach one to.
+        sb.Append("],").Append(SessionFields()).Append('}');
         Console.WriteLine(sb.ToString());
         return 0;
     }
@@ -923,6 +948,10 @@ internal static class BezelAgent
 
     private const int SM_XVIRTUALSCREEN  = 76, SM_YVIRTUALSCREEN  = 77,
                       SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79;
+
+    // Non-zero inside a Remote Desktop session, where the desktop this process
+    // sees is the virtual RDP display rather than the panel on the desk.
+    private const int SM_REMOTESESSION = 0x1000;
 
     /// Where the pointer is, and the bounds it may occupy.
     ///
@@ -1923,6 +1952,93 @@ internal static class BezelAgent
         if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 5, out buf, out len)) return "";
         try { return Marshal.PtrToStringUni(buf) ?? ""; }
         finally { WTSFreeMemory(buf); }
+    }
+
+    // WTS_CONNECTSTATE_CLASS, in the order wtsapi32.h declares it.
+    private static readonly string[] SessionStateNames =
+    {
+        "active", "connected", "connectQuery", "shadow", "disconnected",
+        "idle", "listen", "reset", "down", "init",
+    };
+
+    /// The connect state of a session, or -1 when Windows will not say.
+    private static int SessionState(uint id)
+    {
+        IntPtr buf; int len;
+        // 8 = WTSConnectState; the buffer holds a single 4-byte state class.
+        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 8, out buf, out len)) return -1;
+        try { return len >= 4 ? Marshal.ReadInt32(buf) : -1; }
+        finally { WTSFreeMemory(buf); }
+    }
+
+    /// The WinStation a session is attached to. Legitimately empty for some
+    /// sessions, so an empty string is an answer rather than a failure.
+    private static string SessionStation(uint id)
+    {
+        IntPtr buf; int len;
+        // 6 = WTSWinStationName
+        if (!WTSQuerySessionInformationW(IntPtr.Zero, id, 6, out buf, out len)) return "";
+        try { return Marshal.PtrToStringUni(buf) ?? ""; }
+        finally { WTSFreeMemory(buf); }
+    }
+
+    private static uint OwnSessionId()
+    {
+        using (var p = Process.GetCurrentProcess()) return (uint)p.SessionId;
+    }
+
+    /// The session holding the physical console, or -1 when nothing does —
+    /// WTSGetActiveConsoleSessionId answers 0xFFFFFFFF while the console is
+    /// mid-transition, which is a state and not a session number.
+    private static int ConsoleSessionId()
+    {
+        uint console = WTSGetActiveConsoleSessionId();
+        return console == 0xFFFFFFFF ? -1 : (int)console;
+    }
+
+    /// Which Windows session this process is actually running in.
+    ///
+    /// Without it the Mac cannot tell "the agent is in the wrong session" apart
+    /// from "the session the agent is in has been disconnected": both answer
+    /// list with an empty array, because a session with no display attached
+    /// enumerates no monitors. After an RDP session to this machine closes, the
+    /// agent's session sits Disconnected while a fresh console session owns the
+    /// panel; inside a live RDP session the agent enumerates the virtual RDP
+    /// display instead, and DDC writes to it succeed without ever reaching the
+    /// panel. Reporting the session on every health and list answer is what
+    /// lets the Mac say which of those it is looking at.
+    ///
+    /// Returns a well-formed fragment (no leading comma) whatever happens: a
+    /// diagnostic that throws is worse than one that admits it does not know.
+    private static string SessionFields()
+    {
+        uint id = 0;
+        int console = -1, state = -1;
+        string station = "";
+        bool remote = false;
+        try
+        {
+            id = OwnSessionId();
+            console = ConsoleSessionId();
+            state = SessionState(id);
+            station = SessionStation(id);
+            remote = GetSystemMetrics(SM_REMOTESESSION) != 0;
+        }
+        catch (Exception)
+        {
+            // Report whatever was gathered before the failure; the defaults
+            // above already read as "unknown" rather than as a real session.
+        }
+        string name = state >= 0 && state < SessionStateNames.Length
+            ? SessionStateNames[state] : "unknown";
+        return "\"session\":{\"id\":" + id
+             + ",\"console\":" + console
+             + ",\"state\":\"" + Esc(name) + "\""
+             + ",\"stateCode\":" + state
+             + ",\"station\":\"" + Esc(station) + "\""
+             + ",\"remote\":" + (remote ? "true" : "false")
+             + ",\"onConsole\":" + (console >= 0 && id == (uint)console ? "true" : "false")
+             + "}";
     }
 
     /// Move a disconnected session onto the physical console.

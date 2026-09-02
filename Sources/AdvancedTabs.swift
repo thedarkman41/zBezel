@@ -294,6 +294,8 @@ struct LinkTab: View {
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(width: 150)
+                    .help("The host tried first. Every KVM machine is a candidate too, so the "
+                        + "controls keep working when this one cannot see the panel.")
                 Button("Reconnect") {
                     Task<Void, Never> { await controller.reconnectProxy() }
                 }
@@ -319,6 +321,48 @@ struct LinkTab: View {
             case .none:
                 CheckRow("No control channel", false,
                          detail: controller.proxyDiagnostic ?? "proxy not in use")
+            }
+
+            // Which machines were asked, and what each of them said. A single
+            // "no control channel" line cannot distinguish a host that is off
+            // from one whose session is parked off its console, and those want
+            // opposite things done about them.
+            if !controller.proxyCandidateReports.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(controller.proxyCandidateReports) { report in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Circle()
+                                .fill(report.usable ? Theme.ok : Theme.warning)
+                                .frame(width: 6, height: 6)
+                                .padding(.top, 4)
+                            Text(report.host)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundStyle(Theme.textSecond)
+                            Text(report.summary)
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textDim)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if controller.proxyCandidates.count > 1 {
+                        Text("Every KVM machine is a proxy candidate; the host above is tried first.")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Theme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 2)
+            }
+
+            // The link mends itself when the far machine does, so say so rather
+            // than leaving a dead card that looks like it needs a click.
+            if controller.transport == .none, let due = controller.nextLinkRetry {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let seconds = Int(due.timeIntervalSince(context.date).rounded())
+                    Text(seconds > 0 ? "Retrying automatically in \(seconds)s" : "Retrying…")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim)
+                }
             }
 
             if !controller.remoteMonitors.isEmpty {

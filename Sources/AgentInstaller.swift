@@ -298,8 +298,9 @@ final class AgentInstaller: ObservableObject {
             }
             guard !monitors.isEmpty else {
                 throw InstallError(message:
-                    "The agent is running but reports no monitors. That usually means it is not in the "
-                  + "interactive session, or the screen is locked.")
+                    "The agent is running but reports no monitors. Its session is not on the "
+                  + "physical console — the screen is locked, the session was left disconnected "
+                  + "after an RDP connection, or the agent started outside the interactive session.")
             }
             let names = monitors.compactMap { $0["description"] as? String }
             return names.joined(separator: ", ")

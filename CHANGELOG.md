@@ -2,6 +2,56 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.54 — 2026-09-02
+
+**A monitor link that looks after itself**
+
+The Mac's own DDC/CI path is blocked by the dock for good, so every monitor
+control rides a Windows machine's agent. That link had three ways to die and
+no way back: it asked exactly one host, it never retried, and the app's own
+Control window was what killed it — closing an RDP session leaves the
+machine's desktop session Disconnected, an empty console session owns the
+panel, and the agent (still inside the disconnected session) sees no monitor.
+The Link tab then said "the agent must run in the interactive desktop
+session", which was wrong: it was in that session; the session had merely
+lost its console.
+
+Now:
+
+- Every KVM machine is a proxy candidate, the Link tab's host first. The
+  probe walks them and adopts the first whose agent can see this panel; the
+  card lists what each one said.
+- The agent reports its session — id, console id, connect state, window
+  station, whether it is a remote (RDP) session, whether it holds the console
+  — in `health` and `list`, and skips its six-second hot-plug settle loop when
+  the session has no display to wait for.
+- A candidate whose session is signed in but Disconnected from the console is
+  put back on it (the BezelReclaimConsole task, over ssh), then listed again.
+  Throttled per host, refused while a Control window to that host is open,
+  and a move that lands a different user's session is treated as a failure.
+  A candidate inside a live RDP session is skipped outright: it enumerates
+  the virtual display, and DDC to that "succeeds" without touching the panel.
+  Measured on rigel: SM_REMOTESESSION stays set on a session after its RDP
+  client disconnects, so "remote" only counts while the session is not known
+  to be disconnected — otherwise the very state the reclaim exists for would
+  be mistaken for a session in use.
+- With no link, the probe retries on its own: 20, 40, 80 then 120 s, reset
+  on success or a click. It also re-probes on wake from sleep, when a host
+  comes back in the parity sweep, when a Control session starts (fall over to
+  another candidate) or ends (come back), and after Wake Console succeeds. A
+  live proxy that fails three times in a row is demoted so the ladder starts.
+- Closing a Control window now reclaims that machine's console automatically
+  and says what actually happened, instead of asserting the desktop is back.
+- The KVM refuses a crossing that would need an input switch while there is
+  no link: no machine tiles at the edge, no captured pointer with nowhere to
+  go. A machine the panel already shows still takes the pointer, since that
+  needs no DDC.
+
+Verified end to end: with rigel left Disconnected by a Control session, the
+relaunched app found the agent detached, ran the reclaim (moved:true, from:1
+in rigel's reclaim.log at launch time), listed the panel, and adopted rigel
+without anyone touching it.
+
 ## 0.1.53 — 2026-09-02
 
 **Close the machine chooser when the pointer leaves the edge**

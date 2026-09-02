@@ -57,6 +57,19 @@ enum Transport: Equatable {
     }
 }
 
+/// What one candidate host had to say when the link was last looked for.
+///
+/// "No link" is never the whole story when several machines could carry the
+/// controls: one may be asleep, another signed out, a third busy showing its
+/// desktop to an RDP client. Keeping a line per host is what turns a dead end
+/// into something a person can act on.
+struct ProxyCandidateReport: Identifiable, Equatable {
+    let host: String
+    let summary: String
+    let usable: Bool
+    var id: String { host }
+}
+
 @MainActor
 final class MonitorController: ObservableObject {
     @Published private(set) var displays: [DisplayInfo] = []
@@ -71,6 +84,10 @@ final class MonitorController: ObservableObject {
             // thing that line is for: a channel that has genuinely gone away.
             guard transport.isAvailable != oldValue.isAvailable else { return }
             if transport.isAvailable { startWatchingInput() } else { stopWatchingInput() }
+            // The KVM refuses crossings that would need an input switch while
+            // there is no channel; keep its status line truthful either way.
+            kvm.linkAvailabilityChanged()
+            syncKVMState()
         }
     }
     @Published private(set) var capabilities: Capabilities?
@@ -85,12 +102,22 @@ final class MonitorController: ObservableObject {
 
     /// Proxy settings, persisted so the app comes back configured.
     @Published var proxyEnabled: Bool {
-        didSet { UserDefaults.standard.set(proxyEnabled, forKey: "proxyEnabled") }
+        didSet {
+            UserDefaults.standard.set(proxyEnabled, forKey: "proxyEnabled")
+            // Switching the proxy on with no link should start the unattended
+            // retries then and there, not wait for the next thing that probes.
+            updateLinkRetry()
+        }
     }
     @Published var proxyHost: String {
         didSet { UserDefaults.standard.set(proxyHost, forKey: "proxyHost") }
     }
     @Published private(set) var proxyDiagnostic: String?
+    /// One line per candidate host from the last proxy probe, in the order they
+    /// were tried.
+    @Published private(set) var proxyCandidateReports: [ProxyCandidateReport] = []
+    /// When the next unattended probe is due, while there is no link.
+    @Published private(set) var nextLinkRetry: Date?
     @Published private(set) var remoteMonitors: [RemoteMonitor] = []
 
     // Vendor-code discovery
@@ -626,6 +653,10 @@ final class MonitorController: ObservableObject {
             self.kvm.cancelChoice()
             self.syncKVMState()
         }
+        // No DDC channel means the panel's input cannot be switched, so a
+        // crossing that would need one is refused before the pointer is
+        // captured: no tiles, no frozen cursor. See KVMController.canSwitchPanel.
+        kvm.canSwitchPanel = { [weak self] in self?.transport.isAvailable ?? false }
     }
 
     private var desiredInput: UInt16?
@@ -844,8 +875,35 @@ final class MonitorController: ObservableObject {
                 let health = AgentParity.probe(host: host, reference: ref)
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    let before = self.machineHealth[host]
                     self.machineHealth[host] = health
                     self.parityInFlight.remove(host)
+
+                    // A machine that has just come back — booted, signed in,
+                    // agent started — is the usual reason there was no link a
+                    // moment ago. This sweep already paid for the SSH round
+                    // trip, so let the transport find out now rather than at
+                    // the end of its backoff.
+                    let wasDown: Bool
+                    switch before {
+                    case .unreachable, .notRunning: wasDown = true
+                    default: wasDown = false
+                    }
+                    // And re-probe too when the machine that came back is the one
+                    // the link is riding: its agent has just restarted, so what
+                    // the transport still names is a channel to a process that no
+                    // longer exists. A DIFFERENT host coming back while the link
+                    // is healthy is not a reason to tear a working link down.
+                    let carriesTheLink: Bool
+                    if case .proxy(let current, _, _) = self.transport {
+                        carriesTheLink = current.caseInsensitiveCompare(host) == .orderedSame
+                    } else {
+                        carriesTheLink = false
+                    }
+                    if wasDown, health == .ok || health == .mismatch,
+                       self.transport == .none || carriesTheLink {
+                        self.reprobeSoon()
+                    }
                 }
             }
         }
@@ -875,7 +933,13 @@ final class MonitorController: ObservableObject {
             }
             wireKVMInputs()
             syncKVMPortal()
-            await agent.update(config: .init(host: proxyHost, enabled: true))
+            // Deliberately does NOT re-point the DDC agent. Its host belongs to
+            // the transport, which may well have settled on a different machine
+            // than proxyHost; pointing it here re-aimed the monitor controls at
+            // whichever host the KVM happened to lead with, while the transport
+            // still described the one that answered. Nothing below needs it —
+            // the desktop sizes come from RemoteAgent.desktopSize, which opens
+            // its own short-lived ssh per machine.
 
             // Size every machine in the chain, not just the proxy. A machine
             // whose size cannot be read keeps whatever it had: a wrong size makes
@@ -1348,10 +1412,44 @@ final class MonitorController: ObservableObject {
     func bootstrap() async {
         guard !didBootstrap else { return }
         didBootstrap = true
+        watchForLinkChanges()
         refreshDisplays()
         await probe()
         await restoreKVMIfPreviouslyOn()
         startParityMonitor()
+    }
+
+    /// Subscribe to the things that change what the far side can see.
+    ///
+    /// A remote-desktop session takes a machine's desktop away from its console
+    /// for as long as it is up, and hands it back — via the reclaim — when it
+    /// closes. Sleep does much the same to every SSH connection at once. All
+    /// three used to leave the app sitting on a dead link until somebody
+    /// clicked, which read as "zBezel is broken" long after the cause was gone.
+    private func watchForLinkChanges() {
+        RDPControl.shared.onSessionStarted = { [weak self] host in
+            guard let self, case .proxy(let current, _, _) = self.transport,
+                  current.caseInsensitiveCompare(host) == .orderedSame else { return }
+            // The controls are riding the very machine that just gave its
+            // desktop away; look for another candidate before a write lands on
+            // the virtual RDP display and quietly does nothing.
+            self.reprobeSoon()
+        }
+        RDPControl.shared.onSessionEnded = { [weak self] _, _ in
+            // The reclaim has already run by the time this fires, so the far
+            // agent is back on its console — but give it a moment to notice.
+            self?.reprobeSoon(after: 3)
+        }
+
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                // Networking, DNS and the SSH master sockets all need a moment
+                // after a wake; probing into that reports a failure that says
+                // nothing about the far machine.
+                self?.reprobeSoon(after: 5)
+            }
+        }
     }
 
     /// Put the KVM back the way it was left.
@@ -1423,11 +1521,15 @@ final class MonitorController: ObservableObject {
 
     /// Use the local link when this Mac has one that works; otherwise the proxy.
     /// A monitor reachable only through the proxy is a perfectly normal case.
-    func probe() async {
+    /// - Parameter resetBackoff: a probe somebody asked for starts the retry
+    ///   ladder again from its shortest rung; one the ladder itself scheduled
+    ///   must not, or it would never climb.
+    func probe(resetBackoff: Bool = true) async {
         guard !isProbing else { return }
+        if resetBackoff { linkRetryDelay = 0 }
         isProbing = true
         probeStatus = "Examining the video link…"
-        defer { isProbing = false; probeStatus = "" }
+        defer { isProbing = false; probeStatus = ""; updateLinkRetry() }
 
         capabilities = nil
         features = [:]
@@ -1474,23 +1576,234 @@ final class MonitorController: ObservableObject {
         deriveActiveInputs()
     }
 
-    private func loadFeaturesViaProxy() async {
-        probeStatus = "Contacting \(proxyHost)…"
-        await agent.update(config: .init(host: proxyHost, enabled: true))
+    /// Every machine that could carry the controls, the preferred one first.
+    ///
+    /// Which host can reach the panel is not a fixed fact: a machine can be
+    /// asleep, signed out, or parked off its own console, and the monitor is on
+    /// more than one of them. Asking only the configured host reported "no link"
+    /// with a perfectly good proxy sitting in the KVM list beside it.
+    var proxyCandidates: [String] {
+        var out: [String] = []
+        for host in ([proxyHost] + kvmMachines.map(\.host))
+            .map({ $0.trimmingCharacters(in: .whitespaces) })
+        where !host.isEmpty
+            && !out.contains(where: { $0.caseInsensitiveCompare(host) == .orderedSame }) {
+            out.append(host)
+        }
+        return out
+    }
 
-        do {
-            let monitors = try await agent.list()
-            remoteMonitors = monitors
-            guard let target = matchRemote(monitors) else {
-                transport = .none
-                proxyDiagnostic = monitors.isEmpty
-                    ? "\(proxyHost) is reachable but reports no monitors. The agent must run in the interactive desktop session."
-                    : "\(proxyHost) sees \(monitors.count) monitor(s), none matching this display."
-                return
+    /// Try each candidate in turn and adopt the first that can actually see the
+    /// monitor. Every host that could not gets a line saying why.
+    private func loadFeaturesViaProxy() async {
+        var reports: [ProxyCandidateReport] = []
+        var sawBlindAgent = false
+        remoteMonitors = []
+
+        // Let go of the old link BEFORE the first `agent.update`.
+        //
+        // There is one shared RemoteAgent, and the sweep re-points it at each
+        // candidate in turn while everything else — writeRaw, confirm, reread,
+        // and the input poll behind them — takes its monitor index from
+        // `transport`. Leaving a live `.proxy` in place meant that for as long
+        // as the sweep ran (ten seconds per dead candidate, up to forty more
+        // inside a reclaim) the agent pointed at candidate N while `transport`
+        // still named the host adopted last time. A poll or an input write
+        // landing in that window was delivered to the wrong machine, carrying
+        // the old machine's monitor index: at best it threw, at worst it changed
+        // the input of a different physical panel. `.none` makes all of those
+        // paths short-circuit until a candidate is actually adopted.
+        transport = .none
+        remoteTarget = nil
+
+        for host in proxyCandidates {
+            probeStatus = "Contacting \(host)…"
+            await agent.update(config: .init(host: host, enabled: true))
+
+            var listing: AgentListing
+            do {
+                listing = try await agent.list()
+            } catch {
+                reports.append(ProxyCandidateReport(host: host,
+                                                    summary: error.localizedDescription,
+                                                    usable: false))
+                continue
             }
 
+            // Somebody is using this machine through RDP. Its agent enumerates
+            // that connection's virtual display, so DDC writes would report
+            // success while the panel never moved — the one failure worth
+            // refusing outright rather than working around.
+            if listing.session?.insideRemoteSession == true {
+                reports.append(ProxyCandidateReport(
+                    host: host,
+                    summary: "its agent is inside a remote (RDP) session and only sees the "
+                           + "virtual display",
+                    usable: false))
+                continue
+            }
+
+            if listing.session?.detachedFromConsole == true {
+                switch await putSessionBackOnConsole(host: host, session: listing.session) {
+                case .listing(let fresh):
+                    listing = fresh
+                case .report(let why):
+                    reports.append(ProxyCandidateReport(host: host, summary: why, usable: false))
+                    continue
+                }
+            }
+
+            if !listing.monitors.isEmpty { remoteMonitors = listing.monitors }
+
+            guard !listing.monitors.isEmpty else {
+                sawBlindAgent = true
+                let place = listing.session.map { session -> String in
+                    let station = session.station.isEmpty ? "no window station" : session.station
+                    return "session \(session.state) on \(station)"
+                } ?? "its session did not say where it is"
+                reports.append(ProxyCandidateReport(
+                    host: host,
+                    summary: "reachable but its agent sees no monitor (\(place))",
+                    usable: false))
+                continue
+            }
+
+            guard let target = matchRemote(listing.monitors) else {
+                reports.append(ProxyCandidateReport(
+                    host: host,
+                    summary: "sees \(listing.monitors.count) monitor(s), none matching this display",
+                    usable: false))
+                continue
+            }
+
+            if let problem = await adoptProxy(host: host, target: target) {
+                reports.append(ProxyCandidateReport(host: host, summary: problem, usable: false))
+                continue
+            }
+
+            reports.append(ProxyCandidateReport(host: host,
+                                                summary: "carrying the controls for "
+                                                       + target.description,
+                                                usable: true))
+            proxyCandidateReports = reports
+            proxyDiagnostic = nil
+            return
+        }
+
+        transport = .none
+        remoteTarget = nil
+        proxyCandidateReports = reports
+
+        var lines = reports.map { "\($0.host): \($0.summary)" }
+        if reports.isEmpty {
+            lines = ["No proxy host is configured. Set one on this tab, or add a KVM machine."]
+        } else if sawBlindAgent {
+            lines.append("The agent is running but reports no monitors. Its session is not on the "
+                       + "physical console — the screen is locked, the session was left "
+                       + "disconnected after an RDP connection, or the agent started outside the "
+                       + "interactive session.")
+        }
+        proxyDiagnostic = lines.joined(separator: "\n")
+    }
+
+    /// The result of trying to hand a machine's console back to its own session.
+    private enum SessionReclaim {
+        /// It is back, and this is what it sees now.
+        case listing(AgentListing)
+        /// It is not, and this is the line to show for the host.
+        case report(String)
+    }
+
+    /// Per host: when this app last asked for the console back, and what came of
+    /// it. A machine that declines to move must not be asked again on every
+    /// probe — and the probes that do not ask must say why, which means
+    /// remembering the answer rather than assuming one.
+    private var lastConsoleReclaim: [String: Date] = [:]
+    private var lastReclaimOutcome: [String: ConsoleReclaim.Outcome] = [:]
+    private static let reclaimCooldown: TimeInterval = 300
+
+    /// One clause naming what the last reclaim on a host actually did.
+    private static func reclaimReason(_ outcome: ConsoleReclaim.Outcome) -> String {
+        switch outcome {
+        case .moved:
+            return "it was put back recently and did not stay"
+        case .alreadyActive:
+            return "the console was already showing a desktop, so its session stayed put"
+        case .notMoved(let why):
+            return "it would not move — \(why)"
+        case .noTask:
+            return "BezelReclaimConsole is not installed there"
+        case .noVerdict:
+            return "the reclaim task reported nothing"
+        case .unreachable(let output):
+            return "could not run the reclaim task — \(output)"
+        }
+    }
+
+    /// A session left `Disconnected` after an RDP connection closed is still
+    /// signed in — it simply no longer owns the console, so it can enumerate
+    /// nothing. `tscon` puts it back, and then the agent can see the panel again.
+    private func putSessionBackOnConsole(host: String,
+                                         session: AgentSession?) async -> SessionReclaim {
+        let sessionID = session.map { String($0.id) } ?? "?"
+        let consoleID = session.map { $0.console < 0 ? "none" : String($0.console) } ?? "?"
+        let situation = "agent in session \(sessionID) is disconnected from the console "
+                      + "(session \(consoleID))"
+
+        // A Control window means a person is in that session right now, and
+        // moving it out from under them would end their connection.
+        if RDPControl.shared.isOpen(host: host) {
+            return .report(situation + "; a Control window is using it")
+        }
+        if let last = lastConsoleReclaim[host],
+           Date().timeIntervalSince(last) < Self.reclaimCooldown {
+            // Say what happened last time, not what a fixed sentence guesses.
+            // One wording covered every outcome here — "it was put back recently
+            // and did not stay" — so a host whose reclaim task is missing spent
+            // the next five minutes reporting a move that was never attempted,
+            // sending the reader to look at a session instead of at the task.
+            let why = lastReclaimOutcome[host].map(Self.reclaimReason)
+                ?? "it was put back recently and did not stay"
+            return .report(situation + "; " + why)
+        }
+
+        probeStatus = "\(host): putting its session back on the console…"
+        // Name the session meant: the task picks its own target and, on a machine
+        // with a second user signed in and disconnected, that need not be the
+        // agent's. A move of anything else comes back as .notMoved.
+        let outcome = await ConsoleReclaim.reclaim(host: host, expecting: session?.id)
+        lastReclaimOutcome[host] = outcome
+
+        // Back off only from outcomes where something was actually decided on the
+        // far machine. Stamped before the call, as it was, the cooldown also
+        // silenced the cases most worth retrying — ssh momentarily down, the task
+        // not installed yet, a run that said nothing — for five minutes each.
+        switch outcome {
+        case .moved, .alreadyActive, .notMoved: lastConsoleReclaim[host] = Date()
+        case .noTask, .noVerdict, .unreachable: break
+        }
+
+        switch outcome {
+        case .moved, .alreadyActive:
+            // The agent caches its monitor handles for 20s, and the reclaim
+            // takes longer than that on its own, so this list re-enumerates
+            // rather than answering from the cache taken while it was blind.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let listing = try? await agent.list() else {
+                return .report(situation + "; put it back, but it did not answer afterwards")
+            }
+            return .listing(listing)
+        default:
+            return .report(situation + "; " + Self.reclaimReason(outcome))
+        }
+    }
+
+    /// The capability sweep for one chosen host and monitor.
+    /// Returns nil once the transport is live, or the reason it is not.
+    private func adoptProxy(host: String, target: RemoteMonitor) async -> String? {
+        do {
             remoteTarget = target
-            probeStatus = "Reading capabilities from \(proxyHost)…"
+            probeStatus = "Reading capabilities from \(host)…"
             let capsString = try await agent.capabilities(monitor: target.index)
             let caps = capsString.isEmpty ? nil : Capabilities.parse(capsString)
             capabilities = caps
@@ -1500,7 +1813,7 @@ final class MonitorController: ObservableObject {
             // 0x04 asks the monitor to restore its factory defaults.
             let codes = (caps?.supportedCodes ?? Self.fallbackCodes)
                 .filter { !VCP.neverRead.contains($0) }
-            probeStatus = "Reading \(codes.count) features from \(proxyHost)…"
+            probeStatus = "Reading \(codes.count) features from \(host)…"
             let readings = try await agent.read(monitor: target.index, codes: codes)
 
             var collected: [UInt8: FeatureState] = [:]
@@ -1510,13 +1823,119 @@ final class MonitorController: ObservableObject {
             }
             features = collected
             seedVendorBindings()
-            transport = .proxy(host: proxyHost, monitorIndex: target.index,
+            // A fresh host starts with a clean slate; failures counted against
+            // the machine this one replaced say nothing about it.
+            proxyFailureStreak = 0
+            transport = .proxy(host: host, monitorIndex: target.index,
                                description: target.description)
             deriveActiveInputs()
+            // The remembered readings are already on screen; confirming them is
+            // slow and nothing waits on the answer.
             await refreshVendorReadings()
+            return nil
         } catch {
-            transport = .none
-            proxyDiagnostic = error.localizedDescription
+            remoteTarget = nil
+            return error.localizedDescription
+        }
+    }
+
+    // MARK: Coming back on its own
+
+    // A link that has gone lives on the far machine, and the far machine mends
+    // itself: it finishes booting, somebody signs in, an RDP session closes.
+    // Until this, .none was terminal — the only ways out were a click or a Mac
+    // display-layout change, so an app left open overnight was still saying "no
+    // link" hours after the cause had cleared.
+
+    private var linkRetryTimer: Timer?
+    private var linkRetryDelay: TimeInterval = 0
+    private var lastReprobe = Date.distantPast
+    /// Rungs in seconds. Long enough that a machine that is simply off costs
+    /// almost nothing, short enough that a machine coming back is noticed while
+    /// the person who turned it on is still watching.
+    private static let linkRetryDelays: [TimeInterval] = [20, 40, 80, 120]
+
+    /// Schedule the next unattended probe, or stand down because there is a link.
+    private func updateLinkRetry() {
+        linkRetryTimer?.invalidate()
+        linkRetryTimer = nil
+        guard transport == .none, proxyEnabled, !proxyCandidates.isEmpty else {
+            nextLinkRetry = nil
+            linkRetryDelay = 0
+            return
+        }
+        let delay = Self.linkRetryDelays.first { $0 > linkRetryDelay }
+            ?? Self.linkRetryDelays.last ?? 120
+        linkRetryDelay = delay
+        nextLinkRetry = Date().addingTimeInterval(delay)
+        linkRetryTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.isProbing else { return }
+                await self.probe(resetBackoff: false)
+            }
+        }
+    }
+
+    /// Consecutive failures on the adopted proxy since it last answered.
+    private var proxyFailureStreak = 0
+    /// Three in a row before giving up on a host. One timeout is ordinary — the
+    /// far agent re-enumerating after a hotplug, an ssh that took its time — and
+    /// demoting on a single one would thrash a link that is merely busy.
+    private static let proxyFailureLimit = 3
+
+    /// Record how a call over the proxy went, and let go of the host once it has
+    /// stopped answering altogether.
+    ///
+    /// Nothing else demoted a live `.proxy`: every failure was swallowed into
+    /// `lastError` and the transport went on naming a machine that had gone to
+    /// sleep hours before. Both self-healing paths — the retry ladder and the
+    /// parity sweep — arm only while the transport is `.none`, so that machine
+    /// was never retried and a second candidate that could have carried the
+    /// controls the whole time was never tried at all. The link stayed dead, and
+    /// the card still said "Proxy Info ✓", until somebody pressed Reconnect.
+    private func noteProxyOutcome(succeeded: Bool) {
+        guard case .proxy(let host, _, _) = transport else { return }
+        if succeeded {
+            proxyFailureStreak = 0
+            return
+        }
+        proxyFailureStreak += 1
+        guard proxyFailureStreak >= Self.proxyFailureLimit else { return }
+        proxyFailureStreak = 0
+        transport = .none
+        remoteTarget = nil
+        proxyDiagnostic = "\(host) stopped answering — \(lastError ?? "no reply"). "
+                        + "Looking for another machine that can reach this display."
+        updateLinkRetry()
+    }
+
+    /// Probe again shortly — for the moments when something else has just
+    /// changed the far side and waiting out the backoff would leave the app
+    /// looking broken for a minute after the cause was fixed. Throttled, because
+    /// several of those moments arrive together.
+    func reprobeSoon(after seconds: TimeInterval = 2) {
+        guard Date().timeIntervalSince(lastReprobe) >= 10 else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            guard let self else { return }
+            // The throttle is re-checked, and spent, HERE rather than at
+            // scheduling time. Stamped up front it was spent by probes that then
+            // never ran, and a probe already in flight would swallow the next ten
+            // seconds' worth of reasons to look again — the reclaim finishing,
+            // the parity sweep seeing a host come back — leaving the app to wait
+            // out a two-minute backoff rung for a link that was ready at once.
+            guard Date().timeIntervalSince(self.lastReprobe) >= 10 else { return }
+            guard !self.isProbing else {
+                // A probe is already running, and it started before whatever we
+                // are reacting to — so it cannot have seen it. Do not spend the
+                // throttle on a probe that would be dropped: reset the ladder
+                // instead, and that probe's own `defer` schedules the next one at
+                // the shortest rung rather than the longest.
+                self.linkRetryDelay = 0
+                return
+            }
+            self.lastReprobe = Date()
+            await self.probe(resetBackoff: false)
         }
     }
 
@@ -1575,6 +1994,7 @@ final class MonitorController: ObservableObject {
                 toRead.insert(code)
                 let readings = try await agent.writeAndRead(
                     monitor: index, code: code, value: value, readCodes: Array(toRead).sorted())
+                noteProxyOutcome(succeeded: true)
                 for (readCode, reading) in readings { features[readCode]?.current = reading.current }
 
                 // An input switch takes seconds, and the panel visibly passes
@@ -1603,6 +2023,7 @@ final class MonitorController: ObservableObject {
                 return readings[code]?.current ?? value
             } catch {
                 lastError = error.localizedDescription
+                noteProxyOutcome(succeeded: false)
                 return nil
             }
         }
@@ -1733,8 +2154,15 @@ final class MonitorController: ObservableObject {
                 features[code]?.current = readback.current
             }
         case .proxy(_, let index, _):
-            if let reading = try? await agent.read(monitor: index, codes: [code])[code] {
-                features[code]?.current = reading.current
+            // do/catch rather than try?: a host that has stopped answering has to
+            // be counted, and a swallowed error is indistinguishable from a code
+            // the monitor declined to report.
+            do {
+                let readings = try await agent.read(monitor: index, codes: [code])
+                noteProxyOutcome(succeeded: true)
+                if let reading = readings[code] { features[code]?.current = reading.current }
+            } catch {
+                noteProxyOutcome(succeeded: false)
             }
         }
     }
@@ -1761,6 +2189,7 @@ final class MonitorController: ObservableObject {
         case .proxy(_, let index, _):
             do {
                 let readings = try await agent.read(monitor: index, codes: codes)
+                noteProxyOutcome(succeeded: true)
                 var out: [UInt8: UInt16] = [:]
                 for (code, reading) in readings {
                     out[code] = reading.current
@@ -1769,6 +2198,7 @@ final class MonitorController: ObservableObject {
                 return out
             } catch {
                 lastError = error.localizedDescription
+                noteProxyOutcome(succeeded: false)
                 return [:]
             }
         }
@@ -1776,6 +2206,10 @@ final class MonitorController: ObservableObject {
 
     func reconnectProxy() async {
         await agent.disconnect()
+        // Asked for by hand: start the retry ladder at its shortest rung again,
+        // rather than making a person who has just fixed the far machine wait
+        // out a two-minute delay the unattended retries had climbed to.
+        linkRetryDelay = 0
         await probe()
     }
 

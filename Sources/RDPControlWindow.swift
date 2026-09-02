@@ -13,15 +13,43 @@ final class RDPControl {
     static let shared = RDPControl()
     private var windows: [String: RDPControlWindow] = [:]
 
+    /// A Control session for this host has connected: the machine's interactive
+    /// session now lives in that window, so its physical panel is dark and the
+    /// agent behind it can no longer see a real display.
+    var onSessionStarted: ((String) -> Void)?
+
+    /// That session has ended and the console reclaim has finished. The outcome
+    /// is nil when the session never connected — nothing was redirected, so
+    /// nothing was put back.
+    var onSessionEnded: ((String, ConsoleReclaim.Outcome?) -> Void)?
+
+    /// A Control session for this host is LIVE — which is not the same as "a
+    /// window for it exists". A window that has ended its session stays on
+    /// screen showing the reclaim's verdict, and callers use this to decide
+    /// whether somebody is in that session right now. Reporting a finished
+    /// window as in use left the console stranded for as long as it stayed
+    /// open: a dropped session whose one automatic reclaim failed could never
+    /// be retried, because every later attempt was refused on the grounds that
+    /// a person was using a session that had been dead for hours.
+    ///
+    /// Hosts reach us from several stores with inconsistent case, so the window
+    /// table is keyed lowercased and compared that way.
+    func isOpen(host: String) -> Bool {
+        windows[host.lowercased()].map { !$0.sessionEnded } ?? false
+    }
+
     func open(host: String, name: String, size: CGSize) {
-        if let existing = windows[host] {
+        let key = host.lowercased()
+        if let existing = windows[key] {
             existing.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
         let window = RDPControlWindow(host: host, name: name, remoteSize: size)
-        windows[host] = window
-        window.onClosed = { [weak self] in self?.windows[host] = nil }
+        windows[key] = window
+        window.onClosed = { [weak self] in self?.windows[key] = nil }
+        window.onConnected = { [weak self] in self?.onSessionStarted?(host) }
+        window.onEnded = { [weak self] outcome in self?.onSessionEnded?(host, outcome) }
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window.begin()
@@ -35,7 +63,15 @@ final class RDPControlWindow: NSWindow, NSWindowDelegate {
     private let view: RDPView
     private let status = NSTextField(labelWithString: "")
     private var connected = false
+    /// Readable from RDPControl, which needs to tell a live session apart from a
+    /// window still on screen after its session finished.
+    private(set) var sessionEnded = false
     var onClosed: (() -> Void)?
+    /// Fired once, when the session reaches `.connected`.
+    var onConnected: (() -> Void)?
+    /// Fired once, after the session has ended and the console reclaim has run.
+    /// Nil outcome means the session never connected, so nothing was reclaimed.
+    var onEnded: ((ConsoleReclaim.Outcome?) -> Void)?
 
     // Request a moderate session size regardless of the panel's native 4K:
     // lighter to decode, and plenty to read a dialog. 16:9.
@@ -171,16 +207,90 @@ final class RDPControlWindow: NSWindow, NSWindowDelegate {
         switch state {
         case .connecting: show("Connecting…")
         case .connected:
+            let first = !connected
             connected = true
             status.isHidden = true
             view.sessionReady()
             makeFirstResponder(view)
+            if first { onConnected?() }
         case .resized:
             view.needsDisplay = true
         case .disconnected:
-            if connected { show("Disconnected. \(machineName)'s console is back on its own monitor.") }
+            endSession()
         case .error:
-            fail(detail ?? "The session ended unexpectedly.")
+            if connected {
+                // Connected and then dropped: whatever the transport called it,
+                // the thing that matters now is that the console is stranded.
+                NSLog("zBezel rdp control (%@): %@", host, detail ?? "the session ended unexpectedly")
+                endSession()
+            } else {
+                fail(detail ?? "The session ended unexpectedly.")
+                endSession()
+            }
+        }
+    }
+
+    /// The session is over — because the window closed, or because the far side
+    /// dropped it. Runs at most once per window.
+    ///
+    /// Connecting redirected the machine's interactive session into this window;
+    /// disconnecting leaves it `Disconnected` while an empty console session
+    /// owns the physical monitor, and the agent in that stranded session sees no
+    /// displays. So put it back, the same way Wake Console does. `rdp.close()`
+    /// joins the FreeRDP thread, so by the time it returns the far side has seen
+    /// the disconnect and the session is settled: reclaiming before that would
+    /// race the state Windows is still leaving.
+    private func endSession() {
+        guard !sessionEnded else { return }
+        sessionEnded = true
+        rdp.close()
+
+        guard connected else {
+            // Nothing was ever redirected, so there is nothing to put back.
+            let finished = onEnded
+            onEnded = nil
+            finished?(nil)
+            return
+        }
+
+        show("Disconnected. Putting \(machineName)'s console back on its monitor…")
+        let host = self.host
+        // A strong capture on purpose: closing the window is the ordinary way a
+        // session ends, so by the time the verdict lands nothing else may be
+        // holding this window — and the callback still has to be delivered.
+        Task {
+            let outcome = await ConsoleReclaim.reclaim(host: host)
+            self.finish(outcome)
+        }
+    }
+
+    /// The reclaim's verdict, said plainly. The window is usually closed by now.
+    private func finish(_ outcome: ConsoleReclaim.Outcome) {
+        if isVisible {
+            switch outcome {
+            case .moved, .alreadyActive:
+                show("\(machineName)'s console is back on its own monitor.")
+            default:
+                show("Could not put \(machineName)'s console back: \(Self.reason(outcome)). "
+                     + "Run Wake Console or sign in there.")
+            }
+        }
+        let finished = onEnded
+        onEnded = nil
+        finished?(outcome)
+    }
+
+    /// One short clause naming why the console is still stranded.
+    private static func reason(_ outcome: ConsoleReclaim.Outcome) -> String {
+        switch outcome {
+        case .moved, .alreadyActive: return ""
+        case .notMoved(let why):     return why
+        case .noTask:                return "BezelReclaimConsole is not installed there"
+        case .noVerdict:             return "the reclaim task reported nothing"
+        case .unreachable(let output):
+            let first = output.split(separator: "\n").first.map(String.init)?
+                .trimmingCharacters(in: .whitespaces) ?? ""
+            return first.isEmpty ? "SSH could not reach it" : "SSH: \(first)"
         }
     }
 
@@ -190,7 +300,7 @@ final class RDPControlWindow: NSWindow, NSWindowDelegate {
     // MARK: NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {
-        rdp.close()
+        endSession()
         onClosed?()
     }
 }

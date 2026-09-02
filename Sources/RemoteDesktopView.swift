@@ -138,6 +138,12 @@ struct WakeConsoleCard: View {
             }
         }
         .onAppear { load() }
+        .onChange(of: desktop.step) { _, now in
+            // Waking the console exists to put the agent back in front of the
+            // real monitor. Noticing that without being asked is the difference
+            // between "done" and "done, and the controls work again".
+            if now == .done { controller.reprobeSoon() }
+        }
     }
 
     // MARK: Per-host account

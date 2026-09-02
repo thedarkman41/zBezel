@@ -317,6 +317,19 @@ final class KVMController {
     /// same teardown as a cancel; the tap below decides when to fire it.
     var dismissChooser: (() -> Void)?
 
+    /// Whether the panel's input can be switched right now — in practice,
+    /// whether the app currently has a DDC/CI channel to the monitor. Nil means
+    /// assume it can.
+    ///
+    /// Without a channel a crossing has nowhere to go: the tiles would appear,
+    /// a pick would ask for an input switch that cannot happen, and the pointer
+    /// would then be captured for a machine that is not on the panel — a frozen
+    /// cursor with nothing on screen to say why. So the crossing is refused up
+    /// front, and only on the paths that need a switch: a machine the panel is
+    /// already showing can still take the pointer, since that needs no DDC.
+    var canSwitchPanel: (() -> Bool)?
+    private var lastRefusalNotice = Date.distantPast
+
     /// How far in from the doorway edge the chooser's tiles (and a margin) reach.
     /// While the pointer is inside this band the drawer stays; moving left of it
     /// is the "changed my mind, going back to the Mac" gesture that closes it.
@@ -994,14 +1007,54 @@ final class KVMController {
         }
     }
 
+    static let armedStatus = "armed — pointer at the right edge chooses a machine"
+    static let noLinkStatus = "armed, but there is no link to the monitor: its input "
+                            + "cannot be switched, so the pointer stays here"
+
+    /// A crossing that would need the panel's input switched, at a moment when
+    /// it cannot be. Nothing is captured and nothing moves. The pointer is
+    /// nudged back off the trigger so the edge does not re-fire on the very next
+    /// delta, the reason goes on the status line, and a notice is raised — once
+    /// in a while, not on every push at the wall.
+    private func refuseCrossing(at point: CGPoint, doorway: CGRect) {
+        chosenIndex = nil
+        CGWarpMouseCursorPosition(CGPoint(x: doorway.maxX - 40, y: point.y))
+        status = Self.noLinkStatus
+        KVMLog.write("crossing refused: no DDC/CI channel, the panel's input cannot be switched")
+        if Date().timeIntervalSince(lastRefusalNotice) > 30 {
+            lastRefusalNotice = Date()
+            onNotice?("The panel cannot be switched right now (no DDC/CI link), "
+                    + "so the pointer stays on the Mac. zBezel keeps retrying the link.")
+        }
+        onChange?()
+    }
+
+    /// The link came or went while armed. Keep the status line truthful without
+    /// waiting for the next crossing to rewrite it — and touch only the armed
+    /// texts, never a "controlling …" line that describes a live handover.
+    func linkAvailabilityChanged() {
+        guard !choosing, status.hasPrefix("armed") else { return }
+        let up = canSwitchPanel?() ?? true
+        let wanted = up ? Self.armedStatus : Self.noLinkStatus
+        guard status != wanted else { return }
+        status = wanted
+        onChange?()
+    }
+
     private func handOver(at point: CGPoint, doorway: CGRect, dragging: Bool = false) {
         // Whichever machine is already on screen gets the pointer, with no input
         // switch: the user is looking at it, so handing control anywhere else
         // would be a surprise. Only when the panel is showing the Mac is there a
         // choice to make about where to go.
         let onScreen = machines.firstIndex { $0.input == currentInput }
+        // Every branch below that is not "the panel already shows it" ends in an
+        // input switch, and that needs the DDC channel. Checked here, before
+        // anything is captured, for the reason on canSwitchPanel.
+        let linkUp = canSwitchPanel?() ?? true
         if let chosen = chosenIndex, machines.indices.contains(chosen) {
             chosenIndex = nil
+            let alreadyShowing = !panelShowsMac && machines[chosen].input == currentInput
+            guard linkUp || alreadyShowing else { refuseCrossing(at: point, doorway: doorway); return }
             activate(machines[chosen], at: chosen)
         } else if let locked = lockedIndex, machines.indices.contains(locked) {
             // Locked: there is no question to ask. The panel is showing that
@@ -1009,6 +1062,12 @@ final class KVMController {
             activate(machines[locked], at: locked)
         } else if !panelShowsMac, let onScreen {
             activate(machines[onScreen], at: onScreen)
+        } else if !linkUp {
+            // The panel shows the Mac and no switch is possible: no tiles, no
+            // capture. Offering a choice that cannot be honoured is worse than
+            // offering none.
+            refuseCrossing(at: point, doorway: doorway)
+            return
         } else if machines.count > 1, let ask = presentChooser {
             // More than one place to go and nothing on screen to imply which.
             // Hold the crossing, nudge the pointer off the edge so it is not

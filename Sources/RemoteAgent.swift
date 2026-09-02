@@ -42,6 +42,83 @@ struct RemoteReading {
     let type: UInt8
 }
 
+/// The Windows session the agent answered from.
+///
+/// Which session the agent lives in decides what it can see. Off the console it
+/// has no display to enumerate at all, so `list` comes back empty and the host
+/// looks broken when it is merely parked; inside a live remote-desktop session
+/// it enumerates that connection's VIRTUAL display, so DDC writes succeed
+/// without ever reaching the panel — the worse failure of the two, because it
+/// looks like success. Older agents do not report this, so every reader must
+/// cope with nil.
+struct AgentSession: Equatable, Sendable {
+    let id: Int
+    let console: Int
+    let state: String
+    let stateCode: Int
+    let station: String
+    let remote: Bool
+    let onConsole: Bool
+
+    /// WTS_CONNECTSTATE_CLASS, the two values worth reasoning about.
+    private static let activeState = 0
+    private static let disconnectedState = 4
+
+    /// Both of these lean on `onConsole`, and `onConsole` is only meaningful
+    /// when the agent could read a console id at all: -1 means
+    /// WTSGetActiveConsoleSessionId answered 0xFFFFFFFF, which happens while the
+    /// console is mid-transition (just after a tscon, an RDP disconnect
+    /// elsewhere, a fast user switch). The agent reports `onConsole:false` for
+    /// that, and reading it as "off the console" turned a momentary unknown into
+    /// a confident wrong answer — a machine nobody was RDP'd into was refused as
+    /// "inside a remote session", and a session sitting on its own console could
+    /// be picked for a reclaim. So qualify both on a known console id and let
+    /// `remote`, which is the one authoritative signal, speak for itself.
+
+    /// Signed in, but no longer holding the console — what an RDP connection
+    /// leaves behind when it closes. `tscon` can put it back.
+    var detachedFromConsole: Bool {
+        console >= 0 && !onConsole && stateCode == Self.disconnectedState
+    }
+
+    /// Somebody is looking at this session through a remote-desktop connection.
+    /// Never reclaim one of these: it is in use, and what it enumerates is the
+    /// virtual display that connection created.
+    ///
+    /// `remote` alone is not enough. SM_REMOTESESSION describes the station the
+    /// session was LAST attached to, and it stays set after the RDP client
+    /// disconnects — measured on rigel: a session left Disconnected by a closed
+    /// Control window reported `remote:true, stateCode:4`. That session is not
+    /// in use by anyone; it is the very state the reclaim exists to repair. So a
+    /// remote flag counts only while the session is not known to be
+    /// disconnected, which keeps this and `detachedFromConsole` mutually
+    /// exclusive whatever order they are tested in.
+    var insideRemoteSession: Bool {
+        if remote { return stateCode != Self.disconnectedState }
+        return console >= 0 && !onConsole && stateCode == Self.activeState
+    }
+
+    /// nil when the far agent predates the session contract.
+    static func parse(_ raw: Any?) -> AgentSession? {
+        guard let object = raw as? [String: Any] else { return nil }
+        return AgentSession(id: (object["id"] as? Int) ?? 0,
+                            console: (object["console"] as? Int) ?? -1,
+                            state: (object["state"] as? String) ?? "unknown",
+                            stateCode: (object["stateCode"] as? Int) ?? -1,
+                            station: (object["station"] as? String) ?? "",
+                            remote: (object["remote"] as? Bool) ?? false,
+                            onConsole: (object["onConsole"] as? Bool) ?? false)
+    }
+}
+
+/// What `list` answers: the monitors, and the session that looked for them.
+/// The session is the difference between "there is no monitor here" and "this
+/// process is in no position to see one".
+struct AgentListing {
+    let monitors: [RemoteMonitor]
+    let session: AgentSession?
+}
+
 /// What the far end says about the video link at the moment it answered.
 /// A value read while the monitor is re-enumerating is not wrong so much as
 /// meaningless, and without this the caller cannot tell the two apart.
@@ -203,6 +280,7 @@ actor RemoteAgent {
                 throw RemoteAgentError(message: (json["error"] as? String) ?? "agent reported failure")
             }
             lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
+            lastSession = AgentSession.parse(json["session"]) ?? lastSession
             return json
         }
 
@@ -276,12 +354,17 @@ actor RemoteAgent {
             throw RemoteAgentError(message: (json["error"] as? String) ?? "agent reported failure")
         }
         lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
+        lastSession = AgentSession.parse(json["session"]) ?? lastSession
         return json
     }
 
     /// Link quality reported by the most recent call.
     private(set) var lastLinkQuality: LinkQuality = .unknown
     private(set) var lastDisconnectError: String?
+    /// The session the far agent last answered from — `health` and `list` both
+    /// carry it, so this is current after either. Stays nil against an agent
+    /// too old to report one.
+    private(set) var lastSession: AgentSession?
 
     // MARK: Commands
 
@@ -290,15 +373,16 @@ actor RemoteAgent {
         return (json["monitors"] as? Int) ?? 0
     }
 
-    func list() throws -> [RemoteMonitor] {
+    func list() throws -> AgentListing {
         let json = try run(["list"])
-        guard let raw = json["monitors"] as? [[String: Any]] else { return [] }
-        return raw.map {
+        let raw = (json["monitors"] as? [[String: Any]]) ?? []
+        let monitors = raw.map {
             RemoteMonitor(index: ($0["index"] as? Int) ?? 0,
                           description: ($0["description"] as? String) ?? "",
                           device: ($0["device"] as? String) ?? "",
                           deviceID: ($0["deviceId"] as? String) ?? "")
         }
+        return AgentListing(monitors: monitors, session: AgentSession.parse(json["session"]))
     }
 
     func capabilities(monitor: Int) throws -> String {

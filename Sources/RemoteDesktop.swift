@@ -133,62 +133,32 @@ final class RemoteDesktop: ObservableObject {
         let target = sshTarget ?? host
         note("asking \(target) to move the session to the console")
 
-        // `schtasks /run` returns the moment the task is QUEUED, so its exit
-        // status says nothing about tscon. The agent appends one JSON line to
-        // bezel\reclaim.log beside itself when it finishes — "moved" and a
-        // reason — so: note the file's size, start the task, wait for the
-        // file to grow, and read that line. Reading without waiting would
-        // report the PREVIOUS run's verdict as this one's.
-        let script = """
-        $log = "$HOME\\bezel\\reclaim.log"; \
-        $before = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }; \
-        schtasks /run /tn BezelReclaimConsole | Out-Null; \
-        if ($LASTEXITCODE -ne 0) { 'NOTASK'; exit 0 }; \
-        $grew = $false; \
-        for ($i = 0; $i -lt 60; $i++) { \
-            Start-Sleep -Milliseconds 500; \
-            $len = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }; \
-            if ($len -gt $before) { $grew = $true; break } \
-        }; \
-        if ($grew) { Get-Content $log -Tail 1 } else { 'NOVERDICT' }
-        """
-        let reclaim = await Self.run("/usr/bin/ssh",
-                                     ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                                      target, script])
-        let verdict = reclaim.output.split(separator: "\n").last.map(String.init)?
-            .trimmingCharacters(in: .whitespaces) ?? ""
-        guard reclaim.status == 0, !verdict.isEmpty else {
-            note("reclaim: could not run the task — \(reclaim.output)")
-            step = .failed("The session exists but \(target) could not be reached over SSH "
-                         + "to move it to the console: \(reclaim.output)")
-            return
-        }
-        note("reclaim: \(verdict)")
-
-        switch verdict {
-        case "NOTASK":
+        // The task, the ssh call and the verdict parsing live in ConsoleReclaim,
+        // because the Control window has to do exactly the same thing when its
+        // session ends. All that is left here is turning the verdict into the
+        // wording this sheet shows.
+        switch await ConsoleReclaim.reclaim(host: target) {
+        case .moved(let from):
+            note("done — session \(from.map(String.init) ?? "?") is on the console")
+            step = .done
+        case .alreadyActive:
+            note("done — the console was already showing a desktop")
+            step = .done
+        case .notMoved(let reason):
+            note("reclaim: not moved — \(reason)")
+            step = .failed("The session exists but was not moved to the console: " + reason)
+        case .noTask:
+            note("reclaim: BezelReclaimConsole is not installed")
             step = .failed("BezelReclaimConsole is not installed on \(host). "
                          + "Run the agent installer against it again.")
-        case "NOVERDICT":
+        case .noVerdict:
+            note("reclaim: the task reported nothing in 30 s")
             step = .failed("The reclaim task on \(host) started but reported nothing in 30 s. "
                          + "Is the agent there current?")
-        default:
-            // "<timestamp>  {json}" — the verdict is the object.
-            let json = verdict.drop(while: { $0 != "{" })
-            let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
-            let moved = object?["moved"] as? Bool ?? false
-            let reason = object?["reason"] as? String ?? ""
-            if moved {
-                note("done — session \(object?["from"] ?? "?") is on the console")
-                step = .done
-            } else if reason == "console already active" {
-                note("done — the console was already showing a desktop")
-                step = .done
-            } else {
-                let tscon = object?["tscon"] as? String ?? ""
-                step = .failed("The session exists but was not moved to the console: "
-                             + (reason.isEmpty ? (tscon.isEmpty ? verdict : tscon) : reason))
-            }
+        case .unreachable(let output):
+            note("reclaim: could not run the task — \(output)")
+            step = .failed("The session exists but \(target) could not be reached over SSH "
+                         + "to move it to the console: \(output)")
         }
     }
 
@@ -236,27 +206,6 @@ final class RemoteDesktop: ObservableObject {
         }
     }
 
-    private nonisolated static func run(_ path: String, _ arguments: [String]) async
-        -> (status: Int32, output: String) {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: path)
-                process.arguments = arguments
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = pipe
-                do { try process.run() } catch {
-                    continuation.resume(returning: (-1, error.localizedDescription)); return
-                }
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                process.waitUntilExit()
-                continuation.resume(returning: (process.terminationStatus,
-                                                String(decoding: data, as: UTF8.self)
-                                                    .trimmingCharacters(in: .whitespacesAndNewlines)))
-            }
-        }
-    }
 }
 
 /// `withCString` on an Optional, so a nil domain or fingerprint reaches C as
