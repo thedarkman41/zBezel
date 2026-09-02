@@ -906,6 +906,11 @@ private struct KVMMachinesCard: View {
                     newHost = ""
                 }
                 .buttonStyle(.plain)
+                // Greyed while armed, like the picker and the remove button: a
+                // machine added now has no transport (those are opened once, in
+                // enable()), and the chooser would offer a tile that hands
+                // control straight back.
+                .disabled(controller.kvmEnabled)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.accent)
             }

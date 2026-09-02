@@ -63,7 +63,16 @@ final class MonitorController: ObservableObject {
     @Published var selectedID: CGDirectDisplayID?
 
     @Published private(set) var link = LinkReport()
-    @Published private(set) var transport: Transport = .none
+    @Published private(set) var transport: Transport = .none {
+        didSet {
+            // Start watching the input only once there is a channel to read it
+            // over. Starting at launch meant every run began by announcing that
+            // it could not reach the monitor, which is noise that hides the real
+            // thing that line is for: a channel that has genuinely gone away.
+            guard transport.isAvailable != oldValue.isAvailable else { return }
+            if transport.isAvailable { startWatchingInput() } else { stopWatchingInput() }
+        }
+    }
     @Published private(set) var capabilities: Capabilities?
     @Published private(set) var features: [UInt8: FeatureState] = [:]
 
@@ -542,22 +551,29 @@ final class MonitorController: ObservableObject {
         }
         kvm.configurePortal(display: portal)
 
-        // Present in this Mac's display list means the panel is showing this Mac.
-        // Gone means it is showing something else — the monitor itself will not
-        // say which input is live, and 0x60 answers with the last one it was
-        // commanded to rather than the one on screen.
-        kvm.panelShowsMac = present
-        // Presence in the display list OUTRANKS what we last commanded. The lock
-        // deliberately leaves the panel on another machine, so the commanded
-        // value stays on that input; when the panel later returns to the Mac by
-        // itself — Auto Switch, or the monitor's own buttons — nothing tells us,
-        // and the app goes on believing the panel is elsewhere. It then skips the
-        // very switch the user is asking for, because it thinks it is already
-        // there. The display list is the one thing here that cannot lie.
-        kvm.currentInput = present ? kvm.macInput : lastCommandedInput
-        if present && lastCommandedInput != kvm.macInput {
-            lastCommandedInput = kvm.macInput
-            KVMLog.write("panel is back on this Mac; corrected the tracked input")
+        // The display list was once treated as authoritative here, on the
+        // reasoning that it "cannot lie". Through this dock it does: the Mac
+        // enumerates the panel whether or not it is the live input. Measured —
+        // 0x60 read 17 (HDMI) while the Z27k was still listed among this Mac's
+        // displays. Believing it made the app announce "panel is back on this
+        // Mac" while the panel was plainly showing another machine, and then
+        // overwrite the tracked input with DisplayPort, corrupting the one piece
+        // of state the input watcher relies on.
+        //
+        // 0x60 is the honest signal, and it does track changes nobody commanded,
+        // including switches made on the monitor's own buttons. So when there is
+        // a control channel the watcher owns which input is live, and the
+        // display list is used only to choose the portal display.
+        //
+        // Without a control channel there is no reading to prefer, and the
+        // display list is all there is — so the old behaviour stands in.
+        if !haveSettledInput {
+            kvm.panelShowsMac = present
+            kvm.currentInput = present ? kvm.macInput : lastCommandedInput
+            if present && lastCommandedInput != kvm.macInput {
+                lastCommandedInput = kvm.macInput
+                KVMLog.write("panel is back on this Mac (display list); corrected the tracked input")
+            }
         }
     }
 
@@ -586,8 +602,12 @@ final class MonitorController: ObservableObject {
         // screen the user is looking at when they ask it.
         kvm.presentChooser = { [weak self] exit in
             guard let self else { return }
+            // The pick comes back as an INDEX and is applied to kvm.machines, so
+            // the tiles must be built from that same array. kvmMachines is the
+            // editable copy, made equal to it only when the KVM is armed; feed
+            // the chooser from that and a tile labelled Rigel can pick Bellatrix.
             self.machineChooser.show(on: self.selectedID,
-                                     machines: self.kvmMachines,
+                                     machines: self.kvm.machines,
                                      near: exit,
                                      pick: { [weak self] index in
                                          self?.kvm.chooseMachine(at: index)
@@ -626,8 +646,101 @@ final class MonitorController: ObservableObject {
     /// overrules any lock: the lock exists to stop the panel following the
     /// pointer home, and someone reaching for the input list has plainly decided
     /// where they want the panel to be.
+    // MARK: - Following the panel
+
+    /// Notices the input changing and takes the pointer with it, however the
+    /// change was made — including on the monitor's own buttons. See
+    /// InputWatcher for why this polls rather than waiting on an interrupt.
+    private var inputWatcher = InputWatcher()
+    private var inputWatchTask: Task<Void, Never>?
+    /// Set once 0x60 has given a settled reading. Until then the display list is
+    /// the only signal available, however unreliable.
+    private var haveSettledInput = false
+
+    func startWatchingInput() {
+        guard inputWatchTask == nil else { return }   // already watching
+        KVMLog.write("input watch: started")
+        inputWatchTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.pollInput()
+                // Close attention while the KVM is live, a background courtesy
+                // otherwise. Nobody changes inputs faster than a few seconds.
+                let seconds: UInt64 = self.kvm.isEnabled ? 3 : 15
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            }
+        }
+    }
+
+    func stopWatchingInput() {
+        guard inputWatchTask != nil else { return }
+        KVMLog.write("input watch: stopped — no control channel to the monitor")
+        inputWatchTask?.cancel()
+        inputWatchTask = nil
+    }
+
+    private func pollInput() async {
+        guard transport.isAvailable else { return }
+        // Never read over the top of a switch we are performing: that reading is
+        // taken mid-renegotiation, which is the least trustworthy moment there is.
+        guard !inputSwitchRunning else { return }
+
+        let readings = await reread(codes: [VCP.inputSelect.code])
+        guard let value = readings[VCP.inputSelect.code] else {
+            KVMLog.write("input watch: no reading from 0x60")
+            return
+        }
+
+        guard let reading = inputWatcher.observe(value,
+                                                 machines: kvm.machines,
+                                                 macInput: kvm.macInput) else { return }
+
+        // Publish the state on EVERY settled reading, not only when something
+        // needs doing. This is what the pointer crossing consults to decide
+        // where to hand control: with the panel showing a machine, a crossing at
+        // the edge goes to that machine. Reporting only on change meant a launch
+        // with the panel already elsewhere left the crossing believing the panel
+        // was on this Mac, so pushing at the edge did nothing.
+        //
+        // The controller cannot read any of this back on its own and otherwise
+        // only learns what it commanded.
+        let settled = reading.value
+        lastCommandedInput = settled
+        lastRequestedInput = settled   // observed, not commanded — see set() for why it matters
+        kvm.currentInput = settled
+        // And this, not the display list, is what "the panel is showing the Mac"
+        // means from here on: see the note in syncKVMPortal.
+        let showsMac = (settled == kvm.macInput)
+        if kvm.panelShowsMac != showsMac {
+            kvm.panelShowsMac = showsMac
+            KVMLog.write("input watch: panel is showing "
+                       + (showsMac ? "this Mac" : HPProfile.inputLabel(settled)))
+        }
+        haveSettledInput = true
+
+        guard let action = reading.action else { return }
+
+        switch action {
+        case .release:
+            KVMLog.write("input watch: returned to this Mac; releasing the lock")
+            kvm.clearLock()
+        case .lock(let index, let why):
+            let host = kvm.machines[index].host
+            if !kvm.lockTo(machineIndex: index, why: why) {
+                KVMLog.write("input watch: wanted to lock to \(host) but could not")
+            }
+        case .unknownInput(let value):
+            KVMLog.write("input watch: panel moved to \(HPProfile.inputLabel(value)) "
+                       + "(0x\(String(value, radix: 16))) — no machine configured for it")
+        }
+    }
+
     func requestMonitorInput(_ value: UInt16, byHand: Bool = true) {
-        if byHand { kvm.clearLock() }
+        if byHand { kvm.followManualInput(value) }
+        // We are about to move the panel ourselves, so the watcher should adopt
+        // the new value as its baseline rather than treat our own switch as
+        // something to follow.
+        inputWatcher.resync(to: value)
         desiredInput = value
         lastCommandedInput = value
         guard !inputSwitchRunning else { return }
@@ -642,7 +755,7 @@ final class MonitorController: ObservableObject {
 
                 if target == lastRequestedInput { continue }   // already going there
                 lastRequestedInput = target
-                await set(code: VCP.inputSelect.code, value: target)
+                await set(code: VCP.inputSelect.code, value: target, byHand: false)
 
                 // Let the panel finish. A write landing mid-renegotiation is
                 // simply lost, and the reads during it report the transition
@@ -1430,14 +1543,31 @@ final class MonitorController: ObservableObject {
 
     /// Write, then confirm against the monitor. For discrete controls, where one
     /// write per interaction is the whole story.
-    func set(code: UInt8, value: UInt16) async {
+    func set(code: UInt8, value: UInt16, byHand: Bool = true) async {
         // Every path that changes the input from the interface arrives here — the
         // menu bar list and the Input tab both call set() rather than
         // requestMonitorInput. Choosing an input by hand overrules a lock, and
         // catching it at this one point means a new control cannot forget to.
         if code == VCP.inputSelect.code {
-            kvm.clearLock()
+            // A person picked this — menu-bar icon, its pulldown, or the Input
+            // tab all arrive here with byHand's default of true. That pins the
+            // panel and holds the pointer to the machine on that input (the
+            // Mac's own input lets go). The KVM's own pointer-driven write also
+            // lands here, via requestMonitorInput's deferred task, and says
+            // byHand: false — without that, every ordinary crossing engaged a
+            // lock nobody clicked half a second later, and the way home was then
+            // refused as "locked". The default stays true on purpose: a control
+            // added later that forgets the parameter locks, rather than silently
+            // breaking Rule 2.
+            if byHand { kvm.followManualInput(value) }
             lastCommandedInput = value
+            // The coalescer in requestMonitorInput skips a write when the target
+            // equals lastRequestedInput, and that was only ever set inside its
+            // own task — so after a by-hand switch it went stale and a later
+            // return to DisplayPort could be swallowed outright. Keep it in step
+            // with reality: "the input the panel is heading to or resting on".
+            lastRequestedInput = value
+            inputWatcher.resync(to: value)
         }
         if case .proxy = transport {
             // The proxy path writes and reads everything back in one exchange,
