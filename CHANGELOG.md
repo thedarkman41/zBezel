@@ -2,6 +2,26 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.53 — 2026-09-02
+
+**Close the machine chooser when the pointer leaves the edge**
+
+The chooser — the drawer of machine tiles that slides out when the pointer
+reaches the panel's right edge — only ever closed on a click: a tile to pick,
+or the dimmed desktop to cancel. Move the pointer back off the edge without
+picking and it just sat there, a full-screen overlay holding the desktop
+hostage until you clicked your way out.
+
+Now it slides shut on its own. The KVM tap already sees every pointer move
+(that is how it catches the crossing in the first place), so while the chooser
+is open it watches for the pointer moving well left of the tiles — past a band
+that clears them with margin to spare — and treats that as "changed my mind,
+going back to the Mac": it closes the drawer and re-arms the edge, the same
+teardown a cancel does. The close is animated now too, the tiles sliding back
+behind the edge rather than blinking out, so a move-away reads as pushing the
+drawer shut. The chooser's open/shut is driven by a small observable state so
+the window can finish that animation before it is removed.
+
 ## 0.1.52 — 2026-09-02
 
 **H.264 for the Control viewer, via openh264**

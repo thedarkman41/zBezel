@@ -312,6 +312,16 @@ final class KVMController {
     /// panel is already showing a machine the answer is that machine.
     /// Carries the point the pointer left at, so the tiles can appear beside it.
     var presentChooser: ((CGPoint) -> Void)?
+    /// The chooser is open and the pointer has moved back off the edge without
+    /// picking — slide the drawer shut and hand the desktop back. Wired to the
+    /// same teardown as a cancel; the tap below decides when to fire it.
+    var dismissChooser: (() -> Void)?
+
+    /// How far in from the doorway edge the chooser's tiles (and a margin) reach.
+    /// While the pointer is inside this band the drawer stays; moving left of it
+    /// is the "changed my mind, going back to the Mac" gesture that closes it.
+    /// The tiles are ~190pt wide against a 22pt margin, so this clears them.
+    static let chooserHotZone: CGFloat = 300
 
     /// True while the chooser is on screen. The pointer stays on the Mac and
     /// events pass through untouched — the user needs it to click a tile — and
@@ -751,6 +761,14 @@ final class KVMController {
                                   || type == .otherMouseDragged)
                     handOver(at: where_, doorway: doorway, dragging: isDrag)
                     return nil
+                } else if choosing, let crossing = pendingCrossing,
+                          where_.x < crossing.doorway.maxX - KVMController.chooserHotZone {
+                    // The tiles are out at the edge and the pointer has moved well
+                    // left of them without picking one: the user is heading back
+                    // to the Mac. Slide the drawer shut and re-arm the edge, using
+                    // the doorway the chooser opened for rather than the recomputed
+                    // one, which can shift while the question is on screen.
+                    dismissChooser?()
                 }
             }
             return Unmanaged.passUnretained(event)

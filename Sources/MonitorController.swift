@@ -618,6 +618,14 @@ final class MonitorController: ObservableObject {
                                          self?.syncKVMState()
                                      })
         }
+        // Pointer moved back off the edge with the chooser still open: slide it
+        // shut and stand the crossing down, the same teardown a cancel does.
+        kvm.dismissChooser = { [weak self] in
+            guard let self else { return }
+            self.machineChooser.close(animated: true)
+            self.kvm.cancelChoice()
+            self.syncKVMState()
+        }
     }
 
     private var desiredInput: UInt16?
