@@ -7,6 +7,7 @@
 
 #include "ddc.h"
 #include "rdp.h"
+#include "rdp_session.h"
 #include <IOKit/IOKitLib.h>
 #include <IOKit/graphics/IOGraphicsLib.h>
 

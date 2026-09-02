@@ -40,12 +40,15 @@ JANSSON="$(brew --prefix jansson)"
 clang -c -O2 -Wall -o "$OBJ/rdp.o" "$REPO/Sources/rdp.c" \
     -I"$FREERDP/include/freerdp3" -I"$FREERDP/include/winpr3"
 
+clang -c -O2 -Wall -o "$OBJ/rdp_session.o" "$REPO/Sources/rdp_session.c" \
+    -I"$FREERDP/include/freerdp3" -I"$FREERDP/include/winpr3"
+
 swiftc -O -parse-as-library \
   -import-objc-header "$REPO/Sources/Bridging.h" \
   -I "$FREERDP/include/freerdp3" -I "$FREERDP/include/winpr3" \
   -o "$BIN/zBezel" \
   "$REPO"/Sources/*.swift \
-  "$OBJ/ddc.o" "$OBJ/rdp.o" \
+  "$OBJ/ddc.o" "$OBJ/rdp.o" "$OBJ/rdp_session.o" \
   "$FREERDP/lib/libfreerdp-client3.a" \
   "$FREERDP/lib/libfreerdp3.a" \
   "$FREERDP/lib/libwinpr3.a" \

@@ -884,6 +884,20 @@ private struct KVMMachinesCard: View {
                     }
                     .buttonStyle(.plain)
                     .help("View \(machine.host)'s screen, live")
+                    // The heavier path: a real RDP session with pixels, which
+                    // CAN see and answer a UAC prompt or the sign-in screen.
+                    // Connecting takes the console over until you disconnect.
+                    Button {
+                        RDPControl.shared.open(host: machine.host, name: machine.name,
+                                               size: CGSize(width: machine.width, height: machine.height))
+                    } label: {
+                        Image(systemName: "cursorarrow.rays")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Control \(machine.host) over RDP — sees the sign-in / UAC screen; "
+                        + "takes its console over while connected")
                     Button {
                         controller.kvmMachines.remove(at: i)
                     } label: {

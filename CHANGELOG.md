@@ -2,6 +2,40 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.50 — 2026-09-02
+
+**Control a machine over RDP, UAC and all, in a window on the Mac**
+
+The KVM row's second button opens a live RDP session with pixels. Unlike the
+View stream, this one CAN see and answer the secure desktop — a UAC prompt or
+the sign-in screen — because Windows renders that into the RDP session while
+forbidding a local process from scraping it. Proven against rigel: the window
+came up showing a real "Do you want to allow this app to make changes"
+elevation prompt that the screen-scrape returns black for.
+
+FreeRDP was already linked for Wake Console, where pixels were turned OFF
+because that path only needed a session to exist. This turns them back on:
+Sources/rdp_session.c is a long-lived session that runs FreeRDP's software
+GDI, hands each changed rectangle of the 32-bit BGRA framebuffer to a
+callback, and forwards mouse and keyboard the other way. The remote's own
+compression carries the picture — RemoteFX and NSCodec, both built into
+FreeRDP and needing no external decoder; H.264/AVC444 would need FreeRDP
+rebuilt with openh264, so the graphics pipeline stays off for now. Input is
+queued and drained on the session's own thread, so the transport is only ever
+touched by its owner.
+
+On the Mac: RDPSession wraps the C session and keeps the backing store;
+RDPControlWindow hosts an RDPView that draws it and turns Mac mouse and
+keyboard into RDP input, with a full Mac-to-RDP scancode map so a password
+types and the arrows work, and a Ctrl+Alt+Del toolbar button for the one
+sequence the OS will not let you type. The password comes from Beacon
+(zBezel-rdp-<host>) and the account from Wake Console's per-host store.
+
+The cost, stated plainly on the button: connecting redirects the machine's
+session to this window, so its physical monitor drops to the lock screen
+until you disconnect. For a box you cannot otherwise reach — the whole reason
+this exists — that is exactly right. Closing the window hands the console back.
+
 ## 0.1.49 — 2026-09-01
 
 **A View button, so a machine's screen is one click away**
