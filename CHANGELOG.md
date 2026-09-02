@@ -2,6 +2,53 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.46 — 2026-09-01
+
+**Give every drag its own ghost, and pin the bar to the window**
+
+A drag outlives its gesture. A large file is still landing long after the
+user let go of it, and by then they are dragging the next one -- or dragging
+a text selection across, which crosses exactly like a file drag and turns
+out to hold no files. Both sides kept ONE drag's worth of state, and an
+adversarial review of the drop work found what that costs: a second drag
+overwrote the first's stage, so the first's scp finishing sent DROP under
+the second's name and delivered a half-copied file; a text-selection
+crossing reset the slot and stranded a copy in staging forever; a folder's
+late size correction resurrected a ghost that nothing would ever clear.
+
+STATE IS PER STAGE NOW, on both sides. The Mac keeps a table of pending
+drags, each with its own host and its own two conditions for delivery (the
+copy finishing, the user letting go, in either order); every scp callback
+names its stage and is ignored if that stage is gone. MARK carries its stage
+and waits for the "D" it refers to, since the release can beat the
+pasteboard read. Messages go to the machine the bytes went to, not the one
+under the pointer when they land. "D - <stage>" stands one drag down; a
+bare "D -" clears everything. Abandoning a drag now kills its scp instead of
+leaving it saturating the link, and the agent deletes the staging folder.
+
+The agent's DragGhost is a registry of Ghost objects with a window each,
+driven by one timer on one hidden dispatcher form, so a second drag never
+disturbs one still landing. Drop targets and placeholders are per stage too.
+
+THE CLOCKS RUN FROM THE LAST SIGN OF LIFE. The two-minute self-clear was
+measured from the release, so a five-minute copy lost its bar at two
+minutes -- the case the bar exists for -- and a failure that arrived after
+that was never drawn. Now the clock restarts whenever bytes arrive: two
+minutes of nothing goes dormant and comes back if the copy resumes, an hour
+of nothing gives up, a failure always wakes the ghost for its four seconds.
+Once DROP arrives the bar freezes full and turns green for the move into
+place; measuring staging then ran it backwards as the move drained it.
+
+THE BAR RIDES WITH THE WINDOW. Its place was a screen rectangle from a UI
+Automation query rerun every 400 ms, so dragging the Explorer window left
+the bar behind until the next answer. The item's place is now an offset
+from the window's frame, re-pinned every tick from GetWindowRect, and an
+EVENT_OBJECT_LOCATIONCHANGE hook (installed only while a ghost is anchored)
+follows each step of a window drag in the same message-loop pass.
+Automation only corrects the item's place within the frame, and only trusts
+a reading the frame held still for. What remains is one compositor frame,
+the floor for a separate top-level window.
+
 ## 0.1.45 — 2026-09-01
 
 **Answer FreeRDP's AuthenticateEx, so the gate is warning-clean again**

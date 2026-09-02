@@ -1103,21 +1103,46 @@ internal static class BezelAgent
                 break;
 
             case "MARK":
-                // The user let go. Resolve the destination NOW, while the pointer
-                // is still where they released it -- the copy may not have
-                // finished, and by the time it does the pointer will have moved.
-                // The ghost stays, parked where it was dropped, filling up: for a
-                // large file that bar is the only sign anything is happening.
-                DragGhost.Park();
-                DropTarget.Mark();
+                {
+                    // "MARK <stage>": the user let go of that drag. Resolve the
+                    // destination NOW, while the pointer is still where they
+                    // released it -- the copy may not have finished, and by the
+                    // time it does the pointer will have moved. The ghost stays,
+                    // parked where it was dropped, filling up: for a large file
+                    // that bar is the only sign anything is happening.
+                    // Park FIRST: Mark() calls UI Automation and a late-bound
+                    // shell enumeration and can take hundreds of ms, during which
+                    // an unparked ghost would keep chasing the cursor and the
+                    // offset captured below would be wrong.
+                    var stage = parts.Length >= 2 ? parts[1] : DragGhost.CarryingStage;
+                    if (stage == null) { BezelAgent.Log("MARK with nothing in hand"); break; }
+                    DragGhost.Park(stage);
+                    DropTarget.Mark(stage);
+                    DragGhost.AttachAnchor(stage, DropTarget.MarkedAnchor(stage));
+                    // Then, off this thread: put a placeholder in the folder so
+                    // Explorer draws a real item in its real slot, find that item,
+                    // and snap the ghost down into it.
+                    DropTarget.PlaceholderAndSnap(stage);
+                }
                 break;
 
             case "DROP":
-                DragGhost.Hide();
-                // The bytes have landed. Move that drag's folder to the spot
-                // remembered at MARK.
-                BezelAgent.Log("drop -> " + DropTarget.Deliver(
-                    parts.Length >= 2 ? parts[1] : null));
+                {
+                    // The bytes have landed. Move that drag's folder to the spot
+                    // remembered at MARK — OFF this thread, because this is the
+                    // single input-pipe reader and a large or cross-volume move
+                    // here froze every pointer and key event for its duration.
+                    // The ghost stays up, bar full, until the move is really done.
+                    var stage = parts.Length >= 2 ? parts[1] : null;
+                    DragGhost.Delivering(stage);
+                    ThreadPool.QueueUserWorkItem(delegate
+                    {
+                        bool ok;
+                        var result = DropTarget.Deliver(stage, out ok);
+                        BezelAgent.Log("drop " + stage + " -> " + result);
+                        if (ok) DragGhost.Hide(stage, false); else DragGhost.Fail(stage, result);
+                    });
+                }
                 break;
 
             case "P":
@@ -1141,7 +1166,9 @@ internal static class BezelAgent
                 break;
 
             case "D":
-                // "D <stage> <totalBytes> <label...>" shows it; "D -" hides it.
+                // "D <stage> <totalBytes> <label...>" shows it. "D - <stage>"
+                // hides that one drag: it was abandoned and its bytes are
+                // unwanted. A bare "D -" clears every ghost at once.
                 if (parts.Length >= 4 && parts[1] != "-")
                 {
                     long total;
@@ -1149,7 +1176,8 @@ internal static class BezelAgent
                     DragGhost.Show(parts[1], total,
                                    string.Join(" ", parts, 3, parts.Length - 3));
                 }
-                else { DragGhost.Hide(); DragGhost.SetIcon(null); }
+                else if (parts.Length >= 3 && parts[1] == "-") DragGhost.Hide(parts[2], true);
+                else DragGhost.HideAll();
                 break;
 
             case "L":
@@ -2305,23 +2333,310 @@ internal static class LockOverlay
 }
 
 
-/// What the pointer is carrying, drawn on this machine while it crosses.
+/// The ghosts: what this machine draws for a drag that came from the Mac.
 ///
-/// A wireframe page with the file's name, following the cursor. It exists so a
-/// drag that started on the Mac still looks like a drag over here — without it
-/// the pointer simply arrives empty-handed and the user has no reason to believe
-/// anything is in flight.
-///
-/// It follows the cursor from THIS side, on a timer, rather than being told where
-/// to go by the Mac. The Mac already sends a position for every mouse move; a
-/// second message per move to drag a window along with it would double the
-/// traffic on a pipe whose whole job is to be quick.
+/// One per drag in flight, not one for all. A large file is still landing long
+/// after the user let go of it, and by then they may be dragging the next one;
+/// so each stage has its own window and its own state, every message from the
+/// Mac names the stage it is about, and a message for a stage that is not here
+/// is about a drag that is already over and does nothing. At most one ghost is
+/// Carrying — the one in hand — while any number sit in their Explorer items
+/// filling up.
 internal static class DragGhost
 {
+    /// What a ghost is doing. Carrying follows the cursor; Parked sits at the
+    /// drop point, anchored to the window if there was one; Snapping is the
+    /// animation from the page down into the Explorer item; Item is the thin
+    /// progress bar clipped to that item until the real file replaces it.
+    internal enum Mode { Carrying, Parked, Snapping, Item }
+
+    /// One drag's state. Written from the pipe reader, the item tracker and
+    /// the UI thread, so every field lives under DragGhost's lock and Follow()
+    /// reads them in one Snapshot. `Form` is the exception: UI thread only.
+    internal sealed class Ghost
+    {
+        public readonly string Stage;
+        public string Label = "";
+        public long Total;
+        public Image Icon;
+        public GhostForm Form;
+
+        public Mode Mode = Mode.Carrying;
+        public IntPtr Anchor;            // Explorer window the drop landed in, or Zero
+        public Point AnchorOffset;       // parked page top-left relative to that window
+        public Point ParkedAt;
+        /// The last sign of life: the release, bytes arriving, the drop. The
+        /// self-clear clocks run from here rather than from the release, so a
+        /// slow copy is never mistaken for a dead one.
+        public int IdleSince;
+        public int FailedTicks;
+        public string FailReason;
+        public bool Delivering;          // DROP has arrived: the bar is full, whatever staging says
+        public Rectangle LastBounds;     // where the page was last drawn, for the snap to start from
+
+        public Rectangle SnapFrom, ItemRect;
+        public Point ItemOffset;         // the item's top-left relative to Anchor's frame
+        public int SnapStart;
+        public string ItemName;
+        public IntPtr ItemRoot;
+        public bool Tracking;
+
+        public double FracValue;
+        public int FracAt;
+
+        public Ghost(string stage) { Stage = stage; IdleSince = Environment.TickCount; }
+    }
+
+    private static readonly object _sync = new object();
+    private static readonly Dictionary<string, Ghost> _ghosts = new Dictionary<string, Ghost>();
     private static Thread _ui;
-    private static GhostForm _form;
-    private static string _label = "";
-    private static string _stage = "";
+    private static Dispatcher _dispatcher;
+    /// "DI" arrives before the "D" it belongs to; held for the next new ghost.
+    private static Image _nextIcon;
+
+    private static Ghost Get(string stage)
+    {
+        if (stage == null) return null;
+        lock (_sync) { Ghost g; return _ghosts.TryGetValue(stage, out g) ? g : null; }
+    }
+
+    private static bool Alive(Ghost g)
+    {
+        lock (_sync) { Ghost cur; return _ghosts.TryGetValue(g.Stage, out cur) && cur == g; }
+    }
+
+    /// The drag in hand, if any: what a MARK that names no stage is about.
+    internal static string CarryingStage
+    {
+        get
+        {
+            lock (_sync)
+                foreach (var g in _ghosts.Values) if (g.Mode == Mode.Carrying) return g.Stage;
+            return null;
+        }
+    }
+
+    public static void Show(string stage, long total, string label)
+    {
+        if (string.IsNullOrEmpty(stage)) return;
+        Ghost g; bool fresh;
+        lock (_sync)
+        {
+            // A second "D" for a ghost already here only refines the numbers
+            // (the Mac re-sends once it has walked a folder for its true size).
+            // It must not un-park a ghost the user has already dropped.
+            fresh = !_ghosts.TryGetValue(stage, out g);
+            if (fresh)
+            {
+                g = new Ghost(stage);
+                g.Icon = _nextIcon;
+                _nextIcon = null;
+                _ghosts[stage] = g;
+            }
+            g.Label = label ?? "";
+            g.Total = total;
+        }
+        if (!fresh) { BezelAgent.Log("ghost: " + stage + " size corrected to " + total); return; }
+
+        EnsureUI();
+        var ghost = g;
+        OnUI(delegate
+        {
+            var f = new GhostForm(ghost);
+            ghost.Form = f;
+            f.Visible = true;
+            f.TopMost = true;
+            f.Follow();
+        });
+        BezelAgent.Log("ghost: carrying " + g.Label + " (" + stage + ")");
+    }
+
+    /// Stop following the cursor and stay where it was dropped.
+    public static void Park(string stage)
+    {
+        var g = Get(stage); if (g == null) return;
+        var p = Cursor.Position;
+        lock (_sync)
+        {
+            g.Mode = Mode.Parked;
+            g.ParkedAt = new Point(p.X + 16, p.Y + 16);   // matches Follow()'s placement
+            g.IdleSince = Environment.TickCount;
+        }
+    }
+
+    /// Ride inside this window from now on. Zero means the desktop: stay put.
+    public static void AttachAnchor(string stage, IntPtr hwnd)
+    {
+        var g = Get(stage); if (g == null) return;
+        lock (_sync)
+        {
+            g.Anchor = IntPtr.Zero;
+            if (hwnd == IntPtr.Zero) return;
+            RECT r;
+            if (!GetWindowRect(hwnd, out r)) return;
+            g.AnchorOffset = new Point(g.ParkedAt.X - r.Left, g.ParkedAt.Y - r.Top);
+            g.Anchor = hwnd;
+        }
+        BezelAgent.Log("ghost: " + stage + " anchored to window " + hwnd);
+    }
+
+    /// The window the ghost was riding in has closed. The bar has nowhere to
+    /// be, so it is a page again, frozen where the drop was.
+    private static void WindowGone(Ghost g)
+    {
+        lock (_sync)
+        {
+            g.Anchor = IntPtr.Zero;
+            if (g.Mode == Mode.Item || g.Mode == Mode.Snapping) g.Mode = Mode.Parked;
+        }
+    }
+
+    /// The placeholder is in the folder and Explorer has drawn it: go and be it.
+    ///
+    /// The item's place is kept relative to the window's frame, not as a
+    /// screen rectangle. While the user drags the window the item keeps its
+    /// place inside it, and the frame is a microsecond call where the
+    /// Automation query that found the item takes tens of milliseconds and is
+    /// stale by the time it answers. So Follow() pins the bar to the frame
+    /// every tick, and the tracker below only corrects where the item sits
+    /// WITHIN the frame when Explorer scrolls or re-sorts.
+    public static void SnapToItem(string stage, IntPtr root, string name, Rectangle item)
+    {
+        var g = Get(stage); if (g == null) return;
+        var offset = item.Location;
+        RECT r;
+        if (root != IntPtr.Zero && GetWindowRect(root, out r)) offset = new Point(item.X - r.Left, item.Y - r.Top);
+        lock (_sync)
+        {
+            if (g.Mode != Mode.Parked) return;
+            g.Mode = Mode.Snapping;
+            g.SnapFrom = g.LastBounds;
+            g.ItemRect = item;
+            g.ItemOffset = offset;
+            g.ItemName = name;
+            g.ItemRoot = root;
+            g.SnapStart = Environment.TickCount;
+            g.IdleSince = g.SnapStart;
+        }
+        BezelAgent.Log("ghost: " + stage + " snapping into " + name + " at " + item);
+        StartTracking(g);
+    }
+
+    /// Explorer re-sorts and scrolls; keep finding the item so the bar stays on
+    /// it. Off the UI thread: a UI Automation query can take tens of ms.
+    private static void StartTracking(Ghost g)
+    {
+        lock (_sync) { if (g.Tracking) return; g.Tracking = true; }
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                while (true)
+                {
+                    Thread.Sleep(400);
+                    IntPtr root; string name; Mode mode;
+                    lock (_sync) { root = g.ItemRoot; name = g.ItemName; mode = g.Mode; }
+                    if (!Alive(g) || (mode != Mode.Item && mode != Mode.Snapping)) break;
+
+                    // The reading is only good if the frame held still across
+                    // the query; otherwise the offset would carry the move.
+                    RECT before = new RECT(), after = new RECT();
+                    bool framed = root != IntPtr.Zero && GetWindowRect(root, out before);
+                    var found = DropTarget.FindItemRect(root, name);
+                    if (!found.HasValue) continue;
+                    if (root == IntPtr.Zero) { lock (_sync) g.ItemRect = found.Value; continue; }
+                    if (!framed || !GetWindowRect(root, out after)
+                        || after.Left != before.Left || after.Top != before.Top) continue;
+                    lock (_sync)
+                    {
+                        g.ItemRect = found.Value;
+                        g.ItemOffset = new Point(found.Value.X - after.Left, found.Value.Y - after.Top);
+                    }
+                }
+            }
+            finally { lock (_sync) g.Tracking = false; }
+        });
+    }
+
+    /// Where the item is right now: the frame's position plus the offset.
+    internal static Rectangle ItemBounds(IntPtr anchor, Point itemOffset, Rectangle itemRect)
+    {
+        RECT r;
+        if (anchor != IntPtr.Zero && GetWindowRect(anchor, out r))
+            return new Rectangle(r.Left + itemOffset.X, r.Top + itemOffset.Y, itemRect.Width, itemRect.Height);
+        return itemRect;
+    }
+
+    internal static void NoteBounds(Ghost g, Rectangle b) { lock (_sync) g.LastBounds = b; }
+    internal static void FinishSnap(Ghost g) { lock (_sync) if (g.Mode == Mode.Snapping) g.Mode = Mode.Item; }
+
+    /// DROP has arrived: from here the bar is full and stays up until the move
+    /// into place is really done. Staging is being emptied by that move, so
+    /// measuring it now would run the bar backwards.
+    public static void Delivering(string stage)
+    {
+        var g = Get(stage); if (g == null) return;
+        lock (_sync) { g.Delivering = true; g.IdleSince = Environment.TickCount; }
+    }
+
+    /// The move failed or the Mac went away. Show why, briefly, then clear.
+    /// Wakes a dormant ghost: a failure that arrives after the copy stalled
+    /// is exactly the one that must be seen.
+    public static void Fail(string stage, string reason)
+    {
+        var g = Get(stage);
+        BezelAgent.Log("ghost: " + stage + " FAILED " + reason + (g == null ? " (no ghost to show it)" : ""));
+        if (g == null) return;
+        lock (_sync)
+        {
+            g.FailReason = reason ?? "failed";
+            g.FailedTicks = Environment.TickCount;
+            g.Delivering = false;
+            g.IdleSince = g.FailedTicks;
+        }
+        OnUI(delegate { if (g.Form != null && !g.Form.IsDisposed) g.Form.Invalidate(); });
+    }
+
+    /// This drag is over. `discardBytes` for a drag that was abandoned: its
+    /// staging folder is unwanted, and the scp that was filling it has been
+    /// stopped by the Mac.
+    public static void Hide(string stage, bool discardBytes)
+    {
+        var g = Get(stage);
+        if (g != null) Remove(g);
+        DropTarget.Discard(stage);
+        if (discardBytes) DropTarget.ForgetStaging(stage);
+    }
+
+    /// Everything, at once: the Mac stood the whole KVM down.
+    public static void HideAll()
+    {
+        List<Ghost> all;
+        lock (_sync) { all = new List<Ghost>(_ghosts.Values); }
+        foreach (var g in all) Remove(g);
+        DropTarget.DiscardAll();
+        SetIcon(null);
+    }
+
+    private static void Remove(Ghost g)
+    {
+        lock (_sync)
+        {
+            Ghost cur;
+            if (_ghosts.TryGetValue(g.Stage, out cur) && cur == g) _ghosts.Remove(g.Stage);
+        }
+        OnUI(delegate
+        {
+            var f = g.Form;
+            g.Form = null;
+            if (f != null)
+            {
+                try { f.Close(); f.Dispose(); }
+                catch (Exception e) { BezelAgent.Log("ghost: " + e.Message); }
+            }
+            if (g.Icon != null) { g.Icon.Dispose(); g.Icon = null; }
+        });
+    }
 
     /// The icon Finder shows for whatever is being dragged, sent over as a PNG
     /// before the ghost appears. Drawn instead of the hand-made page, so the
@@ -2330,9 +2645,6 @@ internal static class DragGhost
     /// only means "a file".
     ///
     /// Null when the Mac sent nothing, and the drawn page stands in.
-    private static Image _icon;
-    private static readonly object _iconLock = new object();
-
     public static void SetIcon(byte[] png)
     {
         Image next = null;
@@ -2348,111 +2660,202 @@ internal static class DragGhost
             }
             catch (Exception e) { BezelAgent.Log("drag icon: " + e.Message); }
         }
-        lock (_iconLock)
+        lock (_sync)
         {
-            if (_icon != null) _icon.Dispose();
-            _icon = next;
+            if (_nextIcon != null) _nextIcon.Dispose();
+            _nextIcon = next;
         }
     }
-
-    private static Image CurrentIcon()
-    {
-        lock (_iconLock) { return _icon; }
-    }
-    private static long _total;
-    private static bool _parked;
 
     /// How much of this drag has landed, measured rather than estimated: the
     /// bytes actually present in its staging folder against the total the Mac
     /// said it was sending. No round trips -- both numbers are known here.
-    internal static double Fraction()
+    internal static double Fraction(Ghost g)
     {
-        if (_total <= 0 || string.IsNullOrEmpty(_stage)) return 0;
+        int now = Environment.TickCount;
+        string stage; long total;
+        lock (_sync)
+        {
+            if (g.Delivering) return 1.0;
+            // Cached: this walked the staging tree at 60 Hz from the paint timer.
+            if (g.FracAt != 0 && now - g.FracAt < 150) return g.FracValue;
+            g.FracAt = now;
+            stage = g.Stage; total = g.Total;
+        }
+        var v = ComputeFraction(stage, total);
+        lock (_sync)
+        {
+            if (v > g.FracValue) g.IdleSince = now;   // bytes are moving: not dead
+            g.FracValue = v;
+        }
+        return v;
+    }
+
+    private static double ComputeFraction(string stage, long total)
+    {
+        if (total <= 0 || string.IsNullOrEmpty(stage)) return 0;
         try
         {
-            var dir = System.IO.Path.Combine(DropTarget.Staging, _stage);
+            var dir = System.IO.Path.Combine(DropTarget.Staging, stage);
             if (!System.IO.Directory.Exists(dir)) return 0;
             long have = 0;
-            foreach (var f in System.IO.Directory.GetFiles(dir))
-                have += new System.IO.FileInfo(f).Length;
-            return Math.Max(0, Math.Min(1, (double)have / _total));
+            // Recursive: a dropped folder is a subdirectory of the stage. The
+            // per-file try matters — scp replaces files between enumeration and
+            // stat, and one FileNotFound must not zero the entire bar.
+            foreach (var f in System.IO.Directory.GetFiles(dir, "*", System.IO.SearchOption.AllDirectories))
+            {
+                try { have += new System.IO.FileInfo(f).Length; } catch { }
+            }
+            return Math.Max(0, Math.Min(1, (double)have / total));
         }
         catch { return 0; }
     }
 
-    internal static bool IsParked { get { return _parked; } }
-
-    /// Stop following the cursor and stay where it was dropped.
-    public static void Park()
+    /// Follow()'s view of a ghost, taken in one lock so the fields cannot
+    /// change under it mid-decision.
+    internal static void Snapshot(Ghost g, out Mode mode, out IntPtr anchor, out Point offset, out Point parkedAt,
+                                  out int idleSince, out int failedTicks, out bool delivering,
+                                  out Rectangle snapFrom, out Rectangle itemRect, out Point itemOffset, out int snapStart)
     {
-        _parked = true;
-    }
-
-    public static void Show(string stage, long total, string label)
-    {
-        _label = label ?? "";
-        _stage = stage ?? "";
-        _total = total;
-        _parked = false;
-        EnsureUI();
-        var f = _form;
-        if (f == null) { BezelAgent.Log("ghost: no form"); return; }
-        try
+        lock (_sync)
         {
-            f.BeginInvoke((MethodInvoker)delegate
-            {
-                f.Visible = true;
-                f.TopMost = true;
-                f.Follow();
-                f.Invalidate();
-            });
-            BezelAgent.Log("ghost: carrying " + _label);
+            mode = g.Mode; anchor = g.Anchor; offset = g.AnchorOffset; parkedAt = g.ParkedAt;
+            idleSince = g.IdleSince; failedTicks = g.FailedTicks; delivering = g.Delivering;
+            snapFrom = g.SnapFrom; itemRect = g.ItemRect; itemOffset = g.ItemOffset; snapStart = g.SnapStart;
         }
-        catch (Exception e) { BezelAgent.Log("ghost: " + e.Message); }
     }
+    internal static string FailReason(Ghost g) { lock (_sync) return g.FailReason; }
+    internal static bool IsDelivering(Ghost g) { lock (_sync) return g.Delivering; }
 
-    public static void Hide()
-    {
-        var f = _form;
-        if (f == null) return;
-        try { f.BeginInvoke((MethodInvoker)delegate { f.Visible = false; }); }
-        catch (InvalidOperationException) { }
-    }
+    // MARK: the UI thread
 
     private static void EnsureUI()
     {
         if (_ui != null) return;
         _ui = new Thread(delegate ()
         {
-            // Do NOT set Size here. GhostForm sizes itself to the page it draws
-            // (PageW + 20 by PageH + LabelH); overriding it with the older
-            // W by H left the window shorter than the page, so the bottom of the
-            // sheet and the whole label strip fell outside the window and the
-            // drag showed about half an icon.
-            var form = new GhostForm { Visible = false };
-            var forced = form.Handle;
+            var d = new Dispatcher();
+            var forced = d.Handle;
             GC.KeepAlive(forced);
-            _form = form;
-            Application.Run(new ApplicationContext(form));
+            _dispatcher = d;
+            Application.Run(new ApplicationContext(d));
         });
         _ui.IsBackground = true;
         _ui.SetApartmentState(ApartmentState.STA);
         _ui.Start();
-        for (int i = 0; i < 100 && (_form == null || !_form.IsHandleCreated); i++)
+        for (int i = 0; i < 100 && (_dispatcher == null || !_dispatcher.IsHandleCreated); i++)
             Thread.Sleep(20);
     }
 
-    private sealed class GhostForm : Form
+    private static void OnUI(MethodInvoker work)
+    {
+        var d = _dispatcher;
+        if (d == null) return;
+        try { d.BeginInvoke(work); } catch (InvalidOperationException) { }
+    }
+
+    /// Never shown. It owns the message loop the ghosts live on, the one timer
+    /// that drives all of them, and the hook that follows their windows.
+    private sealed class Dispatcher : Form
     {
         private readonly System.Windows.Forms.Timer _tick;
+
+        public Dispatcher()
+        {
+            ShowInTaskbar = false;
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(-32000, -32000);
+            Size = new Size(1, 1);
+            _tick = new System.Windows.Forms.Timer { Interval = 16 };
+            _tick.Tick += delegate { Tick(); };
+            _tick.Start();
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
+    }
+
+    private static void Tick()
+    {
+        List<Ghost> all; bool anchored = false;
+        lock (_sync)
+        {
+            all = new List<Ghost>(_ghosts.Values);
+            foreach (var g in all) if (g.Anchor != IntPtr.Zero) anchored = true;
+        }
+        if (anchored) EnsureMoveHook(); else DropMoveHook();
+        foreach (var g in all)
+        {
+            var f = g.Form;
+            if (f == null || f.IsDisposed) continue;
+            try { f.Follow(); } catch (Exception e) { BezelAgent.Log("ghost: " + e.Message); }
+        }
+    }
+
+    // A window being dragged reports every step of its move. Following those
+    // rather than waiting for the timer puts the bar on its item in the same
+    // frame the window lands in, instead of one behind it. Installed only
+    // while some ghost is anchored, and on this thread, so the callback runs
+    // here through the message loop.
+    private delegate void WinEventProc(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmod, WinEventProc proc,
+                                                 uint idProcess, uint idThread, uint flags);
+    [DllImport("user32.dll")] private static extern bool UnhookWinEvent(IntPtr hook);
+    private const uint EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
+    private static WinEventProc _moveProc;   // held: the hook keeps only a raw pointer to it
+    private static IntPtr _moveHook;
+
+    private static void EnsureMoveHook()
+    {
+        if (_moveHook != IntPtr.Zero) return;
+        _moveProc = OnWindowMoved;
+        _moveHook = SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE,
+                                    IntPtr.Zero, _moveProc, 0, 0, 0 /* WINEVENT_OUTOFCONTEXT */);
+    }
+
+    private static void DropMoveHook()
+    {
+        if (_moveHook == IntPtr.Zero) return;
+        UnhookWinEvent(_moveHook);
+        _moveHook = IntPtr.Zero;
+    }
+
+    private static void OnWindowMoved(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+    {
+        if (idObject != 0 || idChild != 0) return;   // OBJID_WINDOW: the frame, not a child or the caret
+        List<Ghost> hit = null;
+        lock (_sync)
+            foreach (var g in _ghosts.Values)
+                if (g.Anchor == hwnd) { if (hit == null) hit = new List<Ghost>(); hit.Add(g); }
+        if (hit == null) return;
+        foreach (var g in hit)
+        {
+            var f = g.Form;
+            if (f != null && !f.IsDisposed) f.Follow();
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct RECT { public int Left, Top, Right, Bottom; }
+    [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+    [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr hWnd);
+
+    internal sealed class GhostForm : Form
+    {
+        private readonly Ghost _g;
 
         // 8.5 x 11 at 20 points per inch, plus a strip for the name.
         private const int PageW = 170;
         private const int PageH = 220;
         private const int LabelH = 30;
+        private const int BarH = 5;
 
-        public GhostForm()
+        public GhostForm(Ghost g)
         {
+            _g = g;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             TopMost = true;
@@ -2465,22 +2868,57 @@ internal static class DragGhost
             BackColor = Color.White;
             Opacity = 0.62;
             DoubleBuffered = true;
+            // Sized to the page it draws. Anything smaller left the bottom of
+            // the sheet and the whole label strip outside the window.
             Size = new Size(PageW + 20, PageH + LabelH);
-
-            _tick = new System.Windows.Forms.Timer { Interval = 16 };
-            _tick.Tick += delegate { Follow(); };
-            _tick.Start();
         }
 
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            ApplyLook(Mode.Carrying, Rectangle.Empty);
+        }
+
+        private Mode _look = Mode.Carrying;
+
+        /// Shape and size for a mode. Carrying/Parked: the page at its natural
+        /// size. Snapping: the page scaled to `bounds`. Item: `bounds` is the
+        /// Explorer item and the window is clipped to a thin bar along its foot,
+        /// so what shows is a progress bar on the real icon and nothing else.
+        public void ApplyLook(Mode mode, Rectangle bounds)
+        {
             using (var shape = new System.Drawing.Drawing2D.GraphicsPath())
             {
-                shape.AddPath(PagePath(), false);
-                shape.AddRectangle(new Rectangle(0, PageH + 4, PageW + 20, LabelH - 4));
+                switch (mode)
+                {
+                    case Mode.Carrying:
+                    case Mode.Parked:
+                        if (Size != new Size(PageW + 20, PageH + LabelH)) Size = new Size(PageW + 20, PageH + LabelH);
+                        shape.AddPath(PagePath(), false);
+                        shape.AddRectangle(new Rectangle(0, PageH + 4, PageW + 20, LabelH - 4));
+                        Opacity = 0.62;
+                        break;
+                    case Mode.Snapping:
+                        Bounds = bounds;
+                        var page = PagePath();
+                        using (var m = new System.Drawing.Drawing2D.Matrix())
+                        {
+                            m.Scale(Math.Max(0.01f, bounds.Width / (float)(PageW + 20)),
+                                    Math.Max(0.01f, bounds.Height / (float)(PageH + LabelH)));
+                            page.Transform(m);
+                        }
+                        shape.AddPath(page, false);
+                        Opacity = 0.62;
+                        break;
+                    case Mode.Item:
+                        Bounds = bounds;
+                        shape.AddRectangle(new Rectangle(0, Math.Max(0, bounds.Height - BarH), bounds.Width, BarH));
+                        Opacity = 0.95;
+                        break;
+                }
                 Region = new Region(shape);
             }
+            _look = mode;
         }
 
         /// A page with the top-right corner turned down.
@@ -2500,14 +2938,120 @@ internal static class DragGhost
             return p;
         }
 
+        private double _lastPainted = -1;
+
         public void Follow()
         {
-            if (!Visible) return;
-            // Parked means the user has let go: it stays where it was dropped
-            // while the rest of the bytes arrive.
-            if (DragGhost.IsParked) { Invalidate(); return; }
-            var p = Cursor.Position;
-            Location = new Point(p.X + 16, p.Y + 16);
+            if (IsDisposed) return;
+            var g = _g;
+            int now = Environment.TickCount;
+            // Asked first: it stamps IdleSince when bytes have moved.
+            var frac = DragGhost.Fraction(g);
+
+            Mode mode; IntPtr anchor; Point offset, parkedAt, itemOffset;
+            int idleSince, failedTicks, snapStart; bool delivering; Rectangle snapFrom, itemRect;
+            DragGhost.Snapshot(g, out mode, out anchor, out offset, out parkedAt, out idleSince, out failedTicks,
+                               out delivering, out snapFrom, out itemRect, out itemOffset, out snapStart);
+
+            // A failure shows for four seconds, then the ghost goes. It is the
+            // one thing that overrides dormancy below, so a failure that arrives
+            // after the copy stalled is still seen.
+            if (failedTicks != 0 && now - failedTicks > 4000) { DragGhost.Remove(g); return; }
+
+            if (mode == Mode.Carrying)
+            {
+                var p = Cursor.Position;
+                Location = new Point(p.X + 16, p.Y + 16);
+                if (!Visible) Visible = true;
+                DragGhost.NoteBounds(g, Bounds);
+                return;
+            }
+
+            // Parked, one way or another. The clocks run from the last sign of
+            // life — the release, bytes arriving, the drop — never from the
+            // release alone, which hid a slow copy's bar two minutes in. Two
+            // minutes of nothing means the copy has stalled or the Mac is gone:
+            // go dormant, and come back if bytes move again. An hour of nothing
+            // and the drag is over. While the move into place runs there is no
+            // clock at all: Deliver always ends in Hide or Fail.
+            if (failedTicks == 0 && !delivering)
+            {
+                int idle = now - idleSince;
+                if (idle > 3600000)
+                {
+                    BezelAgent.Log("ghost: " + g.Stage + " gave up after an hour without progress");
+                    DragGhost.Hide(g.Stage, true);
+                    return;
+                }
+                if (idle > 120000) { if (Visible) Visible = false; return; }
+            }
+
+            if (anchor != IntPtr.Zero && !DragGhost.IsWindow(anchor))
+            {
+                DragGhost.WindowGone(g);
+                anchor = IntPtr.Zero;
+                if (mode == Mode.Item || mode == Mode.Snapping) mode = Mode.Parked;
+            }
+            if (anchor != IntPtr.Zero && (DragGhost.IsIconic(anchor) || !DragGhost.IsWindowVisible(anchor)))
+            {
+                if (Visible) Visible = false;
+                return;
+            }
+            if (!Visible) Visible = true;
+
+            if (mode == Mode.Snapping)
+            {
+                var item = DragGhost.ItemBounds(anchor, itemOffset, itemRect);
+                double pgs = Math.Min(1.0, (now - snapStart) / 260.0);
+                double e = 1 - Math.Pow(1 - pgs, 3);
+                var b = new Rectangle(
+                    (int)Math.Round(snapFrom.X + (item.X - snapFrom.X) * e),
+                    (int)Math.Round(snapFrom.Y + (item.Y - snapFrom.Y) * e),
+                    Math.Max(8, (int)Math.Round(snapFrom.Width + (item.Width - snapFrom.Width) * e)),
+                    Math.Max(8, (int)Math.Round(snapFrom.Height + (item.Height - snapFrom.Height) * e)));
+                ApplyLook(pgs >= 1.0 ? Mode.Item : Mode.Snapping, pgs >= 1.0 ? item : b);
+                if (pgs >= 1.0) DragGhost.FinishSnap(g);
+                Invalidate();
+                return;
+            }
+            if (mode == Mode.Item)
+            {
+                // Pinned to the frame every tick (and on every move event), so
+                // the bar travels with the window rather than after it.
+                var item = DragGhost.ItemBounds(anchor, itemOffset, itemRect);
+                if (Bounds != item || _look != Mode.Item) ApplyLook(Mode.Item, item);
+                if (Math.Abs(frac - _lastPainted) >= 0.005 || failedTicks != 0) { _lastPainted = frac; Invalidate(); }
+                return;
+            }
+
+            // Parked: the page, riding in its window or frozen where it dropped.
+            if (_look != Mode.Parked) ApplyLook(Mode.Parked, Rectangle.Empty);
+            if (anchor == IntPtr.Zero)
+            {
+                // The desktop, or a window that closed under us: frozen where it
+                // was dropped. The move still lands — the path was fixed at MARK.
+                if (Location != parkedAt) Location = parkedAt;
+            }
+            else
+            {
+                DragGhost.RECT r;
+                if (DragGhost.GetWindowRect(anchor, out r))
+                {
+                    int ox = Math.Max(0, Math.Min(offset.X, (r.Right - r.Left) - Width));
+                    int oy = Math.Max(0, Math.Min(offset.Y, (r.Bottom - r.Top) - Height));
+                    var want = new Point(r.Left + ox, r.Top + oy);
+                    if (want != Location) Location = want;
+                }
+            }
+            DragGhost.NoteBounds(g, Bounds);
+
+            // Repaint only when the bar has visibly moved; the fraction is cached
+            // in DragGhost, so this is cheap to ask.
+            if (Math.Abs(frac - _lastPainted) >= 0.005 || failedTicks != 0)
+            {
+                _lastPainted = frac;
+                Invalidate();
+            }
         }
 
         protected override CreateParams CreateParams
@@ -2526,11 +3070,32 @@ internal static class DragGhost
         {
             var g = e.Graphics;
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+
+            if (_look == Mode.Item)
+            {
+                // The real icon is Explorer's; ours is only the bar at its foot.
+                // Blue while the bytes arrive from the Mac, green while they
+                // move into place, amber if they could not.
+                var itemWhy = DragGhost.FailReason(_g);
+                var delivering = DragGhost.IsDelivering(_g);
+                var itemDone = DragGhost.Fraction(_g);
+                int w = ClientSize.Width, h = ClientSize.Height;
+                var strip = new Rectangle(0, Math.Max(0, h - BarH), w, BarH);
+                using (var track = new SolidBrush(Color.FromArgb(255, 60, 60, 66))) g.FillRectangle(track, strip);
+                var fillColor = itemWhy != null ? Color.FromArgb(255, 230, 140, 30)
+                              : delivering     ? Color.FromArgb(255, 70, 190, 110)
+                                               : Color.FromArgb(255, 60, 160, 255);
+                var fillFrac = (itemWhy != null || delivering) ? 1.0 : itemDone;
+                using (var fill = new SolidBrush(fillColor))
+                    g.FillRectangle(fill, new Rectangle(strip.X, strip.Y, (int)(strip.Width * fillFrac), strip.Height));
+                return;
+            }
+
             g.Clear(Color.White);
 
             const int x = 10, y = 4, fold = 34;
 
-            var icon = DragGhost.CurrentIcon();
+            var icon = _g.Icon;
             if (icon != null)
             {
                 // Square, centred in the page area, keeping its aspect: macOS
@@ -2564,8 +3129,21 @@ internal static class DragGhost
             // Progress along the foot of the page, once there is something to
             // report. Drawn only while a transfer is actually running, so a small
             // file that lands instantly never flashes a bar.
-            var done = DragGhost.Fraction();
-            if (done > 0 && done < 1)
+            var why = DragGhost.FailReason(_g);
+            if (why != null)
+            {
+                using (var tint = new SolidBrush(Color.FromArgb(110, 230, 160, 40)))
+                    g.FillPath(tint, PagePath());
+                using (var font = new Font("Segoe UI", 9f, FontStyle.Bold))
+                using (var ink = new SolidBrush(Color.FromArgb(230, 120, 60, 0)))
+                {
+                    var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+                    g.DrawString(why, font, ink, new RectangleF(x + 8, y + fold + 8, PageW - 16, PageH - fold - 40), fmt);
+                }
+            }
+
+            var done = DragGhost.Fraction(_g);
+            if (why == null && done > 0 && done < 1)
             {
                 var barY = y + PageH - 34;
                 var barX = x + 16;
@@ -2579,7 +3157,8 @@ internal static class DragGhost
                     g.DrawString(((int)(done * 100)) + "%", pct, ink, barX, barY + 10);
             }
 
-            if (_label.Length > 0)
+            var label = _g.Label;
+            if (label.Length > 0)
                 using (var font = new Font("Segoe UI", 10f))
                 using (var text = new SolidBrush(Color.FromArgb(230, 25, 25, 28)))
                 {
@@ -2587,12 +3166,11 @@ internal static class DragGhost
                         Alignment = StringAlignment.Center,
                         Trimming = StringTrimming.EllipsisCharacter,
                         FormatFlags = StringFormatFlags.NoWrap };
-                    g.DrawString(_label, font, text,
+                    g.DrawString(label, font, text,
                                  new RectangleF(0, PageH + 6, PageW + 20, LabelH - 6), fmt);
                 }
         }
     }
-
 }
 
 
@@ -2619,41 +3197,328 @@ internal static class DropTarget
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
 
-    private static string _marked;
-
-    /// Remember where the pointer was when the user let go.
-    public static void Mark()
+    /// What MARK resolved for one drag, kept until its DROP: the folder, the
+    /// Explorer window it was showing in (Zero for the desktop) from the SAME
+    /// resolution — re-hit-testing later could anchor the ghost to Notepad
+    /// while the files go to the Desktop — and the placeholders put there.
+    /// Per stage, because a drag's DROP can arrive after the next drag's MARK.
+    private sealed class Marked
     {
-        _marked = Resolve();
-        BezelAgent.Log("drop target marked: " + _marked);
+        public string Folder;
+        public IntPtr Anchor;
+        /// Placeholders this drop created in the destination, full paths.
+        /// Deleted just before the real item moves in, or on any failure.
+        public readonly List<string> Stubs = new List<string>();
+    }
+    private static readonly Dictionary<string, Marked> _marks = new Dictionary<string, Marked>();
+    private static readonly object _markLock = new object();
+
+    private static Marked Peek(string stage)
+    {
+        if (stage == null) return null;
+        lock (_markLock) { Marked m; return _marks.TryGetValue(stage, out m) ? m : null; }
+    }
+
+    private static Marked Take(string stage)
+    {
+        if (stage == null) return null;
+        lock (_markLock)
+        {
+            Marked m;
+            if (!_marks.TryGetValue(stage, out m)) return null;
+            _marks.Remove(stage);
+            return m;
+        }
+    }
+
+    internal static IntPtr MarkedAnchor(string stage)
+    {
+        var m = Peek(stage);
+        return m == null ? IntPtr.Zero : m.Anchor;
+    }
+
+    /// The drag is over without a delivery: forget where it was going and
+    /// take its placeholders back out of the folder.
+    internal static void Discard(string stage)
+    {
+        var m = Take(stage);
+        if (m != null) DiscardStubs(m);
+    }
+
+    internal static void DiscardAll()
+    {
+        List<Marked> all;
+        lock (_markLock) { all = new List<Marked>(_marks.Values); _marks.Clear(); }
+        foreach (var m in all) DiscardStubs(m);
+    }
+
+    private static void DiscardStubs(Marked m)
+    {
+        List<string> gone;
+        lock (_markLock) { gone = new List<string>(m.Stubs); m.Stubs.Clear(); }
+        foreach (var s in gone)
+        {
+            try
+            {
+                if (Directory.Exists(s)) { if (Directory.GetFileSystemEntries(s).Length == 0) Directory.Delete(s); }
+                else if (File.Exists(s) && new FileInfo(s).Length == 0) File.Delete(s);
+            }
+            catch { }
+        }
+    }
+
+    private static bool IsStub(Marked m, string path) { lock (_markLock) return m.Stubs.Contains(path); }
+    private static void ForgetStub(Marked m, string path) { lock (_markLock) m.Stubs.Remove(path); }
+
+    /// An abandoned drag's staging folder. The Mac has stopped the scp that
+    /// was filling it, but the far end of that scp may hold a file open for a
+    /// moment yet, so this retries for a few seconds. Only ever a stage
+    /// folder — never Staging itself, whatever it is asked.
+    internal static void ForgetStaging(string stage)
+    {
+        if (string.IsNullOrEmpty(stage)
+            || !System.Text.RegularExpressions.Regex.IsMatch(stage, "^zb[0-9]+$")) return;
+        var dir = Path.Combine(Staging, stage);
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                try
+                {
+                    if (!Directory.Exists(dir)) return;
+                    Directory.Delete(dir, true);
+                    BezelAgent.Log("staging: removed " + dir);
+                    return;
+                }
+                catch (Exception) { Thread.Sleep(500); }
+            }
+            BezelAgent.Log("staging: could not remove " + dir);
+        });
+    }
+
+    /// A zero-byte file (or empty folder) with the real name, so Explorer sorts
+    /// it into place and draws it with its own icon while the bytes are still
+    /// landing in staging. Then find where Explorer put it and snap the ghost
+    /// there. Off the pipe thread: this waits on scp and on UI Automation.
+    public static void PlaceholderAndSnap(string stage)
+    {
+        var m = Peek(stage);
+        if (m == null || string.IsNullOrEmpty(m.Folder)) return;
+        var destination = m.Folder;
+        var anchor = m.Anchor;
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            try
+            {
+                var source = Path.Combine(Staging, stage);
+                // scp creates the first entry within a moment of starting; wait for it.
+                string first = null;
+                for (int i = 0; i < 30 && first == null; i++)
+                {
+                    if (Directory.Exists(source))
+                    {
+                        var entries = Directory.GetFileSystemEntries(source);
+                        if (entries.Length > 0) first = entries[0];
+                    }
+                    if (first == null) Thread.Sleep(100);
+                }
+                if (first == null) { BezelAgent.Log("placeholder: nothing staged yet for " + stage); return; }
+
+                var name = Path.GetFileName(first);
+                var stub = Path.Combine(destination, name);
+                if (File.Exists(stub) || Directory.Exists(stub))
+                {
+                    // Something real is already there. Deliver will pick a
+                    // unique name; do not pretend to be it.
+                    BezelAgent.Log("placeholder: " + name + " already exists in " + destination + "; not stubbing");
+                    return;
+                }
+                if (Directory.Exists(first)) Directory.CreateDirectory(stub);
+                else using (File.Create(stub)) { }
+                lock (_markLock) m.Stubs.Add(stub);
+                BezelAgent.Log("placeholder: created " + stub);
+
+                // Explorer needs a moment to notice and draw it.
+                Rectangle? rect = null;
+                for (int i = 0; i < 30 && rect == null; i++)
+                {
+                    Thread.Sleep(100);
+                    rect = FindItemRect(anchor, name);
+                }
+                if (rect == null) { BezelAgent.Log("placeholder: Explorer did not show " + name + "; ghost stays parked"); return; }
+                DragGhost.SnapToItem(stage, anchor, name, rect.Value);
+            }
+            catch (Exception e) { BezelAgent.Log("placeholder: " + e.Message); }
+        });
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+
+    /// The on-screen rectangle of the Explorer item called `name` under
+    /// `root` (an Explorer window, or Zero for the desktop). Null if Explorer
+    /// is not showing it — scrolled away, or not drawn yet.
+    internal static Rectangle? FindItemRect(IntPtr root, string name)
+    {
+        try
+        {
+            AutomationElement scope;
+            if (root != IntPtr.Zero) scope = AutomationElement.FromHandle(root);
+            else
+            {
+                // The desktop's icons live in a SHELLDLL_DefView under Progman
+                // (or a WorkerW on some builds).
+                var progman = FindWindowEx(IntPtr.Zero, IntPtr.Zero, "Progman", null);
+                var view = progman == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(progman, IntPtr.Zero, "SHELLDLL_DefView", null);
+                if (view == IntPtr.Zero)
+                {
+                    IntPtr worker = IntPtr.Zero;
+                    while (view == IntPtr.Zero && (worker = FindWindowEx(IntPtr.Zero, worker, "WorkerW", null)) != IntPtr.Zero)
+                        view = FindWindowEx(worker, IntPtr.Zero, "SHELLDLL_DefView", null);
+                }
+                if (view == IntPtr.Zero) return null;
+                scope = AutomationElement.FromHandle(view);
+            }
+            if (scope == null) return null;
+
+            // Explorer may hide known extensions, so the item's name can be the stem.
+            var stem = Path.GetFileNameWithoutExtension(name);
+            foreach (var candidate in new[] { name, stem })
+            {
+                if (string.IsNullOrEmpty(candidate)) continue;
+                var cond = new AndCondition(
+                    new PropertyCondition(AutomationElement.NameProperty, candidate),
+                    new OrCondition(
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.ListItem),
+                        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.DataItem)));
+                var el = scope.FindFirst(TreeScope.Descendants, cond);
+                if (el == null) continue;
+                var r = el.Current.BoundingRectangle;
+                if (r.IsEmpty || double.IsNaN(r.X) || r.Width < 4 || r.Height < 4) continue;
+                if (el.Current.IsOffscreen) continue;
+                return new Rectangle((int)r.X, (int)r.Y, (int)r.Width, (int)r.Height);
+            }
+        }
+        catch (Exception e) { BezelAgent.Log("item lookup: " + e.Message); }
+        return null;
+    }
+
+    /// Remember where the pointer was when the user let go of this drag.
+    public static void Mark(string stage)
+    {
+        if (string.IsNullOrEmpty(stage)) return;
+        IntPtr anchor;
+        var folder = Resolve(out anchor);
+        var m = new Marked { Folder = folder, Anchor = anchor };
+        lock (_markLock) _marks[stage] = m;
+        BezelAgent.Log("drop target marked for " + stage + ": " + folder + " (window " + anchor + ")");
     }
 
     /// Move one drag's folder to the spot marked at release.
-    public static string Deliver(string stage)
+    ///
+    /// No fallback to "wherever the cursor is now": if nothing was marked, the
+    /// files stay staged and this says so. Per-item failures are collected
+    /// rather than aborting on the first, so a folder that will not move does
+    /// not strand the loose files that already would have.
+    public static string Deliver(string stage, out bool ok)
     {
-        string destination = _marked ?? Resolve();
-        _marked = null;
-        var source = string.IsNullOrEmpty(stage) ? Staging : Path.Combine(Staging, stage);
+        ok = false;
+        if (string.IsNullOrEmpty(stage)) return "no stage named; nothing delivered";
+        var m = Take(stage);
+        string destination = m == null ? null : m.Folder;
+        if (string.IsNullOrEmpty(destination)) return "no drop target was marked for " + stage + "; files left in staging";
+
+        var source = Path.Combine(Staging, stage);
         try
         {
             if (!Directory.Exists(source)) return destination + " (nothing staged at " + source + ")";
             Directory.CreateDirectory(destination);
             int moved = 0;
+            var failures = new List<string>();
+
             foreach (var file in Directory.GetFiles(source))
             {
-                var target = Path.Combine(destination, Path.GetFileName(file));
-                target = Unique(target);
-                File.Move(file, target);
-                moved++;
+                try
+                {
+                    var wanted = Path.Combine(destination, Path.GetFileName(file));
+                    // Our own placeholder gives way, so the real file keeps its name.
+                    if (IsStub(m, wanted) && File.Exists(wanted) && new FileInfo(wanted).Length == 0)
+                    {
+                        File.Delete(wanted);
+                        ForgetStub(m, wanted);
+                    }
+                    var target = Unique(wanted);
+                    File.Move(file, target);
+                    moved++;
+                }
+                catch (Exception e) { failures.Add(Path.GetFileName(file) + ": " + e.Message); }
             }
-            // Leave nothing behind: a folder left in staging would be swept up
-            // by a later drop, which is exactly the bug this replaced.
-            if (!string.IsNullOrEmpty(stage)) {
+            foreach (var folder in Directory.GetDirectories(source))
+            {
+                try
+                {
+                    var wanted = Path.Combine(destination, Path.GetFileName(folder));
+                    // An empty placeholder folder gives way; one the user has
+                    // already put something in is merged into instead.
+                    if (IsStub(m, wanted) && Directory.Exists(wanted))
+                    {
+                        ForgetStub(m, wanted);
+                        if (Directory.GetFileSystemEntries(wanted).Length == 0) Directory.Delete(wanted);
+                    }
+                    var target = Directory.Exists(wanted) && IsStub(m, wanted) == false && Directory.GetFileSystemEntries(wanted).Length > 0
+                        ? wanted : UniqueDirectory(wanted);
+                    MoveDirectory(folder, target);
+                    moved++;
+                }
+                catch (Exception e) { failures.Add(Path.GetFileName(folder) + ": " + e.Message); }
+            }
+
+            // Leave nothing behind: a folder left in staging would be swept up by
+            // a later drop, which is exactly the bug this replaced. Only when
+            // everything left, though — a failed item stays where it can be found.
+            if (!string.IsNullOrEmpty(stage) && failures.Count == 0)
+            {
                 try { Directory.Delete(source, true); } catch { }
             }
-            return destination + " (" + moved + " item" + (moved == 1 ? "" : "s") + ")";
+            ok = failures.Count == 0;
+            DiscardStubs(m);
+            var summary = destination + " (" + moved + " item" + (moved == 1 ? "" : "s") + ")";
+            return failures.Count == 0 ? summary
+                 : summary + " — " + failures.Count + " FAILED: " + string.Join("; ", failures.ToArray());
         }
         catch (Exception e) { return destination + " — FAILED: " + e.Message; }
+    }
+
+    /// Directory.Move refuses to cross volumes, and staging is fixed on C:, so a
+    /// drop onto D:, a mapped drive or a UNC path threw halfway through. Fall
+    /// back to copying the tree over and removing the original.
+    private static void MoveDirectory(string from, string to)
+    {
+        try { Directory.Move(from, to); return; }
+        catch (IOException) { }
+        Directory.CreateDirectory(to);
+        foreach (var f in Directory.GetFiles(from))
+        {
+            var target = Path.Combine(to, Path.GetFileName(f));
+            try { File.Move(f, target); }
+            catch (IOException) { File.Copy(f, target, false); File.Delete(f); }
+        }
+        foreach (var d in Directory.GetDirectories(from))
+            MoveDirectory(d, Path.Combine(to, Path.GetFileName(d)));
+        Directory.Delete(from, true);
+    }
+
+    private static string UniqueDirectory(string path)
+    {
+        if (!Directory.Exists(path) && !File.Exists(path)) return path;
+        var parent = Path.GetDirectoryName(path);
+        var name = Path.GetFileName(path);
+        for (int i = 2; i < 500; i++)
+        {
+            var candidate = Path.Combine(parent, name + " (" + i + ")");
+            if (!Directory.Exists(candidate) && !File.Exists(candidate)) return candidate;
+        }
+        return path;
     }
 
     /// Never overwrite. A drop that silently replaced something would be a very
@@ -2675,10 +3540,18 @@ internal static class DropTarget
     /// The folder under the cursor.
     public static string Resolve()
     {
+        IntPtr ignored;
+        return Resolve(out ignored);
+    }
+
+    public static string Resolve(out IntPtr anchor)
+    {
         var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
         var pos = Cursor.Position;
 
-        string container = ContainerFor(pos) ?? desktop;
+        // The anchor is the Explorer window itself even when the drop lands in a
+        // nested folder icon: the item view is one window and icons have no hwnd.
+        string container = ContainerFor(pos, out anchor) ?? desktop;
 
         // If the thing directly under the cursor is a folder inside that
         // container, the drop belongs in it rather than beside it.
@@ -2702,8 +3575,12 @@ internal static class DropTarget
     }
 
     /// Which folder the window under the cursor is showing.
-    private static string ContainerFor(Point pos)
+    private static string ContainerFor(Point pos, out IntPtr anchor)
     {
+        // Published ONLY on the Explorer-window path below. The desktop
+        // (Progman/WorkerW) is a window too, but anchoring to it is just today's
+        // whole-desktop freeze under a new name, so it stays Zero.
+        anchor = IntPtr.Zero;
         var hwnd = GetAncestor(WindowFromPoint(new POINT { X = pos.X, Y = pos.Y }), 2 /*GA_ROOT*/);
         if (hwnd == IntPtr.Zero) return null;
 
@@ -2740,6 +3617,7 @@ internal static class DropTarget
                 var url = (string)w.GetType().InvokeMember("LocationURL",
                             BindingFlags.GetProperty, null, w, null);
                 if (string.IsNullOrEmpty(url)) return null;
+                anchor = hwnd;
                 return new Uri(url).LocalPath;
             }
         }

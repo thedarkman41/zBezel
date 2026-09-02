@@ -23,6 +23,41 @@ enum DragTransfer {
     /// under the pointer and moves it there.
     static let staging = "C:\\Temp"
 
+    /// The copies in flight, by stage, so an abandoned drag can be stopped
+    /// rather than left saturating the link to fill a folder nobody will
+    /// collect. A stage cancelled before its scp has started is remembered,
+    /// and the copy never begins.
+    private static var running: [String: Process] = [:]
+    private static var cancelled = Set<String>()
+    private static let lock = NSLock()
+
+    static func cancel(stage: String) {
+        lock.lock()
+        cancelled.insert(stage)
+        let scp = running.removeValue(forKey: stage)
+        lock.unlock()
+        if let scp, scp.isRunning { scp.terminate() }
+    }
+
+    private static func isCancelled(_ stage: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled.contains(stage)
+    }
+
+    private static func register(_ scp: Process, for stage: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if cancelled.contains(stage) { return false }
+        running[stage] = scp
+        return true
+    }
+
+    private static func finished(_ stage: String) {
+        lock.lock()
+        running[stage] = nil
+        cancelled.remove(stage)
+        lock.unlock()
+    }
+
     /// The files currently being dragged, if any.
     ///
     /// Read from the drag pasteboard rather than tracked ourselves: the Mac knows
@@ -47,11 +82,38 @@ enum DragTransfer {
     /// that file with the NEXT drop instead. One folder per drag makes both
     /// impossible.
     static func send(_ files: [URL], to host: String, stage: String,
+                     total: @escaping (Int) -> Void,
                      progress: @escaping (String) -> Void,
                      done: @escaping (Bool, String) -> Void) {
         guard !files.isEmpty else { return }
         DispatchQueue.global(qos: .utility).async {
             let names = files.map { $0.lastPathComponent }
+
+            // The true size, including folders. URLResourceValues.fileSize is
+            // nil for a directory, so the crossing-time sum sends 0 for a
+            // folder drag and the far side draws no bar at all. Walked here,
+            // off the crossing path, and reported back. Logical bytes, not
+            // allocated size — the far side compares against FileInfo.Length.
+            // Hidden files are counted because scp -r copies them.
+            var bytes = 0
+            for url in files {
+                let isDir = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+                if isDir, let walk = FileManager.default.enumerator(
+                        at: url, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]) {
+                    for case let entry as URL in walk {
+                        let v = try? entry.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                        if v?.isRegularFile == true { bytes += v?.fileSize ?? 0 }
+                    }
+                } else {
+                    bytes += (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
+                }
+            }
+            if isCancelled(stage) {
+                finished(stage)
+                done(false, "abandoned before the copy started")
+                return
+            }
+            total(bytes)
             progress(files.count == 1
                      ? "copying \(names[0]) to \(host)…"
                      : "copying \(files.count) items to \(host)…")
@@ -75,15 +137,25 @@ enum DragTransfer {
             let err = Pipe()
             scp.standardOutput = FileHandle.nullDevice
             scp.standardError = err
+            guard register(scp, for: stage) else {
+                finished(stage)
+                done(false, "abandoned before the copy started")
+                return
+            }
             do { try scp.run() } catch {
+                finished(stage)
                 done(false, "could not start the copy: \(error.localizedDescription)")
                 return
             }
             let problem = String(data: err.fileHandleForReading.readDataToEndOfFile(),
                                  encoding: .utf8) ?? ""
             scp.waitUntilExit()
+            let wasCancelled = isCancelled(stage)
+            finished(stage)
 
-            if scp.terminationStatus == 0 {
+            if wasCancelled {
+                done(false, "copy stopped: the drag was abandoned")
+            } else if scp.terminationStatus == 0 {
                 done(true, files.count == 1
                      ? "\(names[0]) ready on \(host)"
                      : "\(files.count) items ready on \(host)")

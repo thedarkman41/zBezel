@@ -340,12 +340,34 @@ final class KVMController {
     /// only says whether the Mac is on screen.
     private(set) var lockedIndex: Int?
 
-    /// True between a dragging crossing and the release that ends it. The ghost
-    /// on the far machine is showing, and the button-up has to put it away.
-    private var carrying = false
-    /// This drag's own folder on the far machine, and the two things that must
-    /// both happen before it can be delivered: the copy finishing and the user
-    /// letting go. Whichever is last triggers the drop.
+    /// The drags in flight, by stage.
+    ///
+    /// Not one slot: a large file is still copying long after the user let go
+    /// of it, and by then they may be dragging the next one — or dragging a
+    /// text selection across, which crosses exactly like a file drag and turns
+    /// out to hold no files. Each drag keeps its own two conditions for
+    /// delivery (the copy finishing and the user letting go, in either order)
+    /// and its own host, and every scp callback names the stage it belongs to.
+    /// A callback for a stage that is no longer here is about a drag that was
+    /// abandoned, and does nothing.
+    private struct PendingDrag {
+        /// Where the bytes went — not necessarily the machine under the pointer
+        /// by the time they have all landed.
+        let host: String
+        /// A "D" has gone out for it, so a "D -" must follow if it dies, and
+        /// its MARK may go out (MARK must never precede the "D" it refers to).
+        var announced = false
+        var marked = false
+        var copied = false
+        var released = false
+    }
+    private var pending: [String: PendingDrag] = [:]
+
+    /// The drag in hand: crossed over and not yet released. The ghost on the
+    /// far machine is following the cursor, and the button-up has to park it.
+    private var carriedStage: String?
+    private var carrying: Bool { carriedStage != nil }
+
     /// Keeps every channel warm while the KVM is armed.
     ///
     /// With a lock held the user works on the Mac for minutes at a time and not a
@@ -354,10 +376,6 @@ final class KVMController {
     /// crossing where the pointer moves and the far machine does not. A line
     /// every twenty-five seconds costs nothing and removes the whole failure.
     private var heartbeat: Timer?
-
-    private var dragStage: String?
-    private var dragCopied = false
-    private var dragReleased = false
 
     /// Stamped on events this class posts to the Mac, so the tap can recognise
     /// its own work and let it through. Without it they would be captured and
@@ -411,10 +429,15 @@ final class KVMController {
     /// One connection per machine, opened when the KVM is armed so that a
     /// crossing costs no SSH handshake.
     private var transports: [String: KVMTransport] = [:]
-    private var transport: KVMTransport {
-        if let existing = transports[host] { return existing }
+    private var transport: KVMTransport { pipe(for: host) }
+
+    /// The channel to a machine by name. A drag's messages go to the machine
+    /// its bytes went to, which by the time the copy finishes need not be the
+    /// one the pointer is on.
+    private func pipe(for machineHost: String) -> KVMTransport {
+        if let existing = transports[machineHost] { return existing }
         let fresh = KVMTransport(command: "kvm")
-        transports[host] = fresh
+        transports[machineHost] = fresh
         return fresh
     }
     private let clipTransport = KVMTransport(command: "clipboard")
@@ -624,6 +647,7 @@ final class KVMController {
         guard isEnabled else { return }
         KVMLog.write("disable")
         if side == .there { handBack() }
+        abandonAllDrags(why: "the KVM was disabled")
         clipboard.stop()
         removeTap()
         heartbeat?.invalidate()
@@ -691,6 +715,7 @@ final class KVMController {
         // recovery; without it the KVM dies silently on the first hiccup.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let port = tap { CGEvent.tapEnable(tap: port, enable: true) }
+            KVMLog.write("tap re-enabled after \(type == .tapDisabledByTimeout ? "timeout" : "user input")")
             return nil
         }
         // Our own synthetic events pass straight through, always.
@@ -786,7 +811,16 @@ final class KVMController {
         return nil                              // swallowed: this Mac must not act on it
     }
 
+    private var lastTapProbe = ""
+
     private func forward(type: CGEventType, event: CGEvent) {
+        // While carrying, record what the tap sees against what the hardware
+        // says — on change only, so it is a handful of lines per drag, and it
+        // is the line that proves (or disproves) how the release arrives.
+        if carrying {
+            let probe = "tap \(type.rawValue) hid=\(CGEventSource.buttonState(.hidSystemState, button: .left))"
+            if probe != lastTapProbe { lastTapProbe = probe; KVMLog.write(probe) }
+        }
         switch type {
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
             let dx = event.getDoubleValueField(.mouseEventDeltaX)
@@ -857,17 +891,7 @@ final class KVMController {
         case .leftMouseUp:
             // Its down was swallowed; sending the up alone would land as a click
             // with no press on the far machine.
-            if carrying {
-                // Where the pointer was when released is what decides the
-                // destination, so the agent must resolve it NOW even if the copy
-                // is still running. It remembers the spot; deliverIfReady sends
-                // the command once the bytes have landed.
-                carrying = false
-                dragReleased = true
-                transport.send("MARK")
-                KVMLog.write("drop marked on \(host)")
-                deliverIfReady()
-            }
+            markDrop()
             if badgeVisible, lockRect.contains(remotePoint) { return }
             transport.send("B 1 0")
         case .rightMouseDown:  transport.send("B 2 1")
@@ -1045,69 +1069,96 @@ final class KVMController {
         // find. The copy itself runs elsewhere and takes as long as it takes.
         let target = host
         if dragging {
-        DispatchQueue.main.async { [weak self] in
-            let files = DragTransfer.draggedFiles()
-            guard !files.isEmpty else { return }
-            KVMLog.write("drag carried \(files.count) file(s) to \(target)")
-            // Show what is being carried, so the drag looks like a drag over
-            // there too. It follows the cursor on that machine's own timer.
-            let label = files.count == 1
-                ? files[0].lastPathComponent
-                : "\(files.count) items"
-            // End the Mac's drag NOW, before anything else can finish it.
+            // Bookkeeping BEFORE the async hop. A release in the runloop turn
+            // between the crossing and the block below used to find nothing in
+            // hand and was simply lost — the same symptom as the missing-release
+            // bug, from a different cause. The release watch starts here too.
             //
-            // It used to be cancelled when the user released on the far machine,
-            // which left a live Finder drag for the whole crossing. If the
-            // Escape did not land, the mouse up completed the drop wherever the
-            // Mac's pointer had been parked — and the file was MOVED into
-            // whatever folder it had last passed over. The pasteboard has already
-            // been read by this point, so the drag has served its purpose.
-            self?.cancelMacDrag()
-
+            // Only THIS drag is touched. An earlier one still copying keeps its
+            // own entry, and if the pasteboard turns out to be empty only this
+            // one is stood down.
+            if let stale = carriedStage {
+                abandonDrag(stale, why: "a new drag crossed before it was released")
+            }
             let stage = "zb" + String(UInt64(Date().timeIntervalSince1970 * 1000))
-            self?.carrying = true
-            self?.dragStage = stage
-            self?.dragCopied = false
-            self?.dragReleased = false
-            // The far side draws the progress bar from these two numbers alone:
-            // bytes landed in the staging folder against the total. Nothing has
-            // to be reported back across the wire while the copy runs.
-            let total = files.reduce(0) { sum, url in
-                sum + ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+            carriedStage = stage
+            pending[stage] = PendingDrag(host: target)
+            startReleaseWatch()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let files = DragTransfer.draggedFiles()
+                guard !files.isEmpty else {
+                    // Nothing on the pasteboard after all — a text selection, a
+                    // tab, an image off a web page. Stand this one down, or its
+                    // entry stays armed and the far side shows a ghost for nothing.
+                    self.abandonDrag(stage, why: "the drag pasteboard was empty")
+                    return
+                }
+                // Released and brought home in the turn between the crossing
+                // and here: nothing to carry any more.
+                guard self.pending[stage] != nil else { return }
+                KVMLog.write("drag \(stage) carried \(files.count) file(s) to \(target)")
+                // Show what is being carried, so the drag looks like a drag over
+                // there too. It follows the cursor on that machine's own timer.
+                let label = files.count == 1
+                    ? files[0].lastPathComponent
+                    : "\(files.count) items"
+                // End the Mac's drag NOW, before anything else can finish it.
+                //
+                // It used to be cancelled when the user released on the far machine,
+                // which left a live Finder drag for the whole crossing. If the
+                // Escape did not land, the mouse up completed the drop wherever the
+                // Mac's pointer had been parked — and the file was MOVED into
+                // whatever folder it had last passed over. The pasteboard has already
+                // been read by this point, so the drag has served its purpose.
+                self.cancelMacDrag()
+
+                // The far side draws the progress bar from these two numbers alone:
+                // bytes landed in the staging folder against the total. Nothing has
+                // to be reported back across the wire while the copy runs.
+                let total = files.reduce(0) { sum, url in
+                    sum + ((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                }
+                // Send the real icon before the ghost appears, so the far side has
+                // something to draw with on its first paint rather than showing a
+                // hand-drawn page and swapping it a moment later.
+                //
+                // This is the icon Finder itself shows — a thumbnail for an image, a
+                // document icon for a Pages file, the app's own icon for an app — so
+                // the ghost looks like what was picked up rather than a generic sheet
+                // that happens to mean "a file".
+                let pipe = self.pipe(for: target)
+                if let icon = Self.dragIconPNG(for: files) {
+                    pipe.send("DI \(icon.base64EncodedString())")
+                }
+                pipe.send("D \(stage) \(total) \(label)")
+                self.pending[stage]?.announced = true
+                // The release may already have happened; its MARK waited for this.
+                self.sendMarkIfDue(stage)
+                DragTransfer.send(files, to: target, stage: stage,
+                                  total: { [weak self] bytes in
+                                      // A folder's size is unknown at the crossing
+                                      // (fileSize is nil for a directory), so the
+                                      // first "D" may carry 0; this corrects it.
+                                      Task { @MainActor in
+                                          self?.sizeKnown(stage, bytes: bytes, label: label)
+                                      }
+                                  },
+                                  progress: { [weak self] line in
+                                      Task { @MainActor in
+                                          self?.status = line
+                                          self?.onChange?()
+                                      }
+                                  },
+                                  done: { [weak self] ok, line in
+                                      Task { @MainActor in
+                                          self?.copyFinished(stage, ok: ok, line: line)
+                                      }
+                                  })
             }
-            // Send the real icon before the ghost appears, so the far side has
-            // something to draw with on its first paint rather than showing a
-            // hand-drawn page and swapping it a moment later.
-            //
-            // This is the icon Finder itself shows — a thumbnail for an image, a
-            // document icon for a Pages file, the app's own icon for an app — so
-            // the ghost looks like what was picked up rather than a generic sheet
-            // that happens to mean "a file".
-            if let icon = Self.dragIconPNG(for: files) {
-                self?.transport.send("DI \(icon.base64EncodedString())")
-            }
-            self?.transport.send("D \(stage) \(total) \(label)")
-            DragTransfer.send(files, to: target, stage: stage,
-                              progress: { line in
-                                  Task { @MainActor in
-                                      self?.status = line
-                                      self?.onChange?()
-                                  }
-                              },
-                              done: { ok, line in
-                                  Task { @MainActor in
-                                      self?.status = line
-                                      self?.onChange?()
-                                      KVMLog.write("drag copy: \(line)")
-                                      self?.dragCopied = ok
-                                      self?.deliverIfReady()
-                                  }
-                              })
-        }
-        } else if carrying {
+        } else if let stale = carriedStage {
             // Left over from a previous crossing that never saw its button up.
-            carrying = false
-            transport.send("D -")
+            abandonDrag(stale, why: "a plain crossing arrived with a drag still in hand")
         }
 
         // Send the pointer first, then the panel. The pointer is already on the
@@ -1155,18 +1206,138 @@ final class KVMController {
         handOver(at: crossing.point, doorway: crossing.doorway, dragging: pendingWasDrag)
     }
 
+    // MARK: Release
+
+    /// The physical release, whichever way it arrives.
+    ///
+    /// Where the pointer was when released is what decides the destination, so
+    /// the agent must resolve it NOW even if the copy is still running. It
+    /// remembers the spot; deliverIfReady sends the command once the bytes have
+    /// landed. Idempotent: the tap's .leftMouseUp and the release watch can both
+    /// call it, and whichever is second must do nothing.
+    private func markDrop() {
+        guard let stage = carriedStage else { return }
+        carriedStage = nil
+        stopReleaseWatch()
+        pending[stage]?.released = true
+        KVMLog.write("drop marked on \(host) for \(stage)")
+        sendMarkIfDue(stage)
+    }
+
+    /// MARK names its stage and must follow that stage's "D" — the agent parks
+    /// the ghost the MARK is about, and there is no ghost before the "D". The
+    /// release can beat the pasteboard read that sends the "D", so the MARK
+    /// goes out from whichever of the two happens second.
+    private func sendMarkIfDue(_ stage: String) {
+        guard let drag = pending[stage], drag.released, drag.announced, !drag.marked else { return }
+        pending[stage]?.marked = true
+        pipe(for: drag.host).send("MARK \(stage)")
+        deliverIfReady(stage)
+    }
+
+    /// scp has walked a folder and knows its true size.
+    private func sizeKnown(_ stage: String, bytes: Int, label: String) {
+        // Abandoned while the tree was being walked: a late "D" here would
+        // put a ghost back that nothing will ever clear.
+        guard let drag = pending[stage] else { return }
+        pipe(for: drag.host).send("D \(stage) \(bytes) \(label)")
+    }
+
+    /// scp has finished, one way or the other.
+    private func copyFinished(_ stage: String, ok: Bool, line: String) {
+        guard pending[stage] != nil else {
+            KVMLog.write("drag copy for \(stage), already abandoned: \(line)")
+            return
+        }
+        status = line
+        onChange?()
+        KVMLog.write("drag copy \(stage): \(line)")
+        if ok {
+            pending[stage]?.copied = true
+            deliverIfReady(stage)
+        } else {
+            // Nothing will land, so nothing will ever send DROP — without
+            // this the ghost sat at its bar forever.
+            abandonDrag(stage, why: line)
+        }
+    }
+
+    /// The tap does not see the release of a drag that crossed over — the
+    /// app's own log shows every "drop marked" preceded by a fresh press, so the
+    /// drop needed a second click. Motion after the crossing still arrives as
+    /// leftMouseDragged, which means the hardware button state is intact; so
+    /// while carrying, watch that state at 60 Hz and treat the first "up" as the
+    /// release. Armed only after it has first read "down": if it never does,
+    /// the state is not to be trusted and the behaviour is exactly today's
+    /// rather than a MARK at the arrival point.
+    private var releaseWatch: Timer?
+    private var releaseArmed = false
+    private var releaseWatchStarted = Date()
+
+    private func startReleaseWatch() {
+        stopReleaseWatch()
+        releaseArmed = false
+        releaseWatchStarted = Date()
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.releaseTick() }
+        }
+        // .common is required: the main runloop sits in event-tracking mode
+        // during a drag, the same reason the tap source uses .commonModes.
+        RunLoop.main.add(timer, forMode: .common)
+        releaseWatch = timer
+    }
+
+    private func stopReleaseWatch() {
+        releaseWatch?.invalidate()
+        releaseWatch = nil
+    }
+
+    private func releaseTick() {
+        guard carrying else { stopReleaseWatch(); return }
+        let down = CGEventSource.buttonState(.hidSystemState, button: .left)
+        if !releaseArmed {
+            if down {
+                releaseArmed = true
+            } else if Date().timeIntervalSince(releaseWatchStarted) > 0.5 {
+                KVMLog.write("release watch never armed — hardware already reports the button up; falling back to the tap")
+                stopReleaseWatch()
+            }
+            return
+        }
+        if !down {
+            KVMLog.write("release seen by the watch")
+            markDrop()
+        }
+    }
+
+    /// Stand one drag down: nothing will land, so nothing must wait. The scp
+    /// filling its folder is stopped, and the far side told to forget it.
+    private func abandonDrag(_ stage: String, why: String) {
+        if carriedStage == stage {
+            carriedStage = nil
+            stopReleaseWatch()
+        }
+        guard let drag = pending.removeValue(forKey: stage) else { return }
+        DragTransfer.cancel(stage: stage)
+        if drag.announced { pipe(for: drag.host).send("D - \(stage)") }
+        KVMLog.write("drag \(stage) abandoned: \(why)")
+    }
+
+    /// Every drag, when the KVM itself goes away.
+    private func abandonAllDrags(why: String) {
+        for stage in Array(pending.keys) { abandonDrag(stage, why: why) }
+    }
+
     /// Deliver only when the copy has finished AND the user has let go.
     ///
     /// Either order is possible: a small file lands long before the release, a
     /// large one long after. Delivering on the release alone moved an empty
     /// folder and left the file to be swept up by the NEXT drop.
-    private func deliverIfReady() {
-        guard dragReleased, dragCopied, let stage = dragStage else { return }
-        dragStage = nil
-        dragReleased = false
-        dragCopied = false
-        transport.send("DROP \(stage)")
-        KVMLog.write("delivering \(stage) on \(host)")
+    private func deliverIfReady(_ stage: String) {
+        guard let drag = pending[stage], drag.released, drag.copied, drag.marked else { return }
+        pending[stage] = nil
+        pipe(for: drag.host).send("DROP \(stage)")
+        KVMLog.write("delivering \(stage) on \(drag.host)")
     }
 
     private func startHeartbeat() {
@@ -1199,17 +1370,29 @@ final class KVMController {
         let safe = CGPoint(x: mainBounds.minX + 4, y: mainBounds.minY + 4)
         CGWarpMouseCursorPosition(safe)
 
+        // Posted at the SESSION tap, not the HID tap. Measured on 2026-09-01:
+        // posted at .cghidEventTap, the synthetic up flipped the system's
+        // left-button state to "up" 144 ms after the crossing while the finger
+        // was still down (kvm.log: "tap 6 hid=true" then "tap 6 hid=false").
+        // From then on the physical release was an up->up non-transition and
+        // generated no event at all, so the drop needed a second click, and no
+        // poll of the hardware state could rescue it because the state itself
+        // was wrong. Finder tracks its drag from the session stream, so an up
+        // inserted there still ends the drag; the HID layer never sees it and
+        // keeps reading "down" until the real release, which then arrives as a
+        // genuine .leftMouseUp. The events are still stamped, so our own tap
+        // passes them through without acting on them.
         let source = CGEventSource(stateID: .hidSystemState)
         for down in [true, false] {
             if let key = CGEvent(keyboardEventSource: source, virtualKey: 53, keyDown: down) {
                 key.setIntegerValueField(.eventSourceUserData, value: KVMController.selfStamp)
-                key.post(tap: .cghidEventTap)
+                key.post(tap: .cgSessionEventTap)
             }
         }
         if let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
                             mouseCursorPosition: safe, mouseButton: .left) {
             up.setIntegerValueField(.eventSourceUserData, value: KVMController.selfStamp)
-            up.post(tap: .cghidEventTap)
+            up.post(tap: .cgSessionEventTap)
         }
 
         // Back to the parking spot. The corner was needed for the instant of the
@@ -1353,6 +1536,9 @@ final class KVMController {
     }
 
     private func handBack() {
+        if let stage = carriedStage {
+            abandonDrag(stage, why: "the pointer came home before the file was released")
+        }
         // Release every modifier before letting go. Crossing while holding one
         // and releasing it on this side means the far machine never hears the
         // release and behaves as though it is held forever.
