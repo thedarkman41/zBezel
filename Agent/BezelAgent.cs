@@ -1102,19 +1102,54 @@ internal static class BezelAgent
                 if (parts.Length >= 3) SendAbsolute(Num(parts[1]), Num(parts[2]));
                 break;
 
+            case "MARK":
+                // The user let go. Resolve the destination NOW, while the pointer
+                // is still where they released it -- the copy may not have
+                // finished, and by the time it does the pointer will have moved.
+                // The ghost stays, parked where it was dropped, filling up: for a
+                // large file that bar is the only sign anything is happening.
+                DragGhost.Park();
+                DropTarget.Mark();
+                break;
+
             case "DROP":
-                // The release. Work out what the pointer is over, move the staged
-                // file there, and put the ghost away.
                 DragGhost.Hide();
-                BezelAgent.Log("drop -> " + DropTarget.Deliver());
+                // The bytes have landed. Move that drag's folder to the spot
+                // remembered at MARK.
+                BezelAgent.Log("drop -> " + DropTarget.Deliver(
+                    parts.Length >= 2 ? parts[1] : null));
+                break;
+
+            case "P":
+                // Heartbeat. Does nothing except give the pipe something to
+                // carry: an idle connection gets dropped somewhere between here
+                // and the Mac, and the first anyone knows of it is a crossing
+                // that goes nowhere.
+                break;
+
+            case "DI":
+                // The icon for the drag about to start, as base64 PNG. Its own
+                // message rather than a field on "D": the ghost's parameters are
+                // read positionally, and an icon big enough to be worth sending
+                // has no business in a line that is split on spaces.
+                if (parts.Length >= 2)
+                {
+                    try { DragGhost.SetIcon(Convert.FromBase64String(parts[1])); }
+                    catch (Exception e) { BezelAgent.Log("drag icon: bad payload, " + e.Message); }
+                }
+                else DragGhost.SetIcon(null);
                 break;
 
             case "D":
-                // The drag ghost. "D" alone hides it; anything after is the label
-                // of what is being carried.
-                if (parts.Length >= 2 && parts[1] != "-")
-                    DragGhost.Show(string.Join(" ", parts, 1, parts.Length - 1));
-                else DragGhost.Hide();
+                // "D <stage> <totalBytes> <label...>" shows it; "D -" hides it.
+                if (parts.Length >= 4 && parts[1] != "-")
+                {
+                    long total;
+                    long.TryParse(parts[2], out total);
+                    DragGhost.Show(parts[1], total,
+                                   string.Join(" ", parts, 3, parts.Length - 3));
+                }
+                else { DragGhost.Hide(); DragGhost.SetIcon(null); }
                 break;
 
             case "L":
@@ -2117,9 +2152,13 @@ internal static class LockOverlay
 
     /// -1 hide, 0 unlocked, 1 locked. x/y place its top-left corner; -1 leaves
     /// it where it is.
+    /// The slide in flight, if any. Touched only on the form's thread.
+    private static System.Windows.Forms.Timer _slide;
+
     public static void Set(int state, int x, int y)
     {
         if (state < 0) { Hide(); return; }
+        bool wasLocked = _locked;
         _locked = state != 0;
         EnsureUI();
         var f = _form;
@@ -2128,9 +2167,37 @@ internal static class LockOverlay
         {
             f.BeginInvoke((MethodInvoker)delegate
             {
-                if (x >= 0 && y >= 0) f.Location = new Point(x, y);
+                var target = (x >= 0 && y >= 0) ? new Point(x, y) : f.Location;
+                if (_slide != null) { _slide.Stop(); _slide.Dispose(); _slide = null; }
+
+                // Slide only when a badge already on screen is being locked: the
+                // motion IS the confirmation that the click took, and it shows
+                // where the status light went to live. A badge appearing for the
+                // first time, or one being unlocked, just goes where it is told.
+                bool slide = _locked && !wasLocked && f.Visible && target != f.Location;
+                if (!slide)
+                {
+                    f.Location = target;
+                }
+                else
+                {
+                    var start = f.Location;
+                    int t0 = Environment.TickCount;
+                    const int ms = 320;
+                    _slide = new System.Windows.Forms.Timer { Interval = 16 };
+                    _slide.Tick += delegate
+                    {
+                        double p = Math.Min(1.0, (Environment.TickCount - t0) / (double)ms);
+                        double e = 1 - Math.Pow(1 - p, 3);   // ease out: fast away, settle gently
+                        f.Location = new Point(
+                            (int)Math.Round(start.X + (target.X - start.X) * e),
+                            (int)Math.Round(start.Y + (target.Y - start.Y) * e));
+                        if (p >= 1.0 && _slide != null) { _slide.Stop(); _slide.Dispose(); _slide = null; }
+                    };
+                    _slide.Start();
+                }
                 f.Visible = true;
-                f.TopMost = true;
+                f.TopMost = true;   // re-asserted every time: TopMost decays if another topmost window appears
                 f.Invalidate();
             });
             BezelAgent.Log("lock: badge " + (_locked ? "locked" : "unlocked"));
@@ -2251,16 +2318,82 @@ internal static class LockOverlay
 /// traffic on a pipe whose whole job is to be quick.
 internal static class DragGhost
 {
-    private const int W = 220;
-    private const int H = 150;
-
     private static Thread _ui;
     private static GhostForm _form;
     private static string _label = "";
+    private static string _stage = "";
 
-    public static void Show(string label)
+    /// The icon Finder shows for whatever is being dragged, sent over as a PNG
+    /// before the ghost appears. Drawn instead of the hand-made page, so the
+    /// thing under the pointer looks like what was picked up — a thumbnail for
+    /// an image, an app's own icon for an app — rather than a generic sheet that
+    /// only means "a file".
+    ///
+    /// Null when the Mac sent nothing, and the drawn page stands in.
+    private static Image _icon;
+    private static readonly object _iconLock = new object();
+
+    public static void SetIcon(byte[] png)
+    {
+        Image next = null;
+        if (png != null && png.Length > 0)
+        {
+            try
+            {
+                // Copy out of the stream: Image keeps the stream alive, and a
+                // disposed one gives a GDI+ error at paint time rather than here.
+                using (var ms = new System.IO.MemoryStream(png))
+                using (var loaded = Image.FromStream(ms))
+                    next = new Bitmap(loaded);
+            }
+            catch (Exception e) { BezelAgent.Log("drag icon: " + e.Message); }
+        }
+        lock (_iconLock)
+        {
+            if (_icon != null) _icon.Dispose();
+            _icon = next;
+        }
+    }
+
+    private static Image CurrentIcon()
+    {
+        lock (_iconLock) { return _icon; }
+    }
+    private static long _total;
+    private static bool _parked;
+
+    /// How much of this drag has landed, measured rather than estimated: the
+    /// bytes actually present in its staging folder against the total the Mac
+    /// said it was sending. No round trips -- both numbers are known here.
+    internal static double Fraction()
+    {
+        if (_total <= 0 || string.IsNullOrEmpty(_stage)) return 0;
+        try
+        {
+            var dir = System.IO.Path.Combine(DropTarget.Staging, _stage);
+            if (!System.IO.Directory.Exists(dir)) return 0;
+            long have = 0;
+            foreach (var f in System.IO.Directory.GetFiles(dir))
+                have += new System.IO.FileInfo(f).Length;
+            return Math.Max(0, Math.Min(1, (double)have / _total));
+        }
+        catch { return 0; }
+    }
+
+    internal static bool IsParked { get { return _parked; } }
+
+    /// Stop following the cursor and stay where it was dropped.
+    public static void Park()
+    {
+        _parked = true;
+    }
+
+    public static void Show(string stage, long total, string label)
     {
         _label = label ?? "";
+        _stage = stage ?? "";
+        _total = total;
+        _parked = false;
         EnsureUI();
         var f = _form;
         if (f == null) { BezelAgent.Log("ghost: no form"); return; }
@@ -2291,7 +2424,12 @@ internal static class DragGhost
         if (_ui != null) return;
         _ui = new Thread(delegate ()
         {
-            var form = new GhostForm { Size = new Size(W, H), Visible = false };
+            // Do NOT set Size here. GhostForm sizes itself to the page it draws
+            // (PageW + 20 by PageH + LabelH); overriding it with the older
+            // W by H left the window shorter than the page, so the bottom of the
+            // sheet and the whole label strip fell outside the window and the
+            // drag showed about half an icon.
+            var form = new GhostForm { Visible = false };
             var forced = form.Handle;
             GC.KeepAlive(forced);
             _form = form;
@@ -2365,6 +2503,9 @@ internal static class DragGhost
         public void Follow()
         {
             if (!Visible) return;
+            // Parked means the user has let go: it stays where it was dropped
+            // while the rest of the bytes arrive.
+            if (DragGhost.IsParked) { Invalidate(); return; }
             var p = Cursor.Position;
             Location = new Point(p.X + 16, p.Y + 16);
         }
@@ -2388,20 +2529,55 @@ internal static class DragGhost
             g.Clear(Color.White);
 
             const int x = 10, y = 4, fold = 34;
-            using (var edge = new Pen(Color.FromArgb(150, 90, 90, 95), 2f))
+
+            var icon = DragGhost.CurrentIcon();
+            if (icon != null)
             {
-                g.DrawPath(edge, PagePath());
-                g.DrawLines(edge, new[] {
-                    new Point(x + PageW - fold, y),
-                    new Point(x + PageW - fold, y + fold),
-                    new Point(x + PageW, y + fold)
-                });
+                // Square, centred in the page area, keeping its aspect: macOS
+                // icons are square but a thumbnail of a photograph is not, and
+                // stretching one to fill would look nothing like the drag the
+                // user started.
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                int box = Math.Min(PageW, PageH - 8);
+                float scale = Math.Min((float)box / icon.Width, (float)box / icon.Height);
+                int w = (int)(icon.Width * scale), h = (int)(icon.Height * scale);
+                g.DrawImage(icon, x + (PageW - w) / 2, y + (PageH - 8 - h) / 2, w, h);
+            }
+            else
+            {
+                using (var edge = new Pen(Color.FromArgb(150, 90, 90, 95), 2f))
+                {
+                    g.DrawPath(edge, PagePath());
+                    g.DrawLines(edge, new[] {
+                        new Point(x + PageW - fold, y),
+                        new Point(x + PageW - fold, y + fold),
+                        new Point(x + PageW, y + fold)
+                    });
+                }
+
+                using (var rule = new Pen(Color.FromArgb(120, 90, 90, 95), 2f))
+                    for (int i = 0; i < 7; i++)
+                        g.DrawLine(rule, x + 18, y + fold + 22 + i * 22,
+                                         x + PageW - 18, y + fold + 22 + i * 22);
             }
 
-            using (var rule = new Pen(Color.FromArgb(120, 90, 90, 95), 2f))
-                for (int i = 0; i < 7; i++)
-                    g.DrawLine(rule, x + 18, y + fold + 22 + i * 22,
-                                     x + PageW - 18, y + fold + 22 + i * 22);
+            // Progress along the foot of the page, once there is something to
+            // report. Drawn only while a transfer is actually running, so a small
+            // file that lands instantly never flashes a bar.
+            var done = DragGhost.Fraction();
+            if (done > 0 && done < 1)
+            {
+                var barY = y + PageH - 34;
+                var barX = x + 16;
+                var barW = PageW - 32;
+                using (var track = new SolidBrush(Color.FromArgb(70, 60, 60, 65)))
+                    g.FillRectangle(track, barX, barY, barW, 8);
+                using (var fill = new SolidBrush(Color.FromArgb(220, 40, 110, 220)))
+                    g.FillRectangle(fill, barX, barY, (int)(barW * done), 8);
+                using (var pct = new Font("Segoe UI", 8.5f))
+                using (var ink = new SolidBrush(Color.FromArgb(200, 40, 40, 45)))
+                    g.DrawString(((int)(done * 100)) + "%", pct, ink, barX, barY + 10);
+            }
 
             if (_label.Length > 0)
                 using (var font = new Font("Segoe UI", 10f))
@@ -2443,21 +2619,37 @@ internal static class DropTarget
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT { public int X; public int Y; }
 
-    /// Move everything staged to wherever the pointer is, and say where that was.
-    public static string Deliver()
+    private static string _marked;
+
+    /// Remember where the pointer was when the user let go.
+    public static void Mark()
     {
-        string destination = Resolve();
+        _marked = Resolve();
+        BezelAgent.Log("drop target marked: " + _marked);
+    }
+
+    /// Move one drag's folder to the spot marked at release.
+    public static string Deliver(string stage)
+    {
+        string destination = _marked ?? Resolve();
+        _marked = null;
+        var source = string.IsNullOrEmpty(stage) ? Staging : Path.Combine(Staging, stage);
         try
         {
-            if (!Directory.Exists(Staging)) return destination + " (nothing staged)";
+            if (!Directory.Exists(source)) return destination + " (nothing staged at " + source + ")";
             Directory.CreateDirectory(destination);
             int moved = 0;
-            foreach (var file in Directory.GetFiles(Staging))
+            foreach (var file in Directory.GetFiles(source))
             {
                 var target = Path.Combine(destination, Path.GetFileName(file));
                 target = Unique(target);
                 File.Move(file, target);
                 moved++;
+            }
+            // Leave nothing behind: a folder left in staging would be swept up
+            // by a later drop, which is exactly the bug this replaced.
+            if (!string.IsNullOrEmpty(stage)) {
+                try { Directory.Delete(source, true); } catch { }
             }
             return destination + " (" + moved + " item" + (moved == 1 ? "" : "s") + ")";
         }

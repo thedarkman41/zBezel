@@ -39,9 +39,16 @@ enum DragTransfer {
     /// scp rather than the agent's own channel: that channel is a line-oriented
     /// pipe carrying pointer events, and pushing a few hundred megabytes of
     /// base64 down it would stall the pointer for as long as the copy took.
-    static func send(_ files: [URL], to host: String,
+    /// Copy into a folder of this drag's own, named by `stage`.
+    ///
+    /// Not a shared staging folder. The far side moves whatever it finds when the
+    /// drop arrives, so a shared one sweeps up leftovers from an earlier drag —
+    /// and if a copy is still in flight, sweeps up nothing at all and delivers
+    /// that file with the NEXT drop instead. One folder per drag makes both
+    /// impossible.
+    static func send(_ files: [URL], to host: String, stage: String,
                      progress: @escaping (String) -> Void,
-                     done: @escaping (String) -> Void) {
+                     done: @escaping (Bool, String) -> Void) {
         guard !files.isEmpty else { return }
         DispatchQueue.global(qos: .utility).async {
             let names = files.map { $0.lastPathComponent }
@@ -54,7 +61,7 @@ enum DragTransfer {
             mkdir.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
             mkdir.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host,
                                "New-Item -ItemType Directory -Force -Path "
-                               + "'\(staging)' | Out-Null"]
+                               + "'\(staging)\\\(stage)' | Out-Null"]
             mkdir.standardOutput = FileHandle.nullDevice
             mkdir.standardError = FileHandle.nullDevice
             try? mkdir.run()
@@ -64,12 +71,12 @@ enum DragTransfer {
             scp.executableURL = URL(fileURLWithPath: "/usr/bin/scp")
             scp.arguments = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-r"]
                 + files.map { $0.path }
-                + ["\(host):/Temp/"]
+                + ["\(host):/Temp/\(stage)/"]
             let err = Pipe()
             scp.standardOutput = FileHandle.nullDevice
             scp.standardError = err
             do { try scp.run() } catch {
-                done("could not start the copy: \(error.localizedDescription)")
+                done(false, "could not start the copy: \(error.localizedDescription)")
                 return
             }
             let problem = String(data: err.fileHandleForReading.readDataToEndOfFile(),
@@ -77,11 +84,11 @@ enum DragTransfer {
             scp.waitUntilExit()
 
             if scp.terminationStatus == 0 {
-                done(files.count == 1
-                     ? "\(names[0]) ready on \(host) — release to place it"
-                     : "\(files.count) items ready on \(host) — release to place them")
+                done(true, files.count == 1
+                     ? "\(names[0]) ready on \(host)"
+                     : "\(files.count) items ready on \(host)")
             } else {
-                done("copy failed: "
+                done(false, "copy failed: "
                      + problem.trimmingCharacters(in: .whitespacesAndNewlines)
                        .split(separator: "\n").last.map(String.init).orEmpty)
             }
