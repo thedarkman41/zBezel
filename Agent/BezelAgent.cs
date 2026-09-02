@@ -21,6 +21,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO.Pipes;
 using System.Runtime.InteropServices;
@@ -267,6 +268,8 @@ internal static class BezelAgent
             case "cursor":   CmdCursor();            return true;
             case "keystate": CmdKeyState();          return true;
             case "clip":     CmdClip();              return true;
+            case "screenshot": CmdScreenshot(args);  return true;
+            case "stream":     CmdStream(args);      return true;
             default:       return false;
         }
     }
@@ -281,7 +284,7 @@ internal static class BezelAgent
 
     // ---- JSON --------------------------------------------------------------
 
-    private static string Esc(string s)
+    internal static string Esc(string s)
     {
         if (s == null) return "";
         var sb = new StringBuilder();
@@ -428,7 +431,7 @@ internal static class BezelAgent
         // Before anything reads a coordinate or a metric.
         MakeDpiAware();
         Console.OutputEncoding = Encoding.UTF8;
-        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe|reclaim"); return 1; }
+        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe|screenshot|stream|reclaim"); return 1; }
 
         // serve/client/relay never touch a monitor themselves, and the client runs
         // in session 0 where there are never any monitors — so enumerating first
@@ -1437,6 +1440,168 @@ internal static class BezelAgent
     /// Needed because SSH lands in session 0, which has a clipboard of its own
     /// that nothing ever writes to — reading it there would answer confidently
     /// about the wrong thing.
+    // ---- Seeing the screen -------------------------------------------------
+    //
+    // The KVM can move a pointer on this machine but the Mac cannot see where
+    // it landed unless the monitor happens to be showing this input. These two
+    // commands are the eyes: a single capture of the real console, and a
+    // stream of them. Both run here, in the interactive session, because a
+    // process in session 0 (where SSH lands) has no desktop to capture — the
+    // same reason the DDC/CI calls live in this service. Neither can see the
+    // secure desktop (login screen, UAC); that is by design in Windows and the
+    // capture simply comes back black there. Wake Console is the tool for that.
+
+    /// One JPEG of the whole virtual screen, cursor composited in, since a KVM
+    /// user's first question is "where is my pointer". `maxWidth` scales it
+    /// down (a 4K desktop is a 3 MB PNG and nobody needs that to see a dialog);
+    /// `quality` is the JPEG quality 1-100.
+    internal static byte[] CaptureJpeg(int maxWidth, long quality, out int width, out int height)
+    {
+        var bounds = SystemInformation.VirtualScreen;   // physical pixels: the process is per-monitor DPI aware
+        using (var bmp = new Bitmap(bounds.Width, bounds.Height, PixelFormat.Format32bppArgb))
+        {
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size, CopyPixelOperation.SourceCopy);
+                DrawCursor(g, bounds);
+            }
+
+            Image src = bmp;
+            Bitmap scaled = null;
+            if (maxWidth > 0 && bmp.Width > maxWidth)
+            {
+                int h = Math.Max(1, (int)((long)bmp.Height * maxWidth / bmp.Width));
+                scaled = new Bitmap(maxWidth, h, PixelFormat.Format24bppRgb);
+                using (var g2 = Graphics.FromImage(scaled))
+                {
+                    g2.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                    g2.DrawImage(bmp, 0, 0, maxWidth, h);
+                }
+                src = scaled;
+            }
+
+            try
+            {
+                width = src.Width; height = src.Height;
+                ImageCodecInfo jpeg = null;
+                foreach (var codec in ImageCodecInfo.GetImageEncoders())
+                    if (codec.MimeType == "image/jpeg") { jpeg = codec; break; }
+                using (var ms = new MemoryStream())
+                {
+                    if (jpeg == null) { src.Save(ms, ImageFormat.Png); return ms.ToArray(); }
+                    using (var ps = new EncoderParameters(1))
+                    {
+                        ps.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality,
+                                                           Math.Max(1L, Math.Min(100L, quality)));
+                        src.Save(ms, jpeg, ps);
+                    }
+                    return ms.ToArray();
+                }
+            }
+            finally { if (scaled != null) scaled.Dispose(); }
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ICONINFO { public int fIcon; public int xHotspot; public int yHotspot; public IntPtr hbmMask; public IntPtr hbmColor; }
+    [DllImport("user32.dll")] private static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
+    [DllImport("user32.dll")] private static extern bool DrawIconEx(IntPtr hdc, int x, int y, IntPtr hIcon, int cx, int cy,
+                                                                    int istepIfAniCur, IntPtr hbrFlickerFreeDraw, int diFlags);
+    [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr hObject);
+
+    /// CopyFromScreen leaves the cursor out; draw the real one, at its hotspot.
+    private static void DrawCursor(Graphics g, Rectangle bounds)
+    {
+        try
+        {
+            var ci = new CURSORINFO();
+            ci.cbSize = Marshal.SizeOf(typeof(CURSORINFO));
+            if (!GetCursorInfo(ref ci) || ci.flags != 1 /* CURSOR_SHOWING */ || ci.hCursor == IntPtr.Zero) return;
+            ICONINFO ii;
+            if (!GetIconInfo(ci.hCursor, out ii)) return;
+            try
+            {
+                int x = ci.ptScreenPos.x - bounds.Left - ii.xHotspot;
+                int y = ci.ptScreenPos.y - bounds.Top - ii.yHotspot;
+                IntPtr hdc = g.GetHdc();
+                try { DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, IntPtr.Zero, 3 /* DI_NORMAL */); }
+                finally { g.ReleaseHdc(hdc); }
+            }
+            finally
+            {
+                if (ii.hbmMask != IntPtr.Zero) DeleteObject(ii.hbmMask);
+                if (ii.hbmColor != IntPtr.Zero) DeleteObject(ii.hbmColor);
+            }
+        }
+        catch (Exception) { /* a missing cursor is not worth a failed capture */ }
+    }
+
+    /// `screenshot [maxWidth] [quality] [file]` — the JPEG rides the reply
+    /// inline as base64 (so it comes back over the relay channel the Mac
+    /// already holds open, no second SSH round trip) and is also written to
+    /// `file` (default C:\Temp\bezel-screen.jpg) for anyone who wants to open it.
+    private static int CmdScreenshot(string[] args)
+    {
+        int maxWidth = 1600; long quality = 70;
+        string file = Path.Combine(DropTarget.Staging, "bezel-screen.jpg");
+        if (args.Length > 1) int.TryParse(args[1], out maxWidth);
+        if (args.Length > 2) long.TryParse(args[2], out quality);
+        if (args.Length > 3 && args[3].Length > 0) file = args[3];
+
+        int w, h;
+        byte[] jpeg;
+        try { jpeg = CaptureJpeg(maxWidth, quality, out w, out h); }
+        catch (Exception e)
+        {
+            Console.WriteLine("{\"ok\":false,\"error\":\"capture failed: " + Esc(e.Message) + "\"}");
+            return 1;
+        }
+        string written = "";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(file));
+            File.WriteAllBytes(file, jpeg);
+            written = file;
+        }
+        catch (Exception e) { Log("screenshot: could not write " + file + ": " + e.Message); }
+
+        var sb = new StringBuilder(jpeg.Length * 4 / 3 + 256);
+        sb.Append("{\"ok\":true,\"width\":").Append(w).Append(",\"height\":").Append(h)
+          .Append(",\"bytes\":").Append(jpeg.Length)
+          .Append(",\"path\":\"").Append(Esc(written)).Append("\"")
+          .Append(",\"jpegBase64\":\"").Append(Convert.ToBase64String(jpeg)).Append("\"}");
+        Console.WriteLine(sb.ToString());
+        return 0;
+    }
+
+    /// `stream start [port] [fps] [maxWidth] [quality]` / `stream stop` /
+    /// `stream status`. The server binds loopback only; reach it through an SSH
+    /// tunnel (`ssh -N -L 8765:127.0.0.1:8765 <host>`) and open
+    /// http://127.0.0.1:8765/ — the tunnel is the authentication.
+    private static int CmdStream(string[] args)
+    {
+        string verb = args.Length > 1 ? args[1].ToLowerInvariant() : "status";
+        switch (verb)
+        {
+            case "start":
+            {
+                int port = 8765, fps = 4, maxWidth = 1600; long quality = 60;
+                if (args.Length > 2) int.TryParse(args[2], out port);
+                if (args.Length > 3) int.TryParse(args[3], out fps);
+                if (args.Length > 4) int.TryParse(args[4], out maxWidth);
+                if (args.Length > 5) long.TryParse(args[5], out quality);
+                Console.WriteLine(ScreenStream.Start(port, fps, maxWidth, quality));
+                return 0;
+            }
+            case "stop":
+                Console.WriteLine(ScreenStream.Stop());
+                return 0;
+            default:
+                Console.WriteLine(ScreenStream.Status());
+                return 0;
+        }
+    }
+
     private static int CmdClip()
     {
         string result = null;
@@ -1726,6 +1891,24 @@ internal static class BezelAgent
     /// the API's two session-id parameters are documented ambiguously enough
     /// that getting them backwards is a real risk, and tscon's argument order
     /// is unambiguous and is what every operator has tested.
+    /// The verdict goes to stdout for whoever ran this by hand, AND to
+    /// reclaim.log beside the executable: the scheduled task runs this as
+    /// SYSTEM with no console anyone can see, and Log() would land in SYSTEM's
+    /// profile where nobody looks. The Mac reads the last line of this file to
+    /// learn whether the move actually happened — schtasks /run returns the
+    /// moment the task is queued and says nothing about tscon.
+    private static void EmitReclaim(StringBuilder sb)
+    {
+        var line = sb.ToString();
+        Console.WriteLine(line);
+        try
+        {
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "reclaim.log");
+            File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + line + Environment.NewLine);
+        }
+        catch (Exception) { }
+    }
+
     private static int CmdReclaim()
     {
         IntPtr info; int count;
@@ -1769,7 +1952,7 @@ internal static class BezelAgent
             if (s.SessionId == console && s.State == WTSActive && SessionUser(s.SessionId) != "")
             {
                 sb.Append(",\"moved\":false,\"reason\":\"console already active\"}");
-                Console.WriteLine(sb.ToString());
+                EmitReclaim(sb);
                 return 0;
             }
         }
@@ -1789,7 +1972,7 @@ internal static class BezelAgent
         if (target == null)
         {
             sb.Append(",\"moved\":false,\"reason\":\"no disconnected user session\"}");
-            Console.WriteLine(sb.ToString());
+            EmitReclaim(sb);
             return 2;
         }
 
@@ -1815,7 +1998,7 @@ internal static class BezelAgent
         catch (Exception e)
         {
             sb.Append(",\"moved\":false,\"reason\":\"").Append(Esc(e.Message)).Append("\"}");
-            Console.WriteLine(sb.ToString());
+            EmitReclaim(sb);
             return 1;
         }
 
@@ -1823,7 +2006,7 @@ internal static class BezelAgent
           .Append(",\"from\":").Append(t.SessionId)
           .Append(",\"exit\":").Append(exit)
           .Append(",\"tscon\":\"").Append(Esc(output)).Append("\"}");
-        Console.WriteLine(sb.ToString());
+        EmitReclaim(sb);
         return exit == 0 ? 0 : 1;
     }
 
@@ -2153,6 +2336,171 @@ internal static class BezelAgent
             Console.Out.Flush();
         }
         return 0;
+    }
+}
+
+
+/// The console as a picture that keeps updating: an MJPEG server on loopback.
+///
+/// Plain HTTP over a raw socket rather than HttpListener, which wants a URL
+/// reservation that only an elevated shell can grant — and this runs as the
+/// logged-in user in the interactive session, on purpose. Loopback only: the
+/// way in is an SSH tunnel, so the key that already opens the KVM channel is
+/// the key that opens the picture. Frames are captured only while somebody is
+/// watching; an idle server costs nothing.
+///
+///   GET /            a page showing the stream
+///   GET /stream.mjpg multipart/x-mixed-replace, one JPEG per frame
+///   GET /frame.jpg   a single JPEG, for anything that cannot do multipart
+internal static class ScreenStream
+{
+    private static readonly object _sync = new object();
+    private static System.Net.Sockets.TcpListener _listener;
+    private static volatile bool _running;
+    private static int _port, _fps, _maxWidth;
+    private static long _quality;
+    private static int _watching;
+    private static long _framesSent;
+
+    public static string Start(int port, int fps, int maxWidth, long quality)
+    {
+        lock (_sync)
+        {
+            if (_running)
+                return "{\"ok\":true,\"streaming\":true,\"port\":" + _port + ",\"already\":true}";
+            _port = port; _fps = Math.Max(1, Math.Min(30, fps)); _maxWidth = maxWidth; _quality = quality;
+            try
+            {
+                _listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, _port);
+                _listener.Start();
+            }
+            catch (Exception e)
+            {
+                _listener = null;
+                return "{\"ok\":false,\"error\":\"cannot listen on 127.0.0.1:" + _port + ": " + BezelAgent.Esc(e.Message) + "\"}";
+            }
+            _running = true;
+            _framesSent = 0;
+            var t = new Thread(AcceptLoop);
+            t.IsBackground = true;
+            t.Start();
+        }
+        BezelAgent.Log("stream: listening on 127.0.0.1:" + _port + " at " + _fps + " fps, width " + _maxWidth);
+        return "{\"ok\":true,\"streaming\":true,\"port\":" + _port + ",\"fps\":" + _fps
+             + ",\"maxWidth\":" + _maxWidth + ",\"quality\":" + _quality + "}";
+    }
+
+    public static string Stop()
+    {
+        lock (_sync)
+        {
+            if (!_running) return "{\"ok\":true,\"streaming\":false}";
+            _running = false;
+            try { _listener.Stop(); } catch (Exception) { }
+            _listener = null;
+        }
+        BezelAgent.Log("stream: stopped after " + _framesSent + " frame(s)");
+        return "{\"ok\":true,\"streaming\":false,\"framesSent\":" + _framesSent + "}";
+    }
+
+    public static string Status()
+    {
+        return "{\"ok\":true,\"streaming\":" + (_running ? "true" : "false") + ",\"port\":" + _port
+             + ",\"watching\":" + _watching + ",\"framesSent\":" + _framesSent + "}";
+    }
+
+    private static void AcceptLoop()
+    {
+        while (_running)
+        {
+            System.Net.Sockets.TcpClient client;
+            try { client = _listener.AcceptTcpClient(); }
+            catch (Exception) { break; }       // Stop() closed the listener
+            ThreadPool.QueueUserWorkItem(delegate { Serve(client); });
+        }
+    }
+
+    private static void Serve(System.Net.Sockets.TcpClient client)
+    {
+        try
+        {
+            using (client)
+            using (var s = client.GetStream())
+            {
+                client.NoDelay = true;
+                client.ReceiveTimeout = 10000;
+                var reader = new StreamReader(s, Encoding.ASCII, false, 1024, true);
+                string request = reader.ReadLine();
+                if (request == null) return;
+                string line;
+                while ((line = reader.ReadLine()) != null && line.Length > 0) { }   // headers, ignored
+
+                var parts = request.Split(' ');
+                string path = parts.Length > 1 ? parts[1] : "/";
+
+                if (path.StartsWith("/stream"))
+                {
+                    WriteHead(s, "200 OK", "multipart/x-mixed-replace; boundary=frame", -1);
+                    Interlocked.Increment(ref _watching);
+                    try
+                    {
+                        int interval = 1000 / _fps;
+                        while (_running)
+                        {
+                            int t0 = Environment.TickCount;
+                            int w, h;
+                            byte[] jpeg = BezelAgent.CaptureJpeg(_maxWidth, _quality, out w, out h);
+                            var head = Encoding.ASCII.GetBytes("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                                                               + jpeg.Length + "\r\n\r\n");
+                            s.Write(head, 0, head.Length);
+                            s.Write(jpeg, 0, jpeg.Length);
+                            s.Write(new byte[] { 13, 10 }, 0, 2);
+                            s.Flush();
+                            Interlocked.Increment(ref _framesSent);
+                            int spent = Environment.TickCount - t0;
+                            if (spent < interval) Thread.Sleep(interval - spent);
+                        }
+                    }
+                    finally { Interlocked.Decrement(ref _watching); }
+                }
+                else if (path.StartsWith("/frame"))
+                {
+                    int w, h;
+                    byte[] jpeg = BezelAgent.CaptureJpeg(_maxWidth, _quality, out w, out h);
+                    WriteHead(s, "200 OK", "image/jpeg", jpeg.Length);
+                    s.Write(jpeg, 0, jpeg.Length);
+                    s.Flush();
+                }
+                else
+                {
+                    var html = Encoding.UTF8.GetBytes(
+                        "<!doctype html><html><head><meta charset=utf-8><title>" + Environment.MachineName
+                        + " console</title><style>html,body{margin:0;height:100%;background:#111}"
+                        + "img{display:block;max-width:100%;max-height:100vh;margin:0 auto}</style></head>"
+                        + "<body><img src=\"/stream.mjpg\" alt=\"" + Environment.MachineName + "\"></body></html>");
+                    WriteHead(s, "200 OK", "text/html; charset=utf-8", html.Length);
+                    s.Write(html, 0, html.Length);
+                    s.Flush();
+                }
+            }
+        }
+        catch (Exception)
+        {
+            // The viewer went away mid-frame. Nothing to do; the next one starts fresh.
+        }
+    }
+
+    private static void WriteHead(Stream s, string status, string contentType, int length)
+    {
+        var sb = new StringBuilder();
+        sb.Append("HTTP/1.1 ").Append(status).Append("\r\n")
+          .Append("Content-Type: ").Append(contentType).Append("\r\n")
+          .Append("Cache-Control: no-store\r\n")
+          .Append("Connection: close\r\n");
+        if (length >= 0) sb.Append("Content-Length: ").Append(length).Append("\r\n");
+        sb.Append("\r\n");
+        var bytes = Encoding.ASCII.GetBytes(sb.ToString());
+        s.Write(bytes, 0, bytes.Length);
     }
 }
 

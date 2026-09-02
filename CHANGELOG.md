@@ -2,6 +2,50 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.48 — 2026-09-01
+
+**Wake the console for real, and give the Mac eyes on the screen**
+
+WAKE CONSOLE NOW LOGS ON. The RDP touch authenticated (NLA passed, the
+Security log showed 4624 type 3) and then disconnected the instant the
+connection sequence finished, which left rigel with a ConnectQuery session
+that had nobody in it and a console that never moved -- Windows simply tore
+the placeholder down. Two things were missing in rdp.c: the client never
+asked for AutoLogon, so the server accepted the credentials for the
+connection and then put a logon screen inside the session for nobody to
+fill in; and nothing waited for Winlogon. The touch now sets
+FreeRDP_AutoLogonEnabled, registers SaveSessionInfo before the connection
+sequence (a reconnect to an existing desktop can report its logon while the
+sequence is still running), and pumps the connection until the server names
+the session it logged us into or LogonErrorInfo refuses it, up to 30 s.
+Failures come back named: LOGON_TIMEOUT, LOGON_FAILED_*, the LOGON_MSG_*
+verdicts, DROPPED_BEFORE_LOGON. Measured on rigel with the user already at
+the console: NLA, then a type-10 logon that reconnected session 1 to RDP,
+our disconnect, an empty console placeholder, and tscon putting session 1
+back -- the card ends on "the console is showing the desktop".
+
+THE RECLAIM VERDICT IS REAL. `schtasks /run` returns when the task is
+QUEUED, so the Mac reported "done" knowing nothing about tscon, and the
+agent's JSON verdict went to a SYSTEM console nobody can see. `BezelAgent
+reclaim` now appends that line to bezel\reclaim.log beside itself; the Mac
+notes the file's size, starts the task, waits for the file to grow, and
+reads the line -- moved, "console already active", or the tscon error --
+rather than the previous run's answer.
+
+THE WAKE CARD TARGETS ANY MACHINE. A picker offers the proxy host and every
+KVM machine, with the account remembered per host (a local account and a
+Microsoft one sign in differently). The secret is zBezel-rdp-<host>.
+
+THE MAC CAN SEE THE SCREEN. Two verbs in the interactive-session service,
+because a process in session 0 has no desktop to capture: `screenshot`
+returns one JPEG of the whole virtual screen with the real cursor composited
+in, inline as base64 on the existing relay channel and also written to
+C:\Temp\bezel-screen.jpg; `stream start|stop|status` serves MJPEG on
+loopback (GET /, /stream.mjpg, /frame.jpg) from a raw socket rather than
+HttpListener, whose URL reservation needs an elevated shell. Reached through
+an SSH tunnel, so the key that opens the KVM channel opens the picture.
+Neither can see the secure desktop; that is what Wake Console is for.
+
 ## 0.1.47 — 2026-09-01
 
 **Refuse to call a deploy done when the old agent binary survived**

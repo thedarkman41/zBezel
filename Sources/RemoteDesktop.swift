@@ -99,19 +99,32 @@ final class RemoteDesktop: ObservableObject {
                     + "and set the domain to MicrosoftAccount. A PIN is not the password."
                     : " Check the password enrolled as \(BeaconSecrets.secretName(forHost: host))."
                 step = .failed("\(host) rejected the sign-in." + hint)
+            } else if name == "LOGON_TIMEOUT" {
+                // The credentials passed NLA and the connection came up, but
+                // Winlogon never reported a session in 30 s. Nothing to reclaim.
+                note("connect ok, but \(host) never reported the session logged on")
+                step = .failed("\(host) accepted the sign-in but never logged the session on. "
+                             + "Nothing was changed on its console.")
+            } else if name.hasPrefix("LOGON_") {
+                note("logon refused after NLA: \(name)")
+                step = .failed("\(host) accepted the credentials but refused the logon: \(name).")
+            } else if name == "DROPPED_BEFORE_LOGON" {
+                note("the server dropped the connection before reporting a logon")
+                step = .failed("\(host) dropped the connection before the session logged on.")
             } else {
                 note("connect failed: \(name) (0x\(String(code, radix: 16)))")
                 step = .failed("RDP connection failed: \(name)")
             }
             return
 
-        case .success(let fingerprint):
+        case .success(let fingerprint, let session):
             if pinned == nil, let fingerprint, !fingerprint.isEmpty {
                 pinnedFingerprints[host.lowercased()] = fingerprint
                 UserDefaults.standard.set(pinnedFingerprints, forKey: "rdpFingerprints")
                 note("pinned host key \(fingerprint.prefix(23))…")
             }
-            note("session created and dropped — now Disconnected")
+            note(session > 0 ? "logged on as session \(session), then dropped — now Disconnected"
+                             : "logged on and dropped — now Disconnected")
         }
 
         // 2 — hand it to the console. Over SSH, because when nobody is logged
@@ -119,28 +132,75 @@ final class RemoteDesktop: ObservableObject {
         step = .reclaiming
         let target = sshTarget ?? host
         note("asking \(target) to move the session to the console")
+
+        // `schtasks /run` returns the moment the task is QUEUED, so its exit
+        // status says nothing about tscon. The agent appends one JSON line to
+        // bezel\reclaim.log beside itself when it finishes — "moved" and a
+        // reason — so: note the file's size, start the task, wait for the
+        // file to grow, and read that line. Reading without waiting would
+        // report the PREVIOUS run's verdict as this one's.
+        let script = """
+        $log = "$HOME\\bezel\\reclaim.log"; \
+        $before = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }; \
+        schtasks /run /tn BezelReclaimConsole | Out-Null; \
+        if ($LASTEXITCODE -ne 0) { 'NOTASK'; exit 0 }; \
+        $grew = $false; \
+        for ($i = 0; $i -lt 60; $i++) { \
+            Start-Sleep -Milliseconds 500; \
+            $len = if (Test-Path $log) { (Get-Item $log).Length } else { 0 }; \
+            if ($len -gt $before) { $grew = $true; break } \
+        }; \
+        if ($grew) { Get-Content $log -Tail 1 } else { 'NOVERDICT' }
+        """
         let reclaim = await Self.run("/usr/bin/ssh",
                                      ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-                                      target, "schtasks /run /tn BezelReclaimConsole"])
-        guard reclaim.status == 0 else {
-            note("reclaim task failed: \(reclaim.output)")
-            step = .failed("The session exists but could not be moved to the console. "
-                         + "Is BezelReclaimConsole installed? \(reclaim.output)")
+                                      target, script])
+        let verdict = reclaim.output.split(separator: "\n").last.map(String.init)?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        guard reclaim.status == 0, !verdict.isEmpty else {
+            note("reclaim: could not run the task — \(reclaim.output)")
+            step = .failed("The session exists but \(target) could not be reached over SSH "
+                         + "to move it to the console: \(reclaim.output)")
             return
         }
+        note("reclaim: \(verdict)")
 
-        note("done — the console should be showing the desktop")
-        step = .done
+        switch verdict {
+        case "NOTASK":
+            step = .failed("BezelReclaimConsole is not installed on \(host). "
+                         + "Run the agent installer against it again.")
+        case "NOVERDICT":
+            step = .failed("The reclaim task on \(host) started but reported nothing in 30 s. "
+                         + "Is the agent there current?")
+        default:
+            // "<timestamp>  {json}" — the verdict is the object.
+            let json = verdict.drop(while: { $0 != "{" })
+            let object = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [String: Any]
+            let moved = object?["moved"] as? Bool ?? false
+            let reason = object?["reason"] as? String ?? ""
+            if moved {
+                note("done — session \(object?["from"] ?? "?") is on the console")
+                step = .done
+            } else if reason == "console already active" {
+                note("done — the console was already showing a desktop")
+                step = .done
+            } else {
+                let tscon = object?["tscon"] as? String ?? ""
+                step = .failed("The session exists but was not moved to the console: "
+                             + (reason.isEmpty ? (tscon.isEmpty ? verdict : tscon) : reason))
+            }
+        }
     }
 
     // MARK: - The C call
 
     private enum TouchResult {
-        case success(String?)
+        case success(fingerprint: String?, session: UInt32)
         case failure(String, Int32)
     }
 
-    /// Blocking, so it goes off the main actor.
+    /// Blocking (up to ~40 s while it waits for Winlogon), so it goes off the
+    /// main actor.
     private nonisolated static func touch(host: String, user: String, domain: String?,
                                           password: String,
                                           expecting fingerprint: String?) async -> TouchResult {
@@ -148,6 +208,7 @@ final class RemoteDesktop: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 var errorName = [CChar](repeating: 0, count: 128)
                 var seen      = [CChar](repeating: 0, count: 256)
+                var session: UInt32 = 0
 
                 let rc = host.withCString { h in
                     user.withCString { u in
@@ -156,7 +217,8 @@ final class RemoteDesktop: ObservableObject {
                                 withOptionalCString(fingerprint) { f in
                                     zbezel_rdp_touch(h, 3389, u, d, p, f,
                                                      &errorName, Int32(errorName.count),
-                                                     &seen, Int32(seen.count))
+                                                     &seen, Int32(seen.count),
+                                                     &session)
                                 }
                             }
                         }
@@ -165,7 +227,8 @@ final class RemoteDesktop: ObservableObject {
 
                 let seenFingerprint = String(cString: seen)
                 if rc == 0 {
-                    continuation.resume(returning: .success(seenFingerprint.isEmpty ? nil : seenFingerprint))
+                    continuation.resume(returning: .success(fingerprint: seenFingerprint.isEmpty ? nil : seenFingerprint,
+                                                            session: session))
                 } else {
                     continuation.resume(returning: .failure(String(cString: errorName), Int32(rc)))
                 }

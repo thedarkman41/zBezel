@@ -8,32 +8,67 @@ import SwiftUI
 /// secure desktop and Windows refuses synthetic input to it — so the only way
 /// in is to authenticate over the network and push the resulting session onto
 /// the console.
+///
+/// Any KVM machine can lose its keyboard the same way, so every one of them is
+/// offered, not just the proxy.
 struct WakeConsoleCard: View {
     @ObservedObject var controller: MonitorController
     @StateObject private var desktop = RemoteDesktop()
 
-    @AppStorage("wakeUser")   private var user: String = ""
-    @AppStorage("wakeDomain") private var domain: String = ""
+    /// Which machine to wake. Remembered across launches.
+    @AppStorage("wakeHost") private var chosenHost: String = ""
+    /// The account, kept per host: the proxy may be a plain local account and
+    /// a KVM machine a Microsoft one, and the two sign in differently.
+    @State private var user = ""
+    @State private var domain = ""
     @State private var showDetail = false
 
-    private var host: String { controller.proxyHost }
+    /// The proxy host and every KVM machine, once each, proxy first.
+    private var hosts: [String] {
+        var out: [String] = []
+        for h in [controller.proxyHost] + controller.kvmMachines.map(\.host)
+        where !h.isEmpty && !out.contains(h) {
+            out.append(h)
+        }
+        return out
+    }
+
+    private var host: String {
+        hosts.contains(chosenHost) ? chosenHost : (hosts.first ?? "")
+    }
 
     var body: some View {
         Card(title: "Wake Console", systemImage: "person.badge.key",
              help: """
-             After a reboot the proxy host sits at its login screen, and no KVM can \
-             type there: that screen is Windows' secure desktop and synthetic input \
-             to it is blocked by design. This signs in over RDP instead, then asks \
-             the machine to move that session onto the physical console, where the \
-             agent can see the real monitors again. The password comes from Beacon.
+             After a reboot a machine sits at its login screen, and no KVM can type \
+             there: that screen is Windows' secure desktop and synthetic input to it \
+             is blocked by design. This signs in over RDP instead, then asks the \
+             machine to move that session onto the physical console, where the agent \
+             can see the real monitors again. The password comes from Beacon, under \
+             the name zBezel-rdp-<host>.
              """) {
+
+            if hosts.count > 1 {
+                HStack(spacing: 8) {
+                    Text("Machine")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.textPrimary)
+                        .frame(width: 46, alignment: .leading)
+                    Picker("", selection: Binding(get: { host }, set: { pick($0) })) {
+                        ForEach(hosts, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 150)
+                }
+            }
 
             HStack(spacing: 8) {
                 Text("User")
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.textPrimary)
                     .frame(width: 46, alignment: .leading)
-                TextField("windows account", text: $user)
+                TextField("windows account", text: userField)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(width: 150)
@@ -57,7 +92,7 @@ struct WakeConsoleCard: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Theme.textPrimary)
                     .frame(width: 46, alignment: .leading)
-                TextField("blank, or MicrosoftAccount", text: $domain)
+                TextField("blank, or MicrosoftAccount", text: domainField)
                     .textFieldStyle(.roundedBorder)
                     .font(.system(size: 12, design: .monospaced))
                     .frame(width: 150)
@@ -102,7 +137,51 @@ struct WakeConsoleCard: View {
                         + "rebuilt — or that this is not the same machine.")
             }
         }
+        .onAppear { load() }
     }
+
+    // MARK: Per-host account
+
+    private static let accountsKey = "wakeAccounts"
+
+    private func pick(_ h: String) {
+        chosenHost = h
+        load()
+    }
+
+    /// Bindings that write through to the per-host store on every edit, so
+    /// switching machines and back never loses what was typed.
+    private var userField: Binding<String> {
+        Binding(get: { user }, set: { user = $0; save() })
+    }
+    private var domainField: Binding<String> {
+        Binding(get: { domain }, set: { domain = $0; save() })
+    }
+
+    private func load() {
+        let all = UserDefaults.standard.dictionary(forKey: Self.accountsKey)
+            as? [String: [String: String]] ?? [:]
+        if let saved = all[host.lowercased()] {
+            user = saved["user"] ?? ""
+            domain = saved["domain"] ?? ""
+        } else if host.lowercased() == controller.proxyHost.lowercased() {
+            // Before accounts were per host there was one, and it was the proxy's.
+            user = UserDefaults.standard.string(forKey: "wakeUser") ?? ""
+            domain = UserDefaults.standard.string(forKey: "wakeDomain") ?? ""
+        } else {
+            user = ""
+            domain = ""
+        }
+    }
+
+    private func save() {
+        var all = UserDefaults.standard.dictionary(forKey: Self.accountsKey)
+            as? [String: [String: String]] ?? [:]
+        all[host.lowercased()] = ["user": user, "domain": domain]
+        UserDefaults.standard.set(all, forKey: Self.accountsKey)
+    }
+
+    // MARK: State
 
     private var isBusy: Bool {
         switch desktop.step {
@@ -117,7 +196,7 @@ struct WakeConsoleCard: View {
     private var statusLine: some View {
         switch desktop.step {
         case .idle:
-            Text(host.isEmpty ? "Set a proxy host above first."
+            Text(host.isEmpty ? "Set a proxy host or a KVM machine first."
                               : "Signs in to \(host) and hands the session to its console.")
                 .font(.system(size: 11.5))
                 .foregroundStyle(Theme.textDim)
