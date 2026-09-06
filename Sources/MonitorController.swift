@@ -635,6 +635,10 @@ final class MonitorController: ObservableObject {
     }
 
     private let machineChooser = MachineChooser()
+    private let screenTransition = ScreenTransition()
+    /// True while a chooser pick is mid-dissolve, so a second pick cannot start a
+    /// competing transition (and cannot happen anyway — the chooser is closed).
+    private var switchTransitioning = false
 
     /// Wire the panel-switching side of the KVM. Kept out of init because it
     /// needs the monitor profile, which is not known until a probe has run.
@@ -656,8 +660,7 @@ final class MonitorController: ObservableObject {
                                      machines: self.kvm.machines,
                                      near: exit,
                                      pick: { [weak self] index in
-                                         self?.kvm.chooseMachine(at: index)
-                                         self?.syncKVMState()
+                                         self?.switchInputWithDissolve(pickIndex: index)
                                      },
                                      cancel: { [weak self] in
                                          self?.kvm.cancelChoice()
@@ -682,6 +685,128 @@ final class MonitorController: ObservableObject {
         kvm.addressForHost = { [weak self] host in
             let target = self?.discovery.agents[host.lowercased()]?.fallbackTarget ?? ""
             return target.isEmpty ? nil : target
+        }
+        // Coming home gets the mirror of a pick's dissolve: fade the machine out
+        // on its own side, switch, then reveal the Mac with its curtain.
+        kvm.beginReturnDissolve = { [weak self] leavingHost in
+            self?.runReturnDissolve(leavingHost: leavingHost)
+        }
+    }
+
+    /// How long the panel takes to renegotiate a DDC input switch and actually
+    /// LIGHT the new source. The reveal waits this out before clearing the
+    /// arriving side's curtain. It is a fixed wait, not a read: the input register
+    /// flips to the target well before the pixels are up (measured — the panel is
+    /// still dark for a beat after 0x60 reads the new input), so a read-gated
+    /// reveal cleared the curtain into the renegotiation black and the desktop
+    /// popped. Erring long only lengthens the black hold; erring short brings the
+    /// pop back. Tunable if a panel is quicker or slower than this one.
+    private static let panelRenegotiation: UInt64 = 3_400_000_000
+    /// The pick path's switch goes through requestMonitorInput's coalescer, which
+    /// sleeps this long before it writes 0x60. The return writes 0x60 straight
+    /// away, so only the outbound reveal adds this on top of the renegotiation.
+    private static let switchCoalescerLead: UInt64 = 500_000_000
+    private static let dissolveFade: Double = 0.7
+
+    /// A chooser tile was clicked (Mac -> machine). A dissolve, both sides in
+    /// software: the Mac fades out under its own curtain, then — once the panel
+    /// has switched — the machine fades itself in under a black curtain its agent
+    /// draws over its own screen. No backlight: a DDC brightness ramp is smooth on
+    /// a direct link but can only step coarsely over the proxy, which is the
+    /// abruptness to avoid. See ScreenTransition and BezelAgent's FadeOverlay.
+    private func switchInputWithDissolve(pickIndex index: Int) {
+        guard !switchTransitioning else { return }
+        // Settle the pick at once: this clears the choosing state and stands the
+        // edge down for the length of the dissolve, so a pointer drift cannot
+        // cancel the crossing or start another. A pick this chain cannot honour
+        // stands itself down and gets no animation.
+        guard kvm.takeChoice(at: index) else { syncKVMState(); return }
+        syncKVMState()
+        guard kvm.machines.indices.contains(index) else {
+            switchTransitioning = false; return
+        }
+        let arrivingHost = kvm.machines[index].host
+
+        switchTransitioning = true
+        let display = selectedID
+        Task { @MainActor in
+            defer { switchTransitioning = false; kvm.deferCenterPark = false }
+
+            // 1. Dissolve the Mac (being left) to a blurred black (700 ms).
+            await screenTransition.fadeToBlack(on: display, duration: Self.dissolveFade)
+            // 2. Carry the pointer across and command the input switch. handOver
+            //    reopens the machine's channel if need be, so the arm below lands.
+            //    deferCenterPark leaves the cursor where it is rather than jumping
+            //    it to the panel centre — the panel is still the Mac's black
+            //    curtain, where a centred cursor would show on the black.
+            kvm.deferCenterPark = true
+            kvm.commitChoice()
+            syncKVMState()
+            // 3. Arm the arriving machine's own curtain black NOW, while the panel
+            //    is still renegotiating and the machine is not yet on screen — so
+            //    it shows black, not a flash of desktop, when the panel reaches it.
+            //    Instant (ms 0): there is nothing to animate behind a dead input.
+            kvm.fadeMachine(host: arrivingHost, toOpaque: 100, overMs: 0)
+            // 4. Let the panel light the machine's input. Plus the coalescer lead,
+            //    since the pick's 0x60 write is deferred that long.
+            try? await Task.sleep(nanoseconds: Self.panelRenegotiation + Self.switchCoalescerLead)
+            // 5. The panel is on the machine now, so the centre is behind it and
+            //    safe to hide the cursor in. Then fade the machine in on its own
+            //    side, and take the Mac's curtain down — invisible behind the
+            //    machine's input.
+            kvm.reparkAtPanelCentre()
+            kvm.deferCenterPark = false
+            kvm.fadeMachine(host: arrivingHost, toOpaque: 0, overMs: 700)
+            screenTransition.end()
+            // Hold the transition open until the machine has finished fading in, so
+            // a quick re-cross cannot interrupt it half-lit.
+            try? await Task.sleep(nanoseconds: 700_000_000)
+        }
+    }
+
+    /// The pointer crossed home (machine -> Mac): the mirror of a pick. The
+    /// machine fades itself out under its agent's curtain (it is the one on
+    /// screen), then — once the panel has switched home — the Mac reveals under
+    /// its own curtain clearing. Both sides in software, no backlight. Called by
+    /// KVM.handBack via beginReturnDissolve, which has suspended the edge and
+    /// passes the host being left.
+    private func runReturnDissolve(leavingHost: String) {
+        let macInput = kvm.macInput
+        // Busy with another dissolve: just switch home plainly and re-arm the edge.
+        guard !switchTransitioning else {
+            Task { @MainActor in
+                await set(code: VCP.inputSelect.code, value: macInput, byHand: false)
+                kvm.resumeEdge()
+            }
+            return
+        }
+
+        switchTransitioning = true
+        let display = selectedID
+        Task { @MainActor in
+            defer { switchTransitioning = false; inputSwitchRunning = false; kvm.resumeEdge() }
+
+            // 1. Fade the machine (still on the panel) out on its own side (700 ms).
+            kvm.fadeMachine(host: leavingHost, toOpaque: 100, overMs: 700)
+            try? await Task.sleep(nanoseconds: 700_000_000)
+            // 2. Arm the Mac's curtain black behind the machine's input, so the Mac
+            //    is covered the instant the panel switches to it.
+            screenTransition.coverInstantly(on: display)
+            // 3. Switch the panel home. Hold the input watcher off across the
+            //    renegotiation — this write bypasses requestMonitorInput's coalescer,
+            //    so nothing else sets inputSwitchRunning, and a poll mid-switch reads
+            //    the transit and fires a spurious lock/release.
+            inputSwitchRunning = true
+            await set(code: VCP.inputSelect.code, value: macInput, byHand: false)
+            // 4. Let the panel light the Mac (fixed renegotiation wait).
+            try? await Task.sleep(nanoseconds: Self.panelRenegotiation)
+            inputSwitchRunning = false
+            // 5. Reveal the Mac — clear its curtain (blurred black to sharp, 700 ms).
+            await screenTransition.clear(duration: Self.dissolveFade)
+            // 6. Clear the machine's own curtain now that it is off the panel, so
+            //    its desktop is normal again for a View or RDP window. Invisible:
+            //    the panel is showing the Mac.
+            kvm.fadeMachine(host: leavingHost, toOpaque: 0, overMs: 0)
         }
     }
 

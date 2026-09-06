@@ -1330,6 +1330,16 @@ internal static class BezelAgent
                 else if (parts.Length >= 2) LockOverlay.Set(Num(parts[1]), -1, -1);
                 break;
 
+            case "F":
+                // Fade curtain. "F <opacity 0..100> <ms>" drives a full-screen
+                // black layer to that opacity over that many milliseconds — the
+                // machine's own side of an input-switch dissolve. Drawn here for
+                // the same reason as the badge: while this machine is on the panel,
+                // nothing the Mac draws is visible, so the machine fades itself.
+                if (parts.Length >= 3) FadeOverlay.Set(Num(parts[1]), Num(parts[2]));
+                else if (parts.Length >= 2) FadeOverlay.Set(Num(parts[1]), 0);
+                break;
+
             case "S":
                 // Diagnostic counterpart to A. SetCursorPos writes the position
                 // directly instead of posting through the input stream, so the
@@ -2991,6 +3001,155 @@ internal static class LockOverlay
 
             pen.Dispose();
         }
+    }
+}
+
+
+/// A full-screen black curtain this machine draws over itself, so an input
+/// switch away from or back to it is a dissolve rather than a cut.
+///
+/// Same reason the badge lives here: while this machine is on the panel, the
+/// Mac's own curtain is behind a screen nobody can see, so the machine has to
+/// fade itself. The backlight cannot do this smoothly over the proxy — a DDC
+/// write costs the better part of a second, so a ramp can only step coarsely —
+/// whereas a layered window's opacity animates on the GPU at any frame rate.
+///
+/// Click-through and never-focus, exactly like the badge (WS_EX_TRANSPARENT /
+/// NOACTIVATE), so it cannot swallow input while it is up: the Mac keeps driving
+/// the desktop beneath it right through a fade.
+internal static class FadeOverlay
+{
+    private static Thread _ui;
+    private static Form _form;
+    private static System.Windows.Forms.Timer _fade;
+    private static System.Windows.Forms.Timer _watchdog;
+    private static double _current;   // 0..1, touched only on the form thread
+
+    /// Drive the curtain to `opacityPercent` (0..100) over `ms` milliseconds.
+    /// ms <= 0 sets it at once — used to arm it black behind an input that is not
+    /// yet on screen, where there is nothing to animate.
+    public static void Set(int opacityPercent, int ms)
+    {
+        double target = Math.Max(0, Math.Min(100, opacityPercent)) / 100.0;
+        BezelAgent.Log("fade: -> " + opacityPercent + "% over " + ms + "ms");
+        EnsureUI();
+        var f = _form;
+        if (f == null) { BezelAgent.Log("fade: no overlay form"); return; }
+        try
+        {
+            f.BeginInvoke((MethodInvoker)delegate
+            {
+                if (_fade != null) { _fade.Stop(); _fade.Dispose(); _fade = null; }
+
+                // Safety net. A black curtain whose clearing command never arrives
+                // — a dropped message, the Mac quitting mid-switch — would leave
+                // this machine's screen black with no way back from its own side.
+                // So any time it is driven toward black, arm a watchdog that fades
+                // it away on its own; a command that takes it transparent cancels
+                // it. A normal switch clears it within a few seconds, well under
+                // the timeout, so this only ever fires on a genuinely stuck curtain.
+                if (_watchdog != null) { _watchdog.Stop(); _watchdog.Dispose(); _watchdog = null; }
+                if (target > 0)
+                {
+                    _watchdog = new System.Windows.Forms.Timer { Interval = 8000 };
+                    _watchdog.Tick += delegate
+                    {
+                        if (_watchdog != null) { _watchdog.Stop(); _watchdog.Dispose(); _watchdog = null; }
+                        BezelAgent.Log("fade: watchdog cleared a stuck curtain");
+                        Set(0, 500);
+                    };
+                    _watchdog.Start();
+                }
+
+                // Coming up from nothing: the window must be present before it is
+                // asked to show any black.
+                if (target > 0) { f.Visible = true; f.TopMost = true; }
+
+                if (ms <= 0)
+                {
+                    _current = target;
+                    f.Opacity = target;
+                    if (target <= 0) f.Visible = false;
+                    return;
+                }
+
+                double start = _current;
+                int t0 = Environment.TickCount;
+                _fade = new System.Windows.Forms.Timer { Interval = 16 };
+                _fade.Tick += delegate
+                {
+                    double p = Math.Min(1.0, (Environment.TickCount - t0) / (double)ms);
+                    double e = p * p * (3 - 2 * p);   // smoothstep: eases in and out
+                    _current = start + (target - start) * e;
+                    f.Opacity = _current;
+                    f.TopMost = true;   // TopMost decays when another topmost appears
+                    if (p >= 1.0)
+                    {
+                        _current = target;
+                        f.Opacity = target;
+                        if (target <= 0) f.Visible = false;   // gone, not a 0% ghost
+                        if (_fade != null) { _fade.Stop(); _fade.Dispose(); _fade = null; }
+                    }
+                };
+                _fade.Start();
+            });
+        }
+        catch (Exception e) { BezelAgent.Log("fade: " + e.Message); }
+    }
+
+    private static void EnsureUI()
+    {
+        if (_ui != null) return;
+        _ui = new Thread(delegate ()
+        {
+            // The whole virtual desktop, so whichever monitor is the panel is
+            // covered without the agent having to know which one it is.
+            var vs = SystemInformation.VirtualScreen;
+            var form = new CurtainForm
+            {
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(vs.Left, vs.Top),
+                Size = new Size(vs.Width, vs.Height),
+                Opacity = 0.0,
+                Visible = false
+            };
+            var forced = form.Handle;   // force the window into existence
+            GC.KeepAlive(forced);
+            _form = form;
+            Application.Run(new ApplicationContext(form));
+        });
+        _ui.IsBackground = true;
+        _ui.SetApartmentState(ApartmentState.STA);
+        _ui.Start();
+        for (int i = 0; i < 100 && (_form == null || !_form.IsHandleCreated); i++)
+            Thread.Sleep(20);
+    }
+
+    private sealed class CurtainForm : Form
+    {
+        public CurtainForm()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            TopMost = true;
+            BackColor = Color.Black;   // solid black, opacity does the blending
+            DoubleBuffered = true;
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= 0x00080000   // WS_EX_LAYERED
+                            | 0x00000020   // WS_EX_TRANSPARENT — clicks fall through
+                            | 0x08000000   // WS_EX_NOACTIVATE — never takes focus
+                            | 0x00000080;  // WS_EX_TOOLWINDOW — no Alt-Tab entry
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation { get { return true; } }
     }
 }
 

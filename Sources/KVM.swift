@@ -352,6 +352,12 @@ final class KVMController {
     /// picking — slide the drawer shut and hand the desktop back. Wired to the
     /// same teardown as a cancel; the tap below decides when to fire it.
     var dismissChooser: (() -> Void)?
+    /// The pointer has crossed home and the panel should return to the Mac. When
+    /// set, the controller runs the switch inside a dissolve (fade the machine
+    /// out, switch, reveal the Mac) and calls resumeEdge when it is done. Carries
+    /// the host being left, so the controller can fade that machine's own curtain.
+    /// When nil, handBack switches plainly. See MonitorController.runReturnDissolve.
+    var beginReturnDissolve: ((String) -> Void)?
 
     /// Whether the panel's input can be switched right now — in practice,
     /// whether the app currently has a DDC/CI channel to the monitor. Nil means
@@ -387,6 +393,20 @@ final class KVMController {
     private var chosenIndex: Int?
     /// Whether the crossing the chooser interrupted was a drag.
     private var pendingWasDrag = false
+    /// Held between takeChoice and commitChoice: the pick has been decided but the
+    /// pointer has not crossed yet because a dissolve is playing. While this is
+    /// set the edge logic stands down entirely, so a pointer drift during those
+    /// few hundred milliseconds cannot re-open a crossing or cancel this one.
+    private var suspendCrossing = false
+    /// Stashed by takeChoice for commitChoice to act on once the dissolve is done.
+    private var stashedChoice: (point: CGPoint, doorway: CGRect, index: Int, wasDrag: Bool)?
+    /// Set by the outbound dissolve across the handover: the panel is still showing
+    /// the Mac (a black curtain) while it renegotiates, so parking the cursor at
+    /// the panel's centre now would leave it sitting visibly on the black. While
+    /// this is set the handover leaves the cursor where it is; the controller
+    /// reparks it to the centre with reparkAtPanelCentre once the panel is on the
+    /// PC and the centre is behind it, out of sight.
+    var deferCenterPark = false
 
     /// Whether the panel stays on this machine when the pointer goes home.
     ///
@@ -813,6 +833,10 @@ final class KVMController {
         guard isEnabled else { return Unmanaged.passUnretained(event) }
 
         if side == .here {
+            // A pick has been made and its dissolve is playing; the pointer will
+            // cross when commitChoice runs. Until then the edge is inert, so a
+            // stray move neither starts a second crossing nor cancels this one.
+            if suspendCrossing { return Unmanaged.passUnretained(event) }
             // Only looking for the crossing; everything passes through.
             if type == .mouseMoved || type == .leftMouseDragged
                 || type == .rightMouseDragged || type == .otherMouseDragged {
@@ -1184,8 +1208,17 @@ final class KVMController {
         // Middle of the panel, which is about to be showing the PC. If there is
         // no panel to hide behind, fall back to the far corner of the desktop,
         // where a stationary pointer is at least out of the way.
-        parkingSpot = portalBounds.map { CGPoint(x: $0.midX, y: $0.midY) }
-            ?? CGPoint(x: macBounds.maxX - 2, y: macBounds.maxY - 2)
+        //
+        // During the outbound dissolve the panel is NOT yet showing the PC — it is
+        // still the Mac's black curtain — so parking at the centre now would draw
+        // the cursor onto the black. Hold it where it already is; the controller
+        // reparks it to the centre once the panel has switched (reparkAtPanelCentre).
+        if deferCenterPark {
+            parkingSpot = CGEvent(source: nil)?.location ?? point
+        } else {
+            parkingSpot = portalBounds.map { CGPoint(x: $0.midX, y: $0.midY) }
+                ?? CGPoint(x: macBounds.maxX - 2, y: macBounds.maxY - 2)
+        }
         CGWarpMouseCursorPosition(parkingSpot)
 
         side = .there
@@ -1355,6 +1388,68 @@ final class KVMController {
         }
         chosenIndex = index
         handOver(at: crossing.point, doorway: crossing.doorway, dragging: pendingWasDrag)
+    }
+
+    /// chooseMachine split in two, so a dissolve can play between deciding on a
+    /// machine and the pointer actually crossing to it.
+    ///
+    /// This half settles the decision at once: it clears the choosing state (so
+    /// the edge cannot re-ask or the crossing be cancelled while the animation
+    /// runs) and suspends the edge logic until commitChoice. It stashes what the
+    /// crossing needs. Returns false, having stood the crossing down, when the
+    /// index is not one this chain has — the caller then plays no animation.
+    @discardableResult
+    func takeChoice(at index: Int) -> Bool {
+        guard choosing, let crossing = pendingCrossing else { return false }
+        choosing = false
+        pendingCrossing = nil
+        guard machines.indices.contains(index) else {
+            KVMLog.write("chooser picked machine \(index), which this chain does not have — crossing dropped")
+            status = "armed — pointer at the right edge chooses a machine"
+            stashedChoice = nil
+            onChange?()
+            return false
+        }
+        stashedChoice = (crossing.point, crossing.doorway, index, pendingWasDrag)
+        suspendCrossing = true
+        return true
+    }
+
+    /// The second half: the dissolve has covered the switch, so carry the pointer
+    /// across and move the panel, exactly as chooseMachine's tail would.
+    func commitChoice() {
+        suspendCrossing = false
+        guard let choice = stashedChoice else { return }
+        stashedChoice = nil
+        chosenIndex = choice.index
+        handOver(at: choice.point, doorway: choice.doorway, dragging: choice.wasDrag)
+    }
+
+    /// Re-arm the edge after a return dissolve. handBack suspends it so a stray
+    /// move cannot start a crossing while the panel is coming home; the controller
+    /// calls this once the Mac has been revealed.
+    func resumeEdge() { suspendCrossing = false }
+
+    /// Park the held cursor at the panel's centre now that the panel is showing
+    /// the PC, so it is hidden behind that input. The outbound dissolve calls this
+    /// after the switch, having set deferCenterPark so the handover left the cursor
+    /// alone until the centre was safe to hide it in. A no-op if control has since
+    /// gone home.
+    func reparkAtPanelCentre() {
+        guard side == .there else { return }
+        parkingSpot = portalBounds.map { CGPoint(x: $0.midX, y: $0.midY) }
+            ?? CGPoint(x: macBounds.maxX - 2, y: macBounds.maxY - 2)
+        CGWarpMouseCursorPosition(parkingSpot)
+    }
+
+    /// Drive the black fade curtain on a machine's own screen — the machine's
+    /// half of an input-switch dissolve. While a machine is on the panel nothing
+    /// the Mac draws is visible, so the machine fades itself, over its own
+    /// channel, exactly as it draws the lock badge. opaquePercent 0...100; ms 0
+    /// arms it at once (for a machine not yet on screen, where there is nothing to
+    /// animate). A no-op if that machine's channel is not open.
+    func fadeMachine(host: String, toOpaque opaquePercent: Int, overMs ms: Int) {
+        pipe(for: host).send("F \(opaquePercent) \(ms)")
     }
 
     // MARK: Release
@@ -1679,6 +1774,8 @@ final class KVMController {
     /// The chooser was dismissed without a choice. Nothing has moved, so there is
     /// nothing to undo — just re-arm the edge.
     func cancelChoice() {
+        suspendCrossing = false
+        stashedChoice = nil
         guard choosing else { return }
         choosing = false
         pendingCrossing = nil
@@ -1791,7 +1888,24 @@ final class KVMController {
         currentInput = macInput
         panelShowsMac = true
         KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
-        switchPanel(to: macInput, why: "returned to the Mac")
+        // The return gets the same dissolve as a pick, run by the controller: it
+        // fades the machine out, switches, and reveals the Mac. Hold the edge
+        // until it is done (resumeEdge, from the controller) so a stray move does
+        // not start a fresh crossing while the panel is mid-dissolve.
+        //
+        // BUT NOT WHILE LOCKED. A lock pins the panel to this machine; the panel
+        // must not move. switchPanel refuses the write while locked — the panel
+        // stays, the pointer still comes home — exactly as this did before the
+        // dissolve. The dissolve writes 0x60 directly and would bypass that
+        // refusal, moving the panel to the Mac while the lock still points here;
+        // the next crossing then recaptured a machine no longer on screen and the
+        // pointer froze. So the dissolve runs only for an unlocked return.
+        if lockedIndex == nil, let begin = beginReturnDissolve {
+            suspendCrossing = true
+            begin(host)
+        } else {
+            switchPanel(to: macInput, why: "returned to the Mac")
+        }
         status = "armed — the panel's right edge crosses to \(host)"
         onChange?()
     }
