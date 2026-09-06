@@ -1781,6 +1781,15 @@ final class KVMController {
         CGWarpMouseCursorPosition(CGPoint(x: landing.maxX - 2, y: y))
 
         side = .here
+        // Adopt the Mac as the live input NOW, before the async switch and the
+        // input poll catch up. The panel is on its way home; leaving the tracked
+        // input reading the machine we just left means a quick cross-back-and-
+        // forth is judged against that machine — the doorway stays at the built-in
+        // edge and the crossing sees the panel "already on" the machine, so it
+        // jumps straight back with no chooser. The poll confirms or corrects this
+        // within its interval either way.
+        currentInput = macInput
+        panelShowsMac = true
         KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
         switchPanel(to: macInput, why: "returned to the Mac")
         status = "armed — the panel's right edge crosses to \(host)"

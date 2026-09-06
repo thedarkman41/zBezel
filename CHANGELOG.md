@@ -2,6 +2,21 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.57 — 2026-09-05
+
+**Adopt the Mac's input the instant the pointer comes home**
+
+Crossing back to the Mac and immediately crossing out again jumped straight
+back to the machine just left, with no chooser. The tracked input is moved by
+an async switch and confirmed by the input poll, so for a moment after the
+return it still read the machine — the doorway stayed at the built-in screen's
+edge and the crossing saw the panel "already on" that machine and went to it.
+
+The KVM now adopts the Mac as the live input the moment the pointer lands home,
+before the switch and the poll catch up, so a quick cross-back-and-forth is
+judged against the Mac and raises the chooser as it should. The poll confirms
+or corrects it within its interval either way.
+
 ## 0.1.56 — 2026-09-05
 
 **Discover KVM machines on the LAN, and keep control working as the set changes**
