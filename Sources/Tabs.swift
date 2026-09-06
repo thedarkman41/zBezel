@@ -112,12 +112,26 @@ struct InputTab: View {
     @State private var resolution: String = ""
     @State private var modeID: Int32 = 0
     var body: some View {
-        CardGrid {
-            inputSourceCard
-            imageOptimizationCard
-            displayPortCard
-            usbCCard
-            KVMMachinesCard(controller: controller)
+        // Two explicit columns rather than a flowing grid, so KVM Machines can
+        // sit in the right column under the two smaller cards. Each column packs
+        // its cards tight, top down; the HStack aligns the two along their BOTTOM
+        // edges. No maxHeight stretch — that filled a window taller than this tab
+        // and left both last cards floating over a gap. The columns are balanced
+        // closely enough that bottom-aligning them leaves only a little stagger
+        // at the very top rather than any gap in the middle.
+        HStack(alignment: .bottom, spacing: 16) {
+            VStack(spacing: 16) {
+                inputSourceCard
+                displayPortCard
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(spacing: 16) {
+                imageOptimizationCard
+                usbCCard
+                KVMMachinesCard(controller: controller)
+            }
+            .frame(maxWidth: .infinity)
         }
         .onAppear(perform: syncFromCurrent)
         .onChange(of: controller.currentMode?.id) { _, _ in syncFromCurrent() }
@@ -848,9 +862,11 @@ private struct KVMMachinesCard: View {
                  + "edge enters the next. Each machine's input is what the "
                  + "monitor is switched to when the pointer arrives there.") {
             if controller.kvmMachines.isEmpty {
-                Text("No machines yet. Add the host you can already reach over SSH.")
+                Text("No machines on the network yet. One running the agent will "
+                   + "appear here on its own.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(Array(controller.kvmMachines.enumerated()), id: \.element.id) { i, machine in
                 HStack(spacing: 8) {
@@ -871,16 +887,18 @@ private struct KVMMachinesCard: View {
                         .font(.system(size: 13))
                         .foregroundStyle(health == .unreachable ? Theme.textDim : Theme.textPrimary)
                     Spacer(minLength: 8)
-                    if machine.width > 1 {
-                        Text("\(Int(machine.width))×\(Int(machine.height))")
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundStyle(Theme.textDim)
-                    }
+                    // A fixed, left-aligned column so the resolutions line up
+                    // down the card whatever the host names measure. Reserved
+                    // even when a size is unknown, so nothing else shifts.
+                    Text(machine.width > 1 ? "\(Int(machine.width))×\(Int(machine.height))" : "")
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Theme.textDim)
+                        .frame(width: 84, alignment: .leading)
+                    // Read-only: the input is detected from the monitor face the
+                    // machine reports, not chosen. A pin gets its input when added.
                     StyledPicker(options: inputChoices,
-                                 selection: Binding(
-                                    get: { machine.input },
-                                    set: { controller.kvmMachines[i].input = $0 }),
-                                 enabled: !controller.kvmEnabled, width: 150)
+                                 selection: Binding(get: { machine.input }, set: { _ in }),
+                                 enabled: false, width: 150, centered: true)
                     // Eyes on that machine, whatever the panel is showing. Live,
                     // view-only, through its agent and an SSH tunnel of its own.
                     Button {
@@ -907,16 +925,25 @@ private struct KVMMachinesCard: View {
                     .buttonStyle(.plain)
                     .help("Control \(machine.host) over RDP — sees the sign-in / UAC screen; "
                         + "takes its console over while connected")
-                    Button {
-                        controller.kvmMachines.remove(at: i)
-                    } label: {
-                        Image(systemName: "minus.circle")
-                            .font(.system(size: 12))
-                            .foregroundStyle(Theme.textDim)
+                    // A discovered machine drops on its own when it stops
+                    // announcing, so the remove control is only for a pinned host.
+                    if !controller.isDiscovered(host: machine.host) {
+                        Button {
+                            controller.forgetMachine(host: machine.host)
+                        } label: {
+                            Image(systemName: "minus.circle")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textDim)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Forget the pinned host \(machine.host)")
+                    } else {
+                        Image(systemName: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.ok)
+                            .frame(width: 14)
+                            .help("Discovered on the network")
                     }
-                    .buttonStyle(.plain)
-                    .disabled(controller.kvmEnabled)
-                    .help("Remove \(machine.host) from the chain")
                 }
             }
 
@@ -930,31 +957,23 @@ private struct KVMMachinesCard: View {
                     .background(RoundedRectangle(cornerRadius: 4).fill(Color.black.opacity(0.35)))
                     .frame(width: 140)
                 StyledPicker(options: inputChoices, selection: $newInput,
-                             enabled: true, width: 150)
+                             enabled: true, width: 150, centered: true)
                 Spacer(minLength: 0)
-                Button("Add") {
-                    let host = newHost.trimmingCharacters(in: .whitespaces)
-                    guard !host.isEmpty,
-                          !controller.kvmMachines.contains(where: { $0.host == host }) else { return }
-                    controller.kvmMachines.append(
-                        KVMController.Machine(name: host, host: host, input: newInput))
+                Button("Pin") {
+                    controller.addManualPin(host: newHost, input: newInput)
                     newHost = ""
                 }
                 .buttonStyle(.plain)
-                // Greyed while armed, like the picker and the remove button: a
-                // machine added now has no transport (those are opened once, in
-                // enable()), and the chooser would offer a tile that hands
-                // control straight back.
-                .disabled(controller.kvmEnabled)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(Theme.accent)
             }
 
-            if controller.kvmEnabled {
-                Text("Switch the KVM off to change the chain.")
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(Theme.textDim)
-            }
+            Text("Machines running the agent appear here on their own and drop when "
+               + "they go quiet, even while the KVM is on. Pin a host only for one on "
+               + "another network that cannot be discovered.")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
         }
         // Refresh the parity dots when the card comes into view, throttled so a
         // tab flick does not fan out a burst of SSH probes.

@@ -416,6 +416,116 @@ internal static class BezelAgent
         return byte.Parse(s, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
     }
 
+    // ---- LAN discovery -----------------------------------------------------
+    //
+    // A tiny UDP broadcast, every few seconds, that lets zBezel find this machine
+    // on the local network with nothing configured — no hostname typed, no
+    // registry, no Tailscale required. The packet carries the machine name and
+    // the EDID product code of each monitor it sees; zBezel keeps only the ones
+    // that are faces of the panel it manages and reads the input from the code.
+    // Discovery is announce-only; control still goes over SSH exactly as before.
+
+    private const int DiscoveryPort = 48222;
+
+    private static void AnnounceLoop()
+    {
+        System.Net.Sockets.UdpClient udp = null;
+        try
+        {
+            udp = new System.Net.Sockets.UdpClient();
+            udp.EnableBroadcast = true;
+            string host = Environment.MachineName;
+            while (true)
+            {
+                try
+                {
+                    var products = new List<string>();
+                    foreach (var t in Targets(false))
+                    {
+                        string p = ProductCode(t.DeviceID);
+                        if (p.Length > 0 && !products.Contains(p)) products.Add(p);
+                    }
+                    var sb = new StringBuilder();
+                    sb.Append("{\"v\":1,\"kind\":\"bezelkvm\",\"host\":\"").Append(Esc(host))
+                      .Append("\",\"user\":\"").Append(Esc(Environment.UserName))
+                      .Append("\",\"products\":[");
+                    for (int i = 0; i < products.Count; i++)
+                    {
+                        if (i > 0) sb.Append(',');
+                        sb.Append('"').Append(Esc(products[i])).Append('"');
+                    }
+                    sb.Append("]}");
+                    byte[] bytes = Encoding.UTF8.GetBytes(sb.ToString());
+
+                    // Send to the directed broadcast of EVERY local IPv4 subnet,
+                    // not just 255.255.255.255. This box is multi-homed (a LAN NIC
+                    // and Tailscale), and the limited broadcast leaves by only one
+                    // interface — often the wrong one — so a listener on the LAN
+                    // sees it only intermittently. A directed broadcast per subnet
+                    // guarantees a packet reaches each network the machine is on.
+                    foreach (var endpoint in BroadcastTargets())
+                    {
+                        try { udp.Send(bytes, bytes.Length, endpoint); }
+                        catch (Exception) { }
+                    }
+                }
+                catch (Exception)
+                {
+                    // A transient failure (interface down, no route) must not end
+                    // the loop — the next tick tries again.
+                }
+                System.Threading.Thread.Sleep(5000);
+            }
+        }
+        catch (Exception e) { Log("announce: loop stopped: " + e.Message); }
+        finally { if (udp != null) udp.Close(); }
+    }
+
+    /// One UDP endpoint per network this machine is on: the directed broadcast
+    /// address of each up IPv4 interface (host bits all ones), plus the limited
+    /// broadcast as a catch-all. Recomputed each tick so a cable plugged or a
+    /// VPN coming up is picked up without a restart.
+    private static List<System.Net.IPEndPoint> BroadcastTargets()
+    {
+        var targets = new List<System.Net.IPEndPoint>();
+        try
+        {
+            foreach (var ni in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (ni.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
+                if (ni.NetworkInterfaceType == System.Net.NetworkInformation.NetworkInterfaceType.Loopback) continue;
+                foreach (var ua in ni.GetIPProperties().UnicastAddresses)
+                {
+                    if (ua.Address.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                    byte[] ip = ua.Address.GetAddressBytes();
+                    byte[] mask;
+                    try { mask = ua.IPv4Mask.GetAddressBytes(); }
+                    catch (Exception) { continue; }
+                    if (mask == null || mask.Length != 4) continue;
+                    var bc = new byte[4];
+                    for (int i = 0; i < 4; i++) bc[i] = (byte)(ip[i] | (~mask[i] & 0xFF));
+                    targets.Add(new System.Net.IPEndPoint(new System.Net.IPAddress(bc), DiscoveryPort));
+                }
+            }
+        }
+        catch (Exception) { }
+        targets.Add(new System.Net.IPEndPoint(System.Net.IPAddress.Broadcast, DiscoveryPort));
+        return targets;
+    }
+
+    /// Pull the EDID product identity out of a Windows display device path,
+    /// e.g. "\\?\DISPLAY#HPN36D5#5&..." -> "HPN36D5". "" when it is not there.
+    private static string ProductCode(string deviceId)
+    {
+        if (string.IsNullOrEmpty(deviceId)) return "";
+        int i = deviceId.IndexOf("DISPLAY#", StringComparison.OrdinalIgnoreCase);
+        if (i < 0) return "";
+        int start = i + "DISPLAY#".Length;
+        int end = deviceId.IndexOf('#', start);
+        if (end < 0) return "";
+        return deviceId.Substring(start, end - start);
+    }
+
     // ---- Commands ----------------------------------------------------------
 
     [DllImport("user32.dll")]
@@ -2338,6 +2448,13 @@ internal static class BezelAgent
         clipboardThread.SetApartmentState(System.Threading.ApartmentState.STA);
         clipboardThread.IsBackground = true;
         clipboardThread.Start();
+
+        // Announce ourselves on the LAN so zBezel discovers this machine without
+        // anyone typing a hostname. Runs in the interactive session, which is the
+        // only place the monitor can be enumerated. See AnnounceLoop.
+        var announceThread = new System.Threading.Thread(AnnounceLoop);
+        announceThread.IsBackground = true;
+        announceThread.Start();
 
         var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, port);
         listener.Start();

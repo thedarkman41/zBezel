@@ -145,6 +145,18 @@ final class MonitorController: ObservableObject {
     // MARK: KVM
 
     private let kvm = KVMController()
+    let discovery = KVMDiscovery()
+
+    /// Hosts pinned by hand — the fallback for a machine discovery cannot see
+    /// (a different subnet, no broadcast). Kept apart from the discovered set so
+    /// a rebuild never loses them, and persisted on their own.
+    @Published var manualPins: [KVMController.Machine] {
+        didSet {
+            if let data = try? JSONEncoder().encode(manualPins) {
+                UserDefaults.standard.set(data, forKey: "kvmManualPins")
+            }
+        }
+    }
     private let pcSpace = PCSpace()
     @Published private(set) var pcSpaceOpen = false
     @Published private(set) var kvmEnabled = false
@@ -158,6 +170,12 @@ final class MonitorController: ObservableObject {
         proxyHost = defaults.string(forKey: "proxyHost") ?? ""
         kvmMachines = MonitorController.loadKVMMachines(
             proxyHost: defaults.string(forKey: "proxyHost") ?? "")
+        if let data = defaults.data(forKey: "kvmManualPins"),
+           let list = try? JSONDecoder().decode([KVMController.Machine].self, from: data) {
+            manualPins = list
+        } else {
+            manualPins = []
+        }
         lastCommandedInput = UInt16(defaults.object(forKey: "lastCommandedInput") as? Int
                                     ?? 0x0F)
         vendorMap = VendorMap.load()
@@ -657,6 +675,13 @@ final class MonitorController: ObservableObject {
         // crossing that would need one is refused before the pointer is
         // captured: no tiles, no frozen cursor. See KVMController.canSwitchPanel.
         kvm.canSwitchPanel = { [weak self] in self?.transport.isAvailable ?? false }
+        // The IP a machine announced itself from, for the KVM to fall back on when
+        // its hostname will not resolve. Looked up live, so a box that moved keeps
+        // working. Empty address (a hand-pinned host) yields no fallback.
+        kvm.addressForHost = { [weak self] host in
+            let target = self?.discovery.agents[host.lowercased()]?.fallbackTarget ?? ""
+            return target.isEmpty ? nil : target
+        }
     }
 
     private var desiredInput: UInt16?
@@ -764,7 +789,18 @@ final class MonitorController: ObservableObject {
             KVMLog.write("input watch: returned to this Mac; releasing the lock")
             kvm.clearLock()
         case .lock(let index, let why):
+            guard kvm.machines.indices.contains(index) else { break }
             let host = kvm.machines[index].host
+            // The panel being on the machine the KVM is actively controlling is
+            // the KVM's own crossing, not a switch someone made by hand — locking
+            // to it would pin the panel and stop the pointer returning to the Mac,
+            // which is exactly the bounce-and-no-badge bug. Adopt it as the
+            // baseline instead. A by-hand switch to a DIFFERENT machine still locks.
+            guard !kvm.isControlling(host: host) else {
+                inputWatcher.resync(to: kvm.machines[index].input)
+                KVMLog.write("input watch: panel on \(host) is the KVM's own crossing; not locking")
+                break
+            }
             if !kvm.lockTo(machineIndex: index, why: why) {
                 KVMLog.write("input watch: wanted to lock to \(host) but could not")
             }
@@ -909,6 +945,81 @@ final class MonitorController: ObservableObject {
         }
     }
 
+    // MARK: - Discovery
+
+    /// Bring up LAN discovery and keep the machine set in step with it. Called
+    /// once from bootstrap. Every announce that changes the set of live machines
+    /// runs applyDiscovery, which is what makes machines appear and drop on their
+    /// own — including while the KVM is armed.
+    func startDiscovery() {
+        discovery.onChange = { [weak self] in self?.applyDiscovery() }
+        discovery.start()
+        applyDiscovery()      // in case packets already landed before we wired up
+    }
+
+    /// Rebuild the machine set from what the network shows right now, plus any
+    /// hand-pinned hosts, and push it into the live chain. Discovered machines
+    /// arrive already knowing their input (from the product code the agent
+    /// reported); a size we learned earlier is carried over, otherwise the panel's
+    /// native 4K stands in until the next arm sizes it for real.
+    func applyDiscovery() {
+        var next: [KVMController.Machine] = []
+        for agent in discovery.agents.values
+            .sorted(by: { $0.host.lowercased() < $1.host.lowercased() }) {
+            var machine = KVMController.Machine(name: agent.host, host: agent.host,
+                                                input: agent.input, width: 3840, height: 2160)
+            if let known = kvmMachines.first(where: {
+                $0.host.lowercased() == agent.host.lowercased() }), known.width > 1 {
+                machine.width = known.width
+                machine.height = known.height
+            }
+            next.append(machine)
+        }
+        for pin in manualPins where !next.contains(where: {
+            $0.host.lowercased() == pin.host.lowercased() }) {
+            next.append(pin)
+        }
+
+        // Only churn when the shape actually changed — the onChange that called us
+        // already filters heartbeats, but a size carry-over can leave it identical.
+        let unchanged = next.count == kvmMachines.count && zip(next, kvmMachines).allSatisfy {
+            $0.host == $1.host && $0.input == $1.input
+        }
+        guard !unchanged else { return }
+
+        kvmMachines = next
+        kvm.updateChain(next)
+    }
+
+    /// Pin a host by hand, for a machine discovery will not see on its own.
+    func addManualPin(host: String, input: UInt16) {
+        let trimmed = host.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              !manualPins.contains(where: { $0.host.lowercased() == trimmed.lowercased() })
+        else { return }
+        manualPins.append(KVMController.Machine(name: trimmed, host: trimmed, input: input))
+        applyDiscovery()
+    }
+
+    /// Forget a hand-pinned host. A discovered machine cannot be forgotten this
+    /// way — it drops on its own when it stops announcing — so this only touches
+    /// the pins.
+    func forgetMachine(host: String) {
+        manualPins.removeAll { $0.host.lowercased() == host.lowercased() }
+        applyDiscovery()
+    }
+
+    /// True for a host the user pinned, as opposed to one discovery surfaced.
+    /// The remove control is only meaningful for these.
+    func isManualPin(host: String) -> Bool {
+        let key = host.lowercased()
+        if manualPins.contains(where: { $0.host.lowercased() == key }) { return true }
+        return discovery.agents[key] == nil     // not discovered ⇒ it is a leftover pin
+    }
+
+    /// Whether the network has surfaced this host in the last sweep.
+    func isDiscovered(host: String) -> Bool { discovery.agents[host.lowercased()] != nil }
+
     static func loadKVMMachines(proxyHost: String) -> [KVMController.Machine] {
         if let data = UserDefaults.standard.data(forKey: "kvmMachines"),
            let list = try? JSONDecoder().decode([KVMController.Machine].self, from: data),
@@ -927,8 +1038,9 @@ final class MonitorController: ObservableObject {
         UserDefaults.standard.set(on, forKey: "kvmEnabled")
         guard on != kvm.isEnabled else { return }
         if on {
-            guard !proxyHost.isEmpty else {
-                kvmError = "Set a proxy host on the Link tab first."
+            guard !kvmMachines.isEmpty || !proxyHost.isEmpty else {
+                kvmError = "No machines yet. One running the agent will appear on its own, "
+                         + "or pin a host on the Link tab."
                 return
             }
             wireKVMInputs()
@@ -1417,6 +1529,7 @@ final class MonitorController: ObservableObject {
         await probe()
         await restoreKVMIfPreviouslyOn()
         startParityMonitor()
+        startDiscovery()
     }
 
     /// Subscribe to the things that change what the far side can see.

@@ -2,6 +2,50 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.56 — 2026-09-05
+
+**Discover KVM machines on the LAN, and keep control working as the set changes**
+
+The KVM machine list was hand-kept: a host you typed in once, that went stale
+the moment you swapped a machine out. Now machines running the agent announce
+themselves and appear on their own, with nothing configured and no dependency
+on Beacon or Tailscale.
+
+Discovery. Each agent broadcasts a small UDP packet on every local subnet
+every few seconds, naming itself, the account it runs as, and the monitor
+product code it sees. zBezel listens on the LAN and keeps a live map. A
+machine shows up the moment its agent starts and drops when it goes quiet; the
+input it drives is read from the product code the panel presents per input, so
+it arrives already knowing whether it is on USB-C1, HDMI, or DisplayPort.
+Nothing to type. A hand-pinned host stays as a fallback for a machine on
+another network. The directed-broadcast-per-subnet matters: these boxes are
+multi-homed, and a plain broadcast left by the wrong interface reached the Mac
+only about one time in four.
+
+Control survives the set changing. Input and clipboard channels used to be
+opened once, at arm time, for whatever machines were in the chain then, so a
+machine discovered later had no channel and its input went nowhere, and the
+clipboard reached only the machine armed first. Both are now reconciled with
+the live chain: a machine that joins gets its channels opened, one that leaves
+has them closed, so a restarted agent gets a fresh pipe rather than the stale
+one it left behind. The clipboard fans out to every machine, so a copy is
+waiting wherever you cross to. If a hostname will not resolve, the channel
+falls back to the address the machine announced from, as user@ip, and accepts
+a first-contact host key so a brand-new machine connects without being SSHed to
+by hand first.
+
+A crossing no longer engages a phantom lock. The input watcher was reading the
+panel sitting on the machine the KVM was already driving as a by-hand monitor
+switch, and locking to it — which pinned the panel, threw the pointer to the
+far edge, and hid the clickable lock badge. It now ignores the panel being on
+whatever the KVM is actively controlling, and still locks on a genuine by-hand
+switch to a different input.
+
+The Input tab is tidied too: the KVM Machines card moves to the right column,
+the two columns align along the bottom, resolutions line up in a left column,
+and the input pickers centre. Discovered machines show an on-air marker rather
+than a remove button, and their input is read-only because it is detected.
+
 ## 0.1.55 — 2026-09-05
 
 **Stop the agent installer crying "csc.exe not found" when it is right there**

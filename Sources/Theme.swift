@@ -186,6 +186,10 @@ struct StyledPicker<T: Hashable>: View {
     @Binding var selection: T
     var enabled: Bool = true
     var width: CGFloat? = nil
+    /// Centre the label and its chevron in the box rather than pinning the
+    /// label left and the chevron hard right. Used where a column of these
+    /// should read as a tidy stack rather than as full-width fields.
+    var centered: Bool = false
 
     var body: some View {
         Menu {
@@ -193,14 +197,16 @@ struct StyledPicker<T: Hashable>: View {
                 Button(option.label) { selection = option.value }
             }
         } label: {
-            HStack {
+            HStack(spacing: 6) {
+                if centered { Spacer(minLength: 0) }
                 Text(options.first { $0.value == selection }?.label ?? "—")
                     .font(.system(size: 13))
                     .foregroundStyle(enabled ? Theme.textPrimary : Theme.textDim)
-                Spacer(minLength: 8)
+                if !centered { Spacer(minLength: 8) }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(Theme.textSecond)
+                if centered { Spacer(minLength: 0) }
             }
             .padding(.horizontal, 11)
             .frame(height: 30)

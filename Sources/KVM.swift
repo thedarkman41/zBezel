@@ -82,6 +82,10 @@ final class KVMTransport {
     private var lastHost: String?
     private var lastExePath = ""
     private var reconnecting = false
+    /// The IP the machine announced itself from, tried if the hostname never
+    /// resolves. A discovered box whose name the Mac cannot look up is still
+    /// reachable at the address its packet arrived on. Nil for a plain host.
+    private var lastFallback: String?
 
     /// The agent subcommand this channel runs.
     private let command: String
@@ -115,10 +119,11 @@ final class KVMTransport {
     /// remote pipe, so it is the part that would trip it.
     private static let ignoreSIGPIPE: Void = { signal(SIGPIPE, SIG_IGN) }()
 
-    func connect(host: String, exePath: String) {
+    func connect(host: String, exePath: String, fallback: String? = nil) {
         _ = KVMTransport.ignoreSIGPIPE
         lastHost = host
         lastExePath = exePath
+        lastFallback = (fallback == host) ? nil : fallback
         disconnect()
         readyLock.lock(); readyFlag = false; readyLock.unlock()
 
@@ -128,6 +133,13 @@ final class KVMTransport {
             "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=10",
             "-o", "ServerAliveInterval=15",
+            // Accept a first-contact host key on its own. BatchMode cannot answer
+            // the usual prompt, so without this a machine the Mac has never SSHed
+            // to — a freshly discovered box, or the by-IP fallback whose key is
+            // filed under the name, not the address — is refused before it can
+            // even try to authenticate. accept-new takes a NEW key silently but
+            // still rejects a CHANGED one, so it does not weaken a known host.
+            "-o", "StrictHostKeyChecking=accept-new",
             // No ControlMaster here on purpose. The DDC calls multiplex over a
             // shared master because they are short and frequent; this channel
             // is long-lived and carries a continuous stream, and sharing it
@@ -149,6 +161,7 @@ final class KVMTransport {
         lastError = nil
         sentCount = 0
         KVMLog.write("transport[\(command)]: ssh started pid \(task.processIdentifier)")
+        scheduleFallbackWatchdog(for: host)
 
         // Drain both so a full pipe cannot block the far side, and keep the
         // last stderr line as the reason if the channel dies.
@@ -233,11 +246,34 @@ final class KVMTransport {
         guard !reconnecting, let host = lastHost else { return }
         reconnecting = true
         let exe = lastExePath
+        let fallback = lastFallback
         KVMLog.write("channel to \(host) died; reconnecting")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
             self.reconnecting = false
-            self.connect(host: host, exePath: exe)
+            self.connect(host: host, exePath: exe, fallback: fallback)
+        }
+    }
+
+    /// If the hostname never brings the channel up, try the announced IP.
+    ///
+    /// A working host answers in a second or two; a name that does not resolve
+    /// fails in about one; an unreachable one takes the ten-second connect
+    /// timeout. Waiting six seconds and then, if the far side still has not said
+    /// "ready", switching to the IP covers the "name will not resolve" case the
+    /// audit flagged without stealing a slow-but-fine host away from its name. The
+    /// IP is authoritative — it is where the packet actually came from — so once
+    /// we fall back to it there is nothing further to fall back to.
+    private func scheduleFallbackWatchdog(for attemptHost: String) {
+        guard let ip = lastFallback else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+            guard let self,
+                  self.lastHost == attemptHost,   // not already reconnected elsewhere
+                  self.lastFallback == ip,          // fallback still pending
+                  !self.isReady                     // and it never came up
+            else { return }
+            KVMLog.write("channel to \(attemptHost) never became ready; falling back to \(ip)")
+            self.connect(host: ip, exePath: self.lastExePath)   // no fallback beyond the IP
         }
     }
 
@@ -328,6 +364,12 @@ final class KVMController {
     /// front, and only on the paths that need a switch: a machine the panel is
     /// already showing can still take the pointer, since that needs no DDC.
     var canSwitchPanel: (() -> Bool)?
+
+    /// The IP a machine last announced itself from, or nil. Handed to each SSH
+    /// channel as a fallback so a discovered box whose hostname the Mac cannot
+    /// resolve is still reached at its address. Supplied by the controller, which
+    /// owns discovery; looked up live so a machine that moved keeps working.
+    var addressForHost: ((String) -> String?)?
     private var lastRefusalNotice = Date.distantPast
 
     /// How far in from the doorway edge the chooser's tiles (and a margin) reach.
@@ -463,7 +505,40 @@ final class KVMController {
         transports[machineHost] = fresh
         return fresh
     }
-    private let clipTransport = KVMTransport(command: "clipboard")
+    /// One clipboard channel per machine, so a copy is shared with whichever one
+    /// you cross to — not only the machine that happened to be first when the KVM
+    /// was armed, which is why copies reached one box and not the other. The Mac's
+    /// clipboard fans out to all of them; a copy made on any comes back here.
+    /// Reconciled with the chain exactly like the input channels.
+    private var clipTransports: [String: KVMTransport] = [:]
+    private func clipPipe(for machineHost: String) -> KVMTransport {
+        if let existing = clipTransports[machineHost] { return existing }
+        let fresh = KVMTransport(command: "clipboard")
+        wireClipboard(fresh)
+        clipTransports[machineHost] = fresh
+        return fresh
+    }
+    /// A clipboard channel's line handler: a screenshot ("S ") or a clipboard
+    /// payload ("C ") arriving FROM that machine, applied to the Mac.
+    private func wireClipboard(_ pipe: KVMTransport) {
+        pipe.onLine = { [weak self] line in
+            if line.hasPrefix("S ") {
+                let encoded = String(line.dropFirst(2))
+                if let data = Data(base64Encoded: encoded), !data.isEmpty {
+                    DispatchQueue.main.async { self?.onScreenshot?(data) }
+                }
+                return
+            }
+            guard line.hasPrefix("C ") else { return }
+            let parts = line.split(separator: " ", maxSplits: 2).map(String.init)
+            guard parts.count == 3 else { return }
+            // AppKit's pasteboard is main-thread work; this arrives on the
+            // pipe-reading queue.
+            DispatchQueue.main.async {
+                self?.clipboard.apply(format: parts[1], base64: parts[2])
+            }
+        }
+    }
     private let clipboard = ClipboardBridge()
 
     /// Where the pointer is on the remote desktop, in its pixels. Tracked here
@@ -625,38 +700,28 @@ final class KVMController {
         // Clipboard sync runs whenever the KVM is armed, not only while the PC
         // has control: the whole point is to copy here, cross over, and paste
         // there — by which time control has already changed hands.
-        clipboard.send = { [weak self] line in self?.clipTransport.send(line) }
+        // The Mac's clipboard fans out to every machine's channel, so a copy is
+        // already waiting wherever the pointer crosses to.
+        clipboard.send = { [weak self] line in
+            guard let self else { return }
+            for pipe in self.clipTransports.values { pipe.send(line) }
+        }
         clipboard.onNotice = { [weak self] note in self?.onNotice?(note) }
-        clipTransport.onLine = { [weak self] line in
-            if line.hasPrefix("S ") {
-                let encoded = String(line.dropFirst(2))
-                if let data = Data(base64Encoded: encoded), !data.isEmpty {
-                    DispatchQueue.main.async { self?.onScreenshot?(data) }
-                }
-                return
-            }
-            guard line.hasPrefix("C ") else { return }
-            let parts = line.split(separator: " ", maxSplits: 2).map(String.init)
-            guard parts.count == 3 else { return }
-            // AppKit's pasteboard is main-thread work; this arrives on the
-            // pipe-reading queue.
-            DispatchQueue.main.async {
-                self?.clipboard.apply(format: parts[1], base64: parts[2])
-            }
-        }
 
-        // Every machine in the chain, not just the first: a crossing should cost
-        // a line on an open pipe, not an SSH handshake.
-        for machine in machines {
-            let pipe = transports[machine.host] ?? KVMTransport(command: "kvm")
-            transports[machine.host] = pipe
-            pipe.connect(host: machine.host, exePath: exePath)
+        // Open the input and clipboard channels to the whole chain. A crossing
+        // should cost a line on an open pipe, not an SSH handshake.
+        // reconcileTransports does the work and keeps doing it as the chain
+        // changes; enable only has to flip isEnabled first so it will run.
+        isEnabled = true
+        reconcileTransports()
+        // Single-host fallback: a bare proxy with no discovered chain yet.
+        if machines.isEmpty {
+            let fallback = addressForHost?(host)
+            transport.connect(host: host, exePath: exePath, fallback: fallback)
+            clipPipe(for: host).connect(host: host, exePath: exePath, fallback: fallback)
         }
-        if machines.isEmpty { transport.connect(host: host, exePath: exePath) }
-        clipTransport.connect(host: host, exePath: exePath)
         clipboard.start()
         startHeartbeat()
-        isEnabled = true
         side = .here
         let first = machines.first?.name ?? host
         status = machines.count > 1
@@ -676,7 +741,7 @@ final class KVMController {
         heartbeat?.invalidate()
         heartbeat = nil
         for pipe in transports.values { pipe.disconnect() }
-        clipTransport.disconnect()
+        for pipe in clipTransports.values { pipe.disconnect() }
         isEnabled = false
         status = "off"
         onChange?()
@@ -1238,6 +1303,17 @@ final class KVMController {
             abandonDrag(stale, why: "a plain crossing arrived with a drag still in hand")
         }
 
+        // The channel to this machine has to be live to carry anything at all.
+        // reconcileTransports normally has it open well before now, but this is
+        // the backstop for a machine that appeared a heartbeat ago, or a channel
+        // that just died: reopen it on arrival rather than swallow input into a
+        // dead pipe. The connect is quick and the first events may not land, but
+        // control recovers within the second rather than staying dead.
+        if !transport.isConnected {
+            KVMLog.write("arrive: channel to \(host) was down; reopening")
+            transport.connect(host: host, exePath: exePath, fallback: addressForHost?(host))
+        }
+
         // Send the pointer first, then the panel. The pointer is already on the
         // far machine as far as the user is concerned, and the input switch
         // costs the better part of a second through the proxy.
@@ -1257,10 +1333,8 @@ final class KVMController {
         } else {
             switchPanel(to: pcInput, why: "arrived at \(host)")
         }
-        status = "controlling \(machines.first?.name ?? host)"
-            + (machines.count > 1
-               ? " — its left edge brings you back"
-               : " — its left edge brings you back")
+        let name = machines.first(where: { $0.host == host })?.name ?? host
+        status = "controlling \(name) — its left edge brings you back"
         onChange?()
     }
 
@@ -1426,7 +1500,7 @@ final class KVMController {
                 // channel to a machine you have NOT visited for ten minutes is
                 // still there when you finally cross to it.
                 for pipe in self.transports.values { pipe.send("P") }
-                self.clipTransport.send("P")
+                for pipe in self.clipTransports.values { pipe.send("P") }
             }
         }
     }
@@ -1612,6 +1686,74 @@ final class KVMController {
         onChange?()
     }
 
+    /// Replace the machine chain while the KVM is live, because discovery saw a
+    /// machine appear or drop. Safe mid-session: if the pointer is currently on a
+    /// machine that has just left the network, it is brought home first so it is
+    /// not stranded controlling something that no longer exists. The doorway is
+    /// the panel's edge and does not move with the chain, so nothing else shifts.
+    /// True while the pointer is on this machine right now. The input watcher
+    /// consults it to tell the KVM's own crossing apart from a by-hand monitor
+    /// switch: the panel sitting on the input of the machine you are actively
+    /// controlling is not a change to follow, and locking to it would pin the
+    /// panel and stop the pointer ever returning to the Mac.
+    func isControlling(host candidate: String) -> Bool {
+        isEnabled && side == .there && host == candidate
+    }
+
+    func updateChain(_ new: [Machine]) {
+        machines = new
+        reconcileTransports()
+        guard isEnabled, side == .there else { onChange?(); return }
+        if let index = new.firstIndex(where: { $0.host == host }) {
+            machineIndex = index                 // same machine, possibly a new slot
+        } else {
+            KVMLog.write("controlled machine \(host) left the network; bringing the pointer home")
+            handBack()
+        }
+        onChange?()
+    }
+
+    /// Bring the open input channels into line with the machine set: open one to a
+    /// machine that has none, and close the ones to machines that have left.
+    ///
+    /// This is what lets control survive the chain changing under it. The old code
+    /// opened a channel to every machine ONCE, in enable(), so a machine that
+    /// appeared later — through discovery — was controlled through a channel that
+    /// was never connected, and its input went nowhere. Just as important, a
+    /// machine whose agent restarts drops out of discovery and comes back; because
+    /// leaving closes its channel here, returning opens a FRESH one instead of
+    /// reusing the dead pipe the old agent left behind. Keyed by host, so the
+    /// stale upper/lower-case duplicates from earlier arming also get swept.
+    private func reconcileTransports() {
+        guard isEnabled else { return }
+        let wanted = Set(machines.map(\.host))
+        for machine in machines {
+            let fallback = addressForHost?(machine.host)
+            let pipe = transports[machine.host] ?? KVMTransport(command: "kvm")
+            transports[machine.host] = pipe
+            if !pipe.isConnected {
+                KVMLog.write("reconcile: opening input channel to \(machine.host)")
+                pipe.connect(host: machine.host, exePath: exePath, fallback: fallback)
+            }
+            // The clipboard channel gets the same treatment, so a copy reaches
+            // every machine, not only the one armed first.
+            let clip = clipPipe(for: machine.host)
+            if !clip.isConnected {
+                KVMLog.write("reconcile: opening clipboard channel to \(machine.host)")
+                clip.connect(host: machine.host, exePath: exePath, fallback: fallback)
+            }
+        }
+        for (host, pipe) in transports where !wanted.contains(host) {
+            KVMLog.write("reconcile: closing input channel to \(host) — left the chain")
+            pipe.disconnect()
+            transports[host] = nil
+        }
+        for (host, pipe) in clipTransports where !wanted.contains(host) {
+            pipe.disconnect()
+            clipTransports[host] = nil
+        }
+    }
+
     private func handBack() {
         if let stage = carriedStage {
             abandonDrag(stage, why: "the pointer came home before the file was released")
@@ -1652,7 +1794,7 @@ final class KVMController {
     /// events however large it turns out to be.
     func requestScreenshot(width: Int = 1280) {
         guard isEnabled else { return }
-        clipTransport.send("SHOT \(width)")
+        clipPipe(for: host).send("SHOT \(width)")
     }
 
     /// Take control because the PC's Space came forward, rather than because the

@@ -33,6 +33,26 @@ enum HPProfile {
         inputNames[value] ?? String(format: "Input 0x%02X", value)
     }
 
+    /// The EDID product code this panel presents on each of its inputs.
+    ///
+    /// The Z27k G3 hands out a DIFFERENT product code per physical input, so the
+    /// code a remote agent reports for the monitor it sees says exactly which
+    /// input that machine is plugged into — no one has to configure it. Confirmed
+    /// by reading the panel over each connection: DisplayPort 36D4, USB-C1 36D3,
+    /// HDMI 36D5 (manufacturer HPN either way).
+    static let inputForProduct: [String: UInt16] = [
+        "36D4": 0x0F,   // DisplayPort
+        "36D3": 0x13,   // USB-C1 Video
+        "36D5": 0x11,   // HDMI
+    ]
+
+    /// Map a reported product identity to the input it means, or nil if it is not
+    /// a face of this monitor. Accepts "HPN36D5" or a bare "36D5".
+    static func input(forProduct code: String) -> UInt16? {
+        let hex = String(code.uppercased().suffix(4))
+        return inputForProduct[hex]
+    }
+
     static func isIdentifiedInput(_ value: UInt16) -> Bool { inputNames[value] != nil }
 
     /// Codes whose MCCS-standard value labels do not apply to this panel because
