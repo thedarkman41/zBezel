@@ -179,6 +179,7 @@ final class MonitorController: ObservableObject {
         lastCommandedInput = UInt16(defaults.object(forKey: "lastCommandedInput") as? Int
                                     ?? 0x0F)
         vendorMap = VendorMap.load()
+        vendorReadings = MonitorController.loadVendorReadings()
         pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
         // -1 means this app has never set a size, which is not the same as
         // "small" — the panel is not asked and so is not claimed.
@@ -1229,22 +1230,80 @@ final class MonitorController: ObservableObject {
     func unbind(_ control: VendorControl) { vendorMap[control] = nil }
 
     /// Readings for sub-addressed vendor controls, which a plain read cannot give.
-    @Published private(set) var vendorReadings: [String: UInt16] = [:]
+    ///
+    /// Kept on disk. These settings are only visible when the monitor's selector
+    /// rotation happens to offer them, so a launch that does not catch one used
+    /// to leave its radio group with nothing selected — a control that reads as
+    /// "off, and also not on". A remembered value is a truthful answer to "what
+    /// did this last read as", and is labelled as remembered until the panel
+    /// confirms it.
+    @Published private(set) var vendorReadings: [String: VendorReading] = [:] {
+        didSet { saveVendorReadings() }
+    }
+
+    /// A sample is in flight, so an unconfirmed value is about to be checked
+    /// rather than merely stale.
+    @Published private(set) var vendorSampling = false
+
+    private var lastVendorSample: Date?
+
+    private static let vendorReadingsKey = "vendorReadings"
+
+    private func saveVendorReadings() {
+        guard let data = try? JSONEncoder().encode(vendorReadings) else { return }
+        UserDefaults.standard.set(data, forKey: Self.vendorReadingsKey)
+    }
+
+    /// Restore last launch's readings, none of them confirmed: this session has
+    /// not seen the panel say anything yet.
+    private static func loadVendorReadings() -> [String: VendorReading] {
+        guard let data = UserDefaults.standard.data(forKey: vendorReadingsKey),
+              let decoded = try? JSONDecoder().decode([String: VendorReading].self, from: data)
+        else { return [:] }
+        return decoded.mapValues { VendorReading(value: $0.value, takenAt: $0.takenAt,
+                                                 confirmed: false) }
+    }
 
     func currentValue(for control: VendorControl) -> UInt16? {
         guard let binding = vendorMap[control] else { return nil }
-        if binding.isSubAddressed { return vendorReadings[control.rawValue] }
+        if binding.isSubAddressed { return vendorReadings[control.rawValue]?.value }
         return features[binding.code]?.current
     }
 
-    /// Resolve every sub-addressed binding from one shared map read.
+    func reading(for control: VendorControl) -> VendorReading? {
+        guard let binding = vendorMap[control], binding.isSubAddressed else { return nil }
+        return vendorReadings[control.rawValue]
+    }
+
+    /// Record a value we asked for but have not yet seen the panel report back.
+    func noteVendorWrite(_ control: VendorControl, value: UInt16) {
+        vendorReadings[control.rawValue] = VendorReading(value: value, takenAt: Date(),
+                                                         confirmed: false)
+    }
+
+    /// Resolve every sub-addressed binding from a shared sample of the code.
     ///
-    /// The selectors are rare in the rotation — the interesting ones come back in
-    /// roughly 6% of reads while 0x13 accounts for 81% — so a 30-sample read
-    /// missed one about one time in six, and doing a separate read per control
-    /// multiplied that risk. One large sample, shared, with retries.
-    func refreshVendorReadings() async {
-        guard case .proxy(_, let index, _) = transport else { return }
+    /// Sampled in chunks with a per-selector early exit, and it still often comes
+    /// back with nothing. 0xE1 is not a rotation that will eventually offer every
+    /// selector: it is pinned, and what pins it is not under this app's control.
+    /// A 200-read pass on 2026-09-01 returned selector 0x11 two hundred times out
+    /// of two hundred, and neither reading it nor writing a different selector
+    /// (0x1300 and 0x1301, both accepted) moved it off 0x11. Earlier passes were
+    /// pinned just as hard on 0x13. So sampling is worth one attempt and is not
+    /// worth waiting on — which is why the readings are kept on disk and this
+    /// runs detached.
+    ///
+    /// `cooldown` refuses a sample taken too soon after the last one. A selector
+    /// that never surfaces leaves the readings permanently "incomplete", and
+    /// without this the automatic refresh on every panel appearance would spend
+    /// half a minute on the wire each time re-asking a question the monitor has
+    /// already declined to answer.
+    func refreshVendorReadings(chunks: Int = 8, samples: Int = 60,
+                               cooldown: TimeInterval = 0) async {
+        guard case .proxy(_, let index, _) = transport, !vendorSampling else { return }
+        if cooldown > 0, let last = lastVendorSample,
+           Date().timeIntervalSince(last) < cooldown { return }
+        lastVendorSample = Date()
 
         let subAddressed = VendorControl.allCases.compactMap { control -> (VendorControl, VendorBinding)? in
             guard let binding = vendorMap[control], binding.isSubAddressed else { return nil }
@@ -1252,27 +1311,71 @@ final class MonitorController: ObservableObject {
         }
         guard !subAddressed.isEmpty else { return }
 
+        vendorSampling = true
+        defer { vendorSampling = false }
+
         for code in Set(subAddressed.map { $0.1.code }) {
             var wanted = Set(subAddressed.filter { $0.1.code == code }.compactMap { $0.1.selector })
-            for _ in 0..<3 {
-                guard let map = try? await agent.readSubSelectorMap(monitor: index, code: code)
-                else { break }
+            let started = Date()
+            var reads = 0
+            var seen: Set<UInt8> = []
+            var barren = 0
+            for _ in 0..<chunks {
+                guard let map = try? await agent.readSubSelectorMap(
+                    monitor: index, code: code, samples: samples) else { break }
+                reads += samples
+                KVMLog.write(String(format: "vendor: 0x%02X chunk saw %@", code,
+                                    map.keys.sorted().map { String(format: "0x%02X", $0) }
+                                        .joined(separator: " ")))
                 for (control, binding) in subAddressed where binding.code == code {
                     if let selector = binding.selector, let value = map[selector] {
-                        vendorReadings[control.rawValue] = value
+                        vendorReadings[control.rawValue] = VendorReading(
+                            value: value, takenAt: Date(), confirmed: true)
+                        // The PiP toggle reads its state from pipOn rather than
+                        // from here, and 0x11 is the rarest selector of the lot —
+                        // so when a sample does catch it, use it, instead of
+                        // making syncPiPFromPanel go and win the same lottery.
+                        if control == .pictureInPicture { pipOn = (value & 0xFF) != 0 }
                         wanted.remove(selector)
                     }
                 }
                 if wanted.isEmpty { break }
+
+                // Give up once three chunks running have turned up nothing the
+                // earlier ones had not. The register is pinned, and reading it
+                // another 180 times says the same thing more slowly — the whole
+                // 480-read budget went to 0x11 on 2026-09-01 and took 27 seconds
+                // to conclude what the first 180 already had.
+                let before = seen.count
+                seen.formUnion(map.keys)
+                barren = seen.count > before ? 0 : barren + 1
+                if barren >= 3 { break }
+            }
+            if wanted.isEmpty {
+                KVMLog.write(String(format: "vendor: 0x%02X resolved in %d reads in %.2fs",
+                                    code, reads, Date().timeIntervalSince(started)))
+            } else {
+                let missing = wanted.sorted().map { String(format: "0x%02X", $0) }
+                    .joined(separator: ", ")
+                KVMLog.write(String(format: "vendor: 0x%02X sub %@ never surfaced in %d reads",
+                                    code, missing, reads))
             }
         }
     }
 
-    /// True when a sub-addressed control still has no reading.
+    /// Confirm the sub-addressed readings without making anything wait for it.
+    func sampleVendorInBackground(cooldown: TimeInterval = 0) {
+        Task<Void, Never> { [weak self] in
+            await self?.refreshVendorReadings(cooldown: cooldown)
+        }
+    }
+
+    /// True when a sub-addressed control has nothing the panel has confirmed
+    /// this session — either no reading at all, or one only remembered.
     private var vendorReadingsIncomplete: Bool {
         VendorControl.allCases.contains { control in
             guard let binding = vendorMap[control], binding.isSubAddressed else { return false }
-            return vendorReadings[control.rawValue] == nil
+            return vendorReadings[control.rawValue]?.confirmed != true
         }
     }
 
@@ -1516,7 +1619,11 @@ final class MonitorController: ObservableObject {
         // the display itself; re-reading them is a local call and costs nothing.
         refreshModes()
         _ = await reread(codes: codes)
-        if vendorReadingsIncomplete { await refreshVendorReadings() }
+        // Detached on purpose. A sample that has to wait for a rare selector can
+        // run for a couple of minutes, and awaiting it here would hold
+        // isRefreshing — and every other refresh behind it — for that whole time
+        // while the values on screen were already correct.
+        if vendorReadingsIncomplete { sampleVendorInBackground(cooldown: 600) }
     }
 
     /// Both the menu bar panel and the window ask for this on appear; only the
@@ -1944,7 +2051,7 @@ final class MonitorController: ObservableObject {
             deriveActiveInputs()
             // The remembered readings are already on screen; confirming them is
             // slow and nothing waits on the answer.
-            await refreshVendorReadings()
+            sampleVendorInBackground()
             return nil
         } catch {
             remoteTarget = nil
@@ -2129,7 +2236,7 @@ final class MonitorController: ObservableObject {
                     let selector = UInt8(value >> 8)
                     for control in VendorControl.allCases
                     where vendorMap[control]?.code == code && vendorMap[control]?.selector == selector {
-                        vendorReadings[control.rawValue] = value
+                        noteVendorWrite(control, value: value)
                     }
                     confirmVendorAfterSettling()
                 }

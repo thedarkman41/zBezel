@@ -64,6 +64,21 @@ struct VendorBinding: Codable, Equatable {
     }
 }
 
+/// What the panel last said about a sub-addressed control, and how much that is
+/// worth.
+///
+/// These settings live behind 0xE1, which cannot be read directly: a read of it
+/// returns whichever sub-selector the monitor's rotation lands on, and the one
+/// you want may take hundreds of reads to appear — or not appear at all. So a
+/// reading is either something the panel actually offered up (`confirmed`) or
+/// the value this app last wrote or last saw, carried forward. Both are worth
+/// showing; only one is worth showing without a caveat.
+struct VendorReading: Codable, Equatable {
+    var value: UInt16
+    var takenAt: Date
+    var confirmed: Bool
+}
+
 struct VendorMap: Codable, Equatable {
     var bindings: [String: VendorBinding] = [:]
 

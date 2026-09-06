@@ -2,6 +2,23 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.58 — 2026-09-05
+
+**Persist vendor-code readings across launches with a confirmation state**
+
+Vendor readings become a struct carrying the value, when it was taken, and
+whether it has been confirmed, rather than a bare number. They are saved to
+UserDefaults and restored on the next launch as unconfirmed, so the panel
+shows what it last knew while a fresh sample is taken rather than a blank.
+
+Sub-addressed bindings resolve from one shared sample of the code, in chunks
+with a per-selector early exit, and a cooldown refuses a sample taken too soon
+after the last — the read is slow and rarely worth repeating. The vendor views
+render the readings and their confirmed state.
+
+Committed at the owner's request from a parallel session's working tree; it
+builds as part of the whole app (the running 0.1.57 was built from this tree).
+
 ## 0.1.57 — 2026-09-05
 
 **Adopt the Mac's input the instant the pointer comes home**

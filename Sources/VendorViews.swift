@@ -71,7 +71,89 @@ struct VendorGroup: View {
         ForEach(controls) { control in
             VendorControlView(control: control, controller: controller, showHint: false)
         }
-        if anyUnmapped { VendorHint(controller: controller) }
+        if anyUnmapped {
+            VendorHint(controller: controller)
+        } else {
+            VendorReadingNote(controls: controls, controller: controller)
+        }
+    }
+}
+
+/// Says how much the selection above is worth.
+///
+/// The settings behind 0xE1 cannot be read on demand — the monitor answers a
+/// read with whichever sub-selector its rotation lands on, and the ones that
+/// matter here turn up in a few percent of reads. So there are three honest
+/// states, and the interface used to draw all three identically as an empty
+/// radio group: read and confirmed, remembered from a write or an earlier
+/// session, and never seen at all. Only the first deserves silence.
+struct VendorReadingNote: View {
+    let controls: [VendorControl]
+    @ObservedObject var controller: MonitorController
+
+    /// Only sub-addressed controls have this problem; a plain code reads back
+    /// every time and needs no caveat.
+    private var readings: [(VendorControl, VendorReading?)] {
+        controls.compactMap { control in
+            guard let binding = controller.vendorMap[control], binding.isSubAddressed
+            else { return nil }
+            return (control, controller.reading(for: control))
+        }
+    }
+
+    private var unconfirmed: [(VendorControl, VendorReading?)] {
+        readings.filter { $0.1?.confirmed != true }
+    }
+
+    var body: some View {
+        if !readings.isEmpty && !unconfirmed.isEmpty {
+            if controller.vendorSampling {
+                HStack(spacing: 7) {
+                    ProgressView().controlSize(.small)
+                    Text("Reading from the monitor…")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textSecond)
+                }
+                .padding(.top, 2)
+            } else {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(message)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Re-read") {
+                        Task<Void, Never> { await controller.refreshVendorReadings() }
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(Theme.accent)
+                    .disabled(!controller.controlsLive)
+                }
+                .padding(.top, 2)
+                .help("This setting lives behind a manufacturer code that answers with only "
+                    + "one of the settings it holds, and which one is not ours to choose. "
+                    + "When it will not name this one, the value shown is what it was last "
+                    + "read or last set to.")
+            }
+        }
+    }
+
+    private var message: String {
+        let known = unconfirmed.filter { $0.1 != nil }
+        guard let latest = known.compactMap({ $0.1?.takenAt }).max() else {
+            return "The monitor has not reported this. Choosing an option sets it, "
+                 + "and it is remembered here."
+        }
+        return "Last known setting, from \(Self.when(latest)). "
+             + "The monitor reports this one only occasionally."
+    }
+
+    private static func when(_ date: Date) -> String {
+        if Date().timeIntervalSince(date) < 60 { return "a moment ago" }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter.localizedString(for: date, relativeTo: Date())
     }
 }
 
