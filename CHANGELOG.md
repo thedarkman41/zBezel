@@ -2,6 +2,27 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 0.1.55 — 2026-09-05
+
+**Stop the agent installer crying "csc.exe not found" when it is right there**
+
+The Set Up flow kept failing at "Check Windows prerequisites" with a message
+saying the .NET C# compiler was missing, on machines that plainly had it. Two
+things were wrong. It tested one hard-coded path with a single Test-Path, and
+in the app's SSH context that read false even though csc.exe was present. And
+when the probe came back empty at all — a momentary SSH or PowerShell hiccup —
+the check defaulted to "missing" and told the user to go hunting for a
+stripped-down Windows image.
+
+Now the compiler is found by asking PowerShell where its own runtime lives,
+which is the directory csc.exe sits in, so the answer does not depend on
+%WINDIR% resolving to the expected place; the fixed path and a folder search
+are fallbacks. Whatever it finds is handed to the compile step, so a
+non-standard .NET location still builds. The probe is retried a few times, so
+one empty read no longer fails the install. And the three states are kept
+apart: found, genuinely absent, and could-not-run — the last two say what
+actually happened and show the raw output rather than blaming the toolchain.
+
 ## 0.1.54 — 2026-09-02
 
 **A monitor link that looks after itself**

@@ -56,6 +56,9 @@ final class AgentInstaller: ObservableObject {
     }
 
     @Published private(set) var smartAppControl: SmartAppControl = .absent
+    /// The full path to csc.exe the prerequisite check found, handed to the
+    /// compile step so an unusual .NET location still builds.
+    private var compilerPath: String?
 
     enum Auth: Equatable {
         case key
@@ -192,24 +195,56 @@ final class AgentInstaller: ObservableObject {
 
         // 3 — prerequisites.
         try await step(3) {
-            let report = try await self.remotePowerShell(target, onward, Self.preflightScript)
-            var csc = false, session = false
+            // The probe occasionally comes back empty — a momentary SSH or
+            // PowerShell hiccup, or the agent mid-restart — and one empty read
+            // must never be taken for "the compiler is missing". So run it a few
+            // times, and treat a report that NEVER once names the compiler as a
+            // failure to RUN the check, distinct from the compiler being genuinely
+            // absent (which the probe states as CSC=no). On success CSC carries
+            // the compiler's full path, not a yes.
+            var report = ""
+            var sawCSC = false
+            var cscPath: String?
+            var session = false
             var sessionDetail = ""
-            for line in report.split(separator: "\n") {
-                let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                if text.hasPrefix("CSC=") { csc = text.hasSuffix("yes") }
-                if text.hasPrefix("CONSOLE=") {
-                    sessionDetail = String(text.dropFirst("CONSOLE=".count))
-                    session = sessionDetail != "none"
-                }
-                if text.hasPrefix("SAC=") {
-                    switch String(text.dropFirst("SAC=".count)) {
-                    case "0":  self.smartAppControl = .off
-                    case "1":  self.smartAppControl = .on
-                    case "2":  self.smartAppControl = .evaluation
-                    default:   self.smartAppControl = .absent
+            for attempt in 1...3 {
+                report = try await self.remotePowerShell(target, onward, Self.preflightScript)
+                sawCSC = false; cscPath = nil; session = false; sessionDetail = ""
+                for line in report.split(separator: "\n") {
+                    let text = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.hasPrefix("CSC=") {
+                        sawCSC = true
+                        let value = String(text.dropFirst("CSC=".count)).trimmingCharacters(in: .whitespaces)
+                        cscPath = value.lowercased() == "no" ? nil : value
+                    }
+                    if text.hasPrefix("CONSOLE=") {
+                        sessionDetail = String(text.dropFirst("CONSOLE=".count))
+                        session = sessionDetail != "none"
+                    }
+                    if text.hasPrefix("SAC=") {
+                        switch String(text.dropFirst("SAC=".count)) {
+                        case "0":  self.smartAppControl = .off
+                        case "1":  self.smartAppControl = .on
+                        case "2":  self.smartAppControl = .evaluation
+                        default:   self.smartAppControl = .absent
+                        }
                     }
                 }
+                if sawCSC { break }
+                if attempt < 3 { try? await Task.sleep(nanoseconds: 1_200_000_000) }
+            }
+
+            // The probe ran but never named the compiler, even after retries.
+            // Almost always a transient rather than a machine missing its
+            // toolchain — so say that, and show what it DID return so a real
+            // cause is visible instead of hidden behind a guess.
+            guard sawCSC else {
+                let tail = report.trimmingCharacters(in: .whitespacesAndNewlines)
+                throw InstallError(message:
+                    "Could not run the prerequisite check on \(target.host) after three tries — it kept "
+                  + "returning nothing. That is usually a brief SSH or PowerShell hiccup, or the agent "
+                  + "restarting. Wait a moment and run Set Up again."
+                  + (tail.isEmpty ? "" : "\n\nWhat it returned:\n\(tail.prefix(400))"))
             }
 
             // Fail here rather than at step 7. Smart App Control does not stop
@@ -224,18 +259,23 @@ final class AgentInstaller: ObservableObject {
                   + "Control\" and install again — but note that turning it off cannot be undone "
                   + "without reinstalling Windows.")
             }
-            guard csc else {
+            guard let csc = cscPath else {
+                let tail = report.trimmingCharacters(in: .whitespacesAndNewlines)
                 throw InstallError(message:
-                    "csc.exe was not found. It ships with the .NET Framework, which is normally part of Windows — "
-                  + "check that the machine is not a stripped-down image.")
+                    "The .NET Framework C# compiler (csc.exe) was not found on \(target.host), in the "
+                  + "runtime directory, the standard Framework path, or a search of the .NET folders. "
+                  + "It ships with the .NET Framework that is part of Windows, so a machine without it "
+                  + "is usually a stripped-down image. Install the .NET Framework and run Set Up again."
+                  + (tail.isEmpty ? "" : "\n\nWhat the check returned:\n\(tail.prefix(400))"))
             }
+            self.compilerPath = csc
             guard session else {
                 throw InstallError(message:
                     "Nobody is signed in at the console. The agent needs an interactive desktop session, because "
                   + "the Windows Monitor Configuration API sees no monitors from an SSH session. Sign in on the "
                   + "machine itself, then install again.")
             }
-            return "csc.exe present, console session \(sessionDetail), "
+            return "csc.exe at \(csc), console session \(sessionDetail), "
                  + "Smart App Control \(self.smartAppControl.describedForLog)"
         }
 
@@ -264,7 +304,8 @@ final class AgentInstaller: ObservableObject {
 
         // 5 — build.
         try await step(5) {
-            let output = try await self.remotePowerShell(target, onward, Self.compileScript)
+            let output = try await self.remotePowerShell(
+                target, onward, Self.compileScript(csc: self.compilerPath ?? ""))
             guard output.contains("COMPILED") else {
                 throw InstallError(message: "Compile failed:\n" + output)
             }
@@ -646,9 +687,33 @@ final class AgentInstaller: ObservableObject {
         """
     }
 
+    // Locate the .NET Framework C# compiler and report its FULL PATH, not a
+    // yes/no. Windows PowerShell itself runs on that framework, so its own
+    // runtime directory is where csc.exe lives — the most reliable answer, and
+    // one that does not depend on %WINDIR% resolving to the place we expect
+    // (which is exactly what a single hard-coded Test-Path got wrong). The fixed
+    // path and a directory search are fallbacks. Whatever it finds is handed to
+    // the compile step, so an unusual .NET location still builds.
     private static let preflightScript = """
-    $csc = "$env:WINDIR\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
-    if (Test-Path $csc) { "CSC=yes" } else { "CSC=no" }
+    $csc = $null
+    try {
+        $rt = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+        $p = Join-Path $rt 'csc.exe'
+        if (Test-Path $p) { $csc = $p }
+    } catch {}
+    if (-not $csc) {
+        $p = Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'
+        if (Test-Path $p) { $csc = $p }
+    }
+    if (-not $csc) {
+        foreach ($base in @((Join-Path $env:WINDIR 'Microsoft.NET\\Framework64'), (Join-Path $env:WINDIR 'Microsoft.NET\\Framework'))) {
+            if (Test-Path $base) {
+                $f = Get-ChildItem -Path $base -Recurse -Filter csc.exe -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1
+                if ($f) { $csc = $f.FullName; break }
+            }
+        }
+    }
+    if ($csc) { "CSC=$csc" } else { "CSC=no" }
     $console = (Get-Process explorer -ErrorAction SilentlyContinue | Select-Object -First 1).SessionId
     if ($null -ne $console) { "CONSOLE=$console" } else { "CONSOLE=none" }
     $sac = (Get-ItemProperty "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\CI\\Policy" `
@@ -678,12 +743,18 @@ final class AgentInstaller: ObservableObject {
     "SACNOW=$after"
     """
 
-    private static let compileScript = """
-    $csc = "$env:WINDIR\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe"
-    $dir = Join-Path $env:USERPROFILE 'bezel'
-    Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Milliseconds 600
-    & $csc /nologo /optimize+ /warn:4 /warnaserror /target:exe /out:"$dir\\BezelAgent.exe" "$dir\\BezelAgent.cs" 2>&1 | Out-String
-    if (Test-Path "$dir\\BezelAgent.exe") { "COMPILED" } else { "COMPILE FAILED" }
-    """
+    /// Built from the compiler path the prerequisite check actually found, so a
+    /// non-standard .NET location still compiles. `csc` is a Windows filesystem
+    /// path from our own probe; empty falls back to the standard location.
+    private static func compileScript(csc: String) -> String {
+        let path = csc.isEmpty ? #"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"# : csc
+        return """
+        $csc = "\(path)"
+        $dir = Join-Path $env:USERPROFILE 'bezel'
+        Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
+        Start-Sleep -Milliseconds 600
+        & $csc /nologo /optimize+ /warn:4 /warnaserror /target:exe /out:"$dir\\BezelAgent.exe" "$dir\\BezelAgent.cs" 2>&1 | Out-String
+        if (Test-Path "$dir\\BezelAgent.exe") { "COMPILED" } else { "COMPILE FAILED" }
+        """
+    }
 }
