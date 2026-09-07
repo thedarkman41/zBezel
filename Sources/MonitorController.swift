@@ -693,20 +693,29 @@ final class MonitorController: ObservableObject {
         }
     }
 
-    /// How long the panel takes to renegotiate a DDC input switch and actually
-    /// LIGHT the new source. The reveal waits this out before clearing the
-    /// arriving side's curtain. It is a fixed wait, not a read: the input register
-    /// flips to the target well before the pixels are up (measured — the panel is
-    /// still dark for a beat after 0x60 reads the new input), so a read-gated
-    /// reveal cleared the curtain into the renegotiation black and the desktop
-    /// popped. Erring long only lengthens the black hold; erring short brings the
-    /// pop back. Tunable if a panel is quicker or slower than this one.
-    private static let panelRenegotiation: UInt64 = 3_400_000_000
-    /// The pick path's switch goes through requestMonitorInput's coalescer, which
-    /// sleeps this long before it writes 0x60. The return writes 0x60 straight
-    /// away, so only the outbound reveal adds this on top of the renegotiation.
-    private static let switchCoalescerLead: UInt64 = 500_000_000
-    private static let dissolveFade: Double = 0.7
+    private static let dissolveFade: Double = 0.7   // fade the leaving side to black
+    private static let revealFade: Double = 2.1     // fade the arriving side up from black
+
+    /// How long the panel takes to renegotiate a DDC input switch and LIGHT the
+    /// new source, before the reveal clears the arriving curtain onto it.
+    ///
+    /// Keyed on the INPUT, not the machine — so it needs no per-PC tuning: zBezel
+    /// detects the input from the panel, and a freshly installed PC gets the value
+    /// for its cable automatically, whatever box it is. It has to vary by input
+    /// because they do not light alike: HDMI (HDCP/link training) lights at ~5s,
+    /// DisplayPort and USB-C at ~4s. The reveal must land WHEN the panel lights —
+    /// too late and a fast input wakes showing its desktop for the gap before the
+    /// reveal (a visible flash-then-black); too early and a slow one pops in at
+    /// full. There is no readable "pixels are up" signal on this panel to make it
+    /// adaptive (0xD6 reads "on" straight through the dark switch), so it is a
+    /// per-input timed wait. Raise a value if that input flashes, lower it if it
+    /// sits on black too long.
+    private static func revealWait(forInput input: UInt16) -> UInt64 {
+        switch input {
+        case 0x11: return 5_500_000_000   // HDMI — lights latest
+        default:   return 3_900_000_000   // DisplayPort (0x0F) / USB-C1 (0x13)
+        }
+    }
 
     /// A chooser tile was clicked (Mac -> machine). A dissolve, both sides in
     /// software: the Mac fades out under its own curtain, then — once the panel
@@ -726,6 +735,7 @@ final class MonitorController: ObservableObject {
             switchTransitioning = false; return
         }
         let arrivingHost = kvm.machines[index].host
+        let arrivingInput = kvm.machines[index].input
 
         switchTransitioning = true
         let display = selectedID
@@ -746,21 +756,27 @@ final class MonitorController: ObservableObject {
             //    is still renegotiating and the machine is not yet on screen — so
             //    it shows black, not a flash of desktop, when the panel reaches it.
             //    Instant (ms 0): there is nothing to animate behind a dead input.
+            // 3. Arm the machine's curtain black. Its agent then holds it on top on
+            //    its own fast timer (see FadeOverlay) — an input that sleeps its
+            //    output off-panel (HDMI on bellatrix) wakes showing the last desktop
+            //    frame for an instant, and only a local re-assert is quick enough to
+            //    cover that; a Mac round-trip is not. Instant (ms 0): nothing to
+            //    animate behind a dead input.
             kvm.fadeMachine(host: arrivingHost, toOpaque: 100, overMs: 0)
-            // 4. Let the panel light the machine's input. Plus the coalescer lead,
-            //    since the pick's 0x60 write is deferred that long.
-            try? await Task.sleep(nanoseconds: Self.panelRenegotiation + Self.switchCoalescerLead)
+            // 4. Give the panel time to light the machine's input (per input —
+            //    HDMI lights later), so the reveal lands on a lit panel.
+            try? await Task.sleep(nanoseconds: Self.revealWait(forInput: arrivingInput))
             // 5. The panel is on the machine now, so the centre is behind it and
             //    safe to hide the cursor in. Then fade the machine in on its own
             //    side, and take the Mac's curtain down — invisible behind the
             //    machine's input.
             kvm.reparkAtPanelCentre()
             kvm.deferCenterPark = false
-            kvm.fadeMachine(host: arrivingHost, toOpaque: 0, overMs: 700)
+            kvm.fadeMachine(host: arrivingHost, toOpaque: 0, overMs: Int(Self.revealFade * 1000))
             screenTransition.end()
             // Hold the transition open until the machine has finished fading in, so
             // a quick re-cross cannot interrupt it half-lit.
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            try? await Task.sleep(nanoseconds: UInt64(Self.revealFade * 1_000_000_000))
         }
     }
 
@@ -798,11 +814,11 @@ final class MonitorController: ObservableObject {
             //    the transit and fires a spurious lock/release.
             inputSwitchRunning = true
             await set(code: VCP.inputSelect.code, value: macInput, byHand: false)
-            // 4. Let the panel light the Mac (fixed renegotiation wait).
-            try? await Task.sleep(nanoseconds: Self.panelRenegotiation)
+            // 4. Give the panel time to light the Mac's input before revealing.
+            try? await Task.sleep(nanoseconds: Self.revealWait(forInput: macInput))
             inputSwitchRunning = false
-            // 5. Reveal the Mac — clear its curtain (blurred black to sharp, 700 ms).
-            await screenTransition.clear(duration: Self.dissolveFade)
+            // 5. Reveal the Mac — clear its curtain (blurred black to sharp).
+            await screenTransition.clear(duration: Self.revealFade)
             // 6. Clear the machine's own curtain now that it is off the panel, so
             //    its desktop is normal again for a View or RDP window. Invisible:
             //    the panel is showing the Mac.

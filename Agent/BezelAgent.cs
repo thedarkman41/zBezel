@@ -3023,6 +3023,7 @@ internal static class FadeOverlay
     private static Form _form;
     private static System.Windows.Forms.Timer _fade;
     private static System.Windows.Forms.Timer _watchdog;
+    private static System.Windows.Forms.Timer _hold;
     private static double _current;   // 0..1, touched only on the form thread
 
     /// Drive the curtain to `opacityPercent` (0..100) over `ms` milliseconds.
@@ -3031,7 +3032,6 @@ internal static class FadeOverlay
     public static void Set(int opacityPercent, int ms)
     {
         double target = Math.Max(0, Math.Min(100, opacityPercent)) / 100.0;
-        BezelAgent.Log("fade: -> " + opacityPercent + "% over " + ms + "ms");
         EnsureUI();
         var f = _form;
         if (f == null) { BezelAgent.Log("fade: no overlay form"); return; }
@@ -3040,6 +3040,7 @@ internal static class FadeOverlay
             f.BeginInvoke((MethodInvoker)delegate
             {
                 if (_fade != null) { _fade.Stop(); _fade.Dispose(); _fade = null; }
+                if (_hold != null) { _hold.Stop(); _hold.Dispose(); _hold = null; }
 
                 // Safety net. A black curtain whose clearing command never arrives
                 // — a dropped message, the Mac quitting mid-switch — would leave
@@ -3062,14 +3063,29 @@ internal static class FadeOverlay
                 }
 
                 // Coming up from nothing: the window must be present before it is
-                // asked to show any black.
-                if (target > 0) { f.Visible = true; f.TopMost = true; }
+                // asked to show any black. Re-cover the whole virtual screen and
+                // force a repaint every time it is (re-)asserted opaque: a display
+                // that slept its output while off-panel (HDMI) wakes with its old
+                // desktop frame and can knock this window's size or z-order, so a
+                // bare Opacity set would leave the desktop showing through until the
+                // compositor caught up. Re-asserting bounds, topmost and a repaint
+                // pushes the black back the instant the wake lands.
+                if (target > 0)
+                {
+                    f.Visible = true;
+                    f.TopMost = true;
+                    var vs = SystemInformation.VirtualScreen;
+                    if (f.Bounds != vs) f.Bounds = vs;
+                    f.Invalidate();
+                    f.Update();
+                }
 
                 if (ms <= 0)
                 {
                     _current = target;
                     f.Opacity = target;
                     if (target <= 0) f.Visible = false;
+                    else StartHold();   // keep the black glued on top through any wake
                     return;
                 }
 
@@ -3088,6 +3104,7 @@ internal static class FadeOverlay
                         _current = target;
                         f.Opacity = target;
                         if (target <= 0) f.Visible = false;   // gone, not a 0% ghost
+                        else StartHold();                     // faded IN to black: now hold it
                         if (_fade != null) { _fade.Stop(); _fade.Dispose(); _fade = null; }
                     }
                 };
@@ -3095,6 +3112,35 @@ internal static class FadeOverlay
             });
         }
         catch (Exception e) { BezelAgent.Log("fade: " + e.Message); }
+    }
+
+    /// While the curtain is fully opaque, keep re-asserting it on a tight timer.
+    /// The point is the wake: an input that slept its output while off-panel comes
+    /// back showing its old desktop frame, and only a re-assert running LOCALLY —
+    /// bounds, topmost, opacity, repaint — is quick enough to push the black back
+    /// before the eye catches it; a Mac round-trip is not. Runs only while opaque
+    /// and stops itself the moment the curtain is no longer fully black (a fade-out
+    /// or clear cancels it up front). The 8 s watchdog still bounds the opaque
+    /// state, so this cannot hold a machine black on its own.
+    private static void StartHold()
+    {
+        if (_hold != null) { _hold.Stop(); _hold.Dispose(); _hold = null; }
+        _hold = new System.Windows.Forms.Timer { Interval = 45 };
+        _hold.Tick += delegate
+        {
+            var f = _form;
+            if (f == null || _current < 0.999)
+            {
+                if (_hold != null) { _hold.Stop(); _hold.Dispose(); _hold = null; }
+                return;
+            }
+            f.TopMost = true;
+            var vs = SystemInformation.VirtualScreen;
+            if (f.Bounds != vs) f.Bounds = vs;
+            if (f.Opacity < 0.999) f.Opacity = 1.0;
+            f.Invalidate();
+        };
+        _hold.Start();
     }
 
     private static void EnsureUI()
