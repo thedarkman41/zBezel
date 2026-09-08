@@ -94,6 +94,12 @@ final class KVMTransport {
 
     private var process: Process?
     private var input: FileHandle?
+    /// The read ends of the child's stdout/stderr, held so `disconnect()` can
+    /// disarm their readability handlers and close them. Without this, each
+    /// reconnect left the previous handles armed and "readable at EOF", spinning a
+    /// core forever and orphaning the pipe fd.
+    private var stdoutReader: FileHandle?
+    private var stderrReader: FileHandle?
     private let queue = DispatchQueue(label: "com.darkstar.zBezel.kvm.tx")
 
     private(set) var lastError: String?
@@ -165,10 +171,27 @@ final class KVMTransport {
 
         // Drain both so a full pipe cannot block the far side, and keep the
         // last stderr line as the reason if the channel dies.
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        let stdoutReader = stdout.fileHandleForReading
+        let stderrReader = stderr.fileHandleForReading
+        self.stdoutReader = stdoutReader
+        self.stderrReader = stderrReader
+
+        stdoutReader.readabilityHandler = { [weak self] handle in
             guard let self else { return }
             let chunk = handle.availableData
-            guard !chunk.isEmpty else { return }
+            guard !chunk.isEmpty else {
+                // EOF: the ssh child closed stdout. A file handle stays PERMANENTLY
+                // readable at EOF, so leaving the handler armed re-invokes it in a
+                // tight loop and pins a core; the pipe fd also never frees. Disarm
+                // and close this handle. A deliberate disconnect() disarms first,
+                // so reaching here means the far side went away on its own — mark
+                // the channel dead so the next write reconnects rather than writing
+                // into a corpse.
+                handle.readabilityHandler = nil
+                try? handle.close()
+                self.channelEnded()
+                return
+            }
 
             // Split on BYTES, not Characters.
             //
@@ -199,11 +222,32 @@ final class KVMTransport {
                 }
             }
         }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
+        stderrReader.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else {
+                // Same EOF spin/leak as stdout — disarm and close. stdout drives the
+                // reconnect; stderr just carries the reason, so nothing more to do.
+                handle.readabilityHandler = nil
+                try? handle.close()
+                return
+            }
+            let text = String(decoding: data, as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !text.isEmpty { self?.lastError = text }
         }
+    }
+
+    /// The channel closed on its own (stdout hit EOF), as opposed to our own
+    /// `disconnect()`. Drop the write side and reconnect — the same recovery a
+    /// failed `send()` triggers, so a silently dead channel is noticed even when
+    /// nothing is being written.
+    private func channelEnded() {
+        // disconnect() nils these before terminating (and disarms the handler
+        // first), so if either is still set the end was unexpected.
+        guard process != nil || input != nil else { return }
+        KVMLog.write("channel to \(lastHost ?? "?") ended (stdout EOF); reconnecting")
+        input = nil
+        scheduleReconnect()
     }
 
     private var sentCount = 0
@@ -278,6 +322,18 @@ final class KVMTransport {
     }
 
     func disconnect() {
+        // Stop reading FIRST: disarm the handlers and close the read ends before
+        // the child exits, so terminating it cannot leave a handle "readable at
+        // EOF" spinning a core, and the pipe fds are released rather than orphaned
+        // across reconnects. Disarming first also means the EOF that follows does
+        // not fire channelEnded() and trigger an unwanted reconnect.
+        stdoutReader?.readabilityHandler = nil
+        stderrReader?.readabilityHandler = nil
+        try? stdoutReader?.close()
+        try? stderrReader?.close()
+        stdoutReader = nil
+        stderrReader = nil
+
         if let handle = input {
             // Ask the far side to exit rather than relying on EOF: the remote
             // shell is PowerShell and does not reliably propagate a closed
