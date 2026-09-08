@@ -92,6 +92,16 @@ final class MonitorController: ObservableObject {
     }
     @Published private(set) var capabilities: Capabilities?
     @Published private(set) var features: [UInt8: FeatureState] = [:]
+    /// True while a colour mode change is applying and its per-mode gains and
+    /// black levels are being re-read — the sliders dim so the outgoing numbers
+    /// do not read as current before the new ones land.
+    @Published private(set) var refreshingColor = false
+
+    /// The white-balance reference for the draggable white point: the RGB gains
+    /// and the white they are taken to produce (the panel's native white). Set
+    /// lazily from the current gains the first time the white point is dragged,
+    /// and cleared when a colour mode change moves the gains out from under it.
+    private var whiteBalanceReference: (gains: (Double, Double, Double), white: (Double, Double))?
 
     @Published private(set) var modeGroups: [(resolution: String, modes: [DisplayMode])] = []
     @Published private(set) var currentMode: DisplayMode?
@@ -2563,6 +2573,143 @@ final class MonitorController: ObservableObject {
                 return [:]
             }
         }
+    }
+
+    /// Change the colour mode (0xDC) and pull the settings that follow from it.
+    ///
+    /// The panel recomputes its per-mode RGB gains (0x16/0x18/0x1A) and black
+    /// levels (0x6C/0x6E/0x70) — and its colour preset mirror (0x14) — but the
+    /// mode write does not read them back, so the sliders kept showing the
+    /// previous mode's numbers. This writes the mode, gives the panel a beat to
+    /// apply it, then re-reads those so the sliders follow. `refreshingColor` is
+    /// held across the whole thing so the sliders dim until the new values land.
+    func setColorMode(_ value: UInt16) async {
+        refreshingColor = true
+        defer { refreshingColor = false }
+        await set(code: 0xDC, value: value)
+        // The write returns before the panel has finished switching; give it a
+        // beat so the read lands on the settled values, not the outgoing ones.
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        _ = await reread(codes: [0x14, 0x16, 0x18, 0x1A, 0x6C, 0x6E, 0x70])
+        // Landing on Native with fresh factory gains is the one moment we know the
+        // gains produce the native white — pin the white-balance reference here.
+        if value == 0x00, let w = selected?.edid?.nativeWhitePoint {
+            captureWhiteReference(nativeWhite: w)
+        }
+    }
+
+    // MARK: White-point solver (the draggable dot in the gamut diagram)
+
+    /// Capture the white-balance reference: the current RGB gains and the white
+    /// they are taken to produce. Trusted only in Native mode, where the gains act
+    /// on the panel's own primaries rather than through a colour-space LUT. Once
+    /// taken it is a fixed physical fact, so it is captured once and kept.
+    func captureWhiteReference(nativeWhite: EDID.Chromaticity) {
+        guard whiteBalanceReference == nil else { return }
+        guard (features[0xDC]?.current ?? 0xFF) == 0x00 else { return }
+        let g = currentGains()
+        guard g.0 > 0, g.1 > 0, g.2 > 0 else { return }
+        whiteBalanceReference = (g, (nativeWhite.x, nativeWhite.y))
+    }
+
+    private func currentGains() -> (Double, Double, Double) {
+        (Double(features[0x16]?.current ?? 0),
+         Double(features[0x18]?.current ?? 0),
+         Double(features[0x1A]?.current ?? 0))
+    }
+
+    /// Drive the panel's white toward CIE (x, y) by rescaling the RGB gains. The
+    /// gains act on the panel's native primaries, so `primaries` is always the
+    /// EDID's own: solve the primary scalings for the reference and target whites
+    /// and rescale each gain by the ratio, holding the peak channel to preserve
+    /// level. `commit` writes on release; otherwise the gains stream live.
+    func setWhitePoint(x: Double, y: Double, primaries: EDID.ColourPrimaries,
+                       nativeWhite: EDID.Chromaticity, commit: Bool) {
+        captureWhiteReference(nativeWhite: nativeWhite)
+        guard let inv = Self.invert3x3(Self.primaryMatrix(primaries)) else { return }
+        let sTgt = Self.mul(inv, Self.whiteXYZ(x, y))
+        var r: Double, g: Double, b: Double
+        let maxGain = Double(features[0x16]?.maximum ?? 255)
+        let targetPeak: Double
+        if let ref = whiteBalanceReference {
+            // Preferred model: rescale the factory gains by the ratio of primary
+            // scalings for the target vs the reference (native) white. Pins the
+            // native white to the factory gains exactly.
+            let sRef = Self.mul(inv, Self.whiteXYZ(ref.white.0, ref.white.1))
+            guard sRef.0 != 0, sRef.1 != 0, sRef.2 != 0 else { return }
+            r = ref.gains.0 * (sTgt.0 / sRef.0)
+            g = ref.gains.1 * (sTgt.1 / sRef.1)
+            b = ref.gains.2 * (sTgt.2 / sRef.2)
+            targetPeak = max(ref.gains.0, ref.gains.1, ref.gains.2)
+        } else {
+            // Fallback with no native reference captured yet: gains proportional to
+            // the primary scalings for the target white, filled to full drive. Less
+            // pinned to factory, but the white still moves the right way — so the
+            // dot always does something rather than silently no-op.
+            r = max(0, sTgt.0); g = max(0, sTgt.1); b = max(0, sTgt.2)
+            targetPeak = maxGain
+        }
+        let peak = max(r, g, b)
+        guard peak > 0 else { return }
+        let k = targetPeak / peak
+        r *= k; g *= k; b *= k
+        func q(_ v: Double) -> UInt16 { UInt16(max(0, min(maxGain, v.rounded()))) }
+        let rr = q(r), gg = q(g), bb = q(b)
+        if commit {
+            Task { await setFinal(code: 0x16, value: rr)
+                   await setFinal(code: 0x18, value: gg)
+                   await setFinal(code: 0x1A, value: bb) }
+        } else {
+            setLive(code: 0x16, value: rr)
+            setLive(code: 0x18, value: gg)
+            setLive(code: 0x1A, value: bb)
+        }
+    }
+
+    /// The white the current RGB gains produce on the panel's native primaries —
+    /// for placing the dot after a mode change. nil until a native reference has
+    /// been captured (the caller then falls back to the declared white).
+    func whitePointForCurrentGains(primaries: EDID.ColourPrimaries) -> EDID.Chromaticity? {
+        guard let ref = whiteBalanceReference,
+              ref.gains.0 > 0, ref.gains.1 > 0, ref.gains.2 > 0,
+              let inv = Self.invert3x3(Self.primaryMatrix(primaries)) else { return nil }
+        let sRef = Self.mul(inv, Self.whiteXYZ(ref.white.0, ref.white.1))
+        let L = (sRef.0 / ref.gains.0, sRef.1 / ref.gains.1, sRef.2 / ref.gains.2)
+        let g = currentGains()
+        let contrib = (g.0 * L.0, g.1 * L.1, g.2 * L.2)
+        let m = Self.primaryMatrix(primaries)
+        let xyz = Self.mul(m, contrib)
+        let sum = xyz.0 + xyz.1 + xyz.2
+        guard sum > 0 else { return nil }
+        return EDID.Chromaticity(x: xyz.0 / sum, y: xyz.1 / sum)
+    }
+
+    private static func primaryMatrix(_ p: EDID.ColourPrimaries) -> [[Double]] {
+        func col(_ c: EDID.Chromaticity) -> (Double, Double, Double) {
+            c.y > 0 ? (c.x / c.y, 1, (1 - c.x - c.y) / c.y) : (0, 0, 0)
+        }
+        let r = col(p.red), g = col(p.green), b = col(p.blue)
+        return [[r.0, g.0, b.0], [r.1, g.1, b.1], [r.2, g.2, b.2]]
+    }
+    private static func whiteXYZ(_ x: Double, _ y: Double) -> (Double, Double, Double) {
+        y > 0 ? (x / y, 1, (1 - x - y) / y) : (0, 0, 0)
+    }
+    private static func mul(_ m: [[Double]], _ v: (Double, Double, Double)) -> (Double, Double, Double) {
+        (m[0][0]*v.0 + m[0][1]*v.1 + m[0][2]*v.2,
+         m[1][0]*v.0 + m[1][1]*v.1 + m[1][2]*v.2,
+         m[2][0]*v.0 + m[2][1]*v.1 + m[2][2]*v.2)
+    }
+    static func invert3x3(_ m: [[Double]]) -> [[Double]]? {
+        let a = m[0][0], b = m[0][1], c = m[0][2]
+        let d = m[1][0], e = m[1][1], f = m[1][2]
+        let g = m[2][0], h = m[2][1], i = m[2][2]
+        let A = e*i - f*h, B = -(d*i - f*g), C = d*h - e*g
+        let det = a*A + b*B + c*C
+        guard abs(det) > 1e-9 else { return nil }
+        let id = 1 / det
+        return [[A*id, (c*h - b*i)*id, (b*f - c*e)*id],
+                [B*id, (a*i - c*g)*id, (c*d - a*f)*id],
+                [C*id, (b*g - a*h)*id, (a*e - b*d)*id]]
     }
 
     func reconnectProxy() async {

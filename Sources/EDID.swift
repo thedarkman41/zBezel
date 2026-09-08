@@ -72,6 +72,174 @@ struct EDID {
     }
     var gamma: Double? { raw[23] == 0xFF ? nil : (Double(raw[23]) + 100) / 100 }
 
+    // MARK: Colour (chromaticity block, bytes 25–34)
+
+    /// A CIE 1931 (x, y) chromaticity point at the EDID's 10-bit precision.
+    struct Chromaticity: Equatable {
+        var x: Double
+        var y: Double
+        var label: String { String(format: "%.4f, %.4f", x, y) }
+    }
+
+    /// The panel's own colour primaries and white point, decoded from the EDID
+    /// chromaticity block. Each coordinate is 10 bits: the high 8 in its own byte
+    /// (27–34), the low 2 packed two-per-coordinate into bytes 25 and 26.
+    struct ColourPrimaries: Equatable {
+        var red: Chromaticity
+        var green: Chromaticity
+        var blue: Chromaticity
+        var white: Chromaticity
+    }
+
+    var colourPrimaries: ColourPrimaries {
+        func coord(_ hi: Int, _ lowByte: Int, _ shift: Int) -> Double {
+            let v = (Int(raw[hi]) << 2) | ((Int(raw[lowByte]) >> shift) & 0x3)
+            return Double(v) / 1024.0
+        }
+        return ColourPrimaries(
+            red:   Chromaticity(x: coord(27, 25, 6), y: coord(28, 25, 4)),
+            green: Chromaticity(x: coord(29, 25, 2), y: coord(30, 25, 0)),
+            blue:  Chromaticity(x: coord(31, 26, 6), y: coord(32, 26, 4)),
+            white: Chromaticity(x: coord(33, 26, 2), y: coord(34, 26, 0)))
+    }
+
+    /// The panel's native white point (CIE 1931 x, y). nil if the block is blank
+    /// (an EDID that declined to declare one — all zeros).
+    var nativeWhitePoint: Chromaticity? {
+        let w = colourPrimaries.white
+        return (w.x == 0 && w.y == 0) ? nil : w
+    }
+
+    /// Correlated colour temperature of the native white point, via McCamy's
+    /// approximation, rounded to 50 K. nil when the point is far enough off the
+    /// Planckian locus that the number would be meaningless.
+    var whitePointCCT: Int? {
+        guard let w = nativeWhitePoint else { return nil }
+        return Self.cct(x: w.x, y: w.y)
+    }
+
+    /// The standard illuminant the native white point sits closest to, if within
+    /// a small tolerance — the name a person recognises (D65, D50, DCI, …).
+    var whitePointIlluminant: String? {
+        guard let w = nativeWhitePoint else { return nil }
+        return Self.illuminant(x: w.x, y: w.y)
+    }
+
+    /// Correlated colour temperature of any CIE (x, y) via McCamy's approximation,
+    /// rounded to 50 K — for the *active* white, which can be a colour space's
+    /// target or a dragged custom balance, not only the panel's declared white.
+    static func cct(x: Double, y: Double) -> Int? {
+        guard y != 0.1858 else { return nil }
+        let n = (x - 0.3320) / (0.1858 - y)
+        let cct = 449 * n * n * n + 3525 * n * n + 6823.3 * n + 5520.33
+        guard cct > 1000, cct < 25000 else { return nil }
+        return Int((cct / 50).rounded() * 50)
+    }
+
+    /// The standard illuminant a CIE (x, y) sits closest to, within tolerance.
+    static func illuminant(x: Double, y: Double) -> String? {
+        let standards: [(String, Double, Double)] = [
+            ("D65", 0.3127, 0.3290), ("D50", 0.3457, 0.3585),
+            ("D55", 0.3324, 0.3474), ("D75", 0.2990, 0.3149),
+            ("DCI", 0.3140, 0.3510),
+        ]
+        return standards.first { abs(x - $0.1) < 0.005 && abs(y - $0.2) < 0.005 }?.0
+    }
+
+    // MARK: Colour capabilities (feature-support byte 24)
+
+    /// Whether the panel declares sRGB as its default colour space (a narrow-gamut
+    /// panel usually does; a wide-gamut one says no, as this one does).
+    var defaultsToSRGB: Bool { isDigital && (raw[24] & 0x04 != 0) }
+
+    /// The pixel encodings the digital interface declares. RGB 4:4:4 is always
+    /// present; the two bits say whether YCbCr is offered too.
+    var pixelEncodings: [String]? {
+        guard isDigital else { return nil }
+        var out = ["RGB 4:4:4"]
+        switch (raw[24] >> 3) & 0x3 {
+        case 1: out.append("YCbCr 4:4:4")
+        case 2: out.append("YCbCr 4:2:2")
+        case 3: out.append(contentsOf: ["YCbCr 4:4:4", "YCbCr 4:2:2"])
+        default: break
+        }
+        return out
+    }
+
+    // MARK: Gamut coverage
+
+    /// A named reference gamut, by its RGB primaries.
+    struct ReferenceGamut { let name: String; let red, green, blue: Chromaticity }
+    static let referenceGamuts: [ReferenceGamut] = [
+        .init(name: "sRGB",      red: .init(x: 0.640, y: 0.330), green: .init(x: 0.300, y: 0.600), blue: .init(x: 0.150, y: 0.060)),
+        .init(name: "DCI-P3",    red: .init(x: 0.680, y: 0.320), green: .init(x: 0.265, y: 0.690), blue: .init(x: 0.150, y: 0.060)),
+        .init(name: "BT.709",    red: .init(x: 0.640, y: 0.330), green: .init(x: 0.300, y: 0.600), blue: .init(x: 0.150, y: 0.060)),
+        .init(name: "Adobe RGB", red: .init(x: 0.640, y: 0.330), green: .init(x: 0.210, y: 0.710), blue: .init(x: 0.150, y: 0.060)),
+    ]
+
+    /// The share of a reference gamut the panel covers, as a percentage: the area
+    /// the two triangles have in common over the reference triangle's area. Over
+    /// 100 is not possible by this measure (it is coverage, not relative volume);
+    /// a panel wider than the reference still only "covers" 100% of it.
+    func coverage(of ref: ReferenceGamut) -> Int {
+        let p = colourPrimaries
+        let panel = [(p.red.x, p.red.y), (p.green.x, p.green.y), (p.blue.x, p.blue.y)]
+        let target = [(ref.red.x, ref.red.y), (ref.green.x, ref.green.y), (ref.blue.x, ref.blue.y)]
+        let targetArea = Self.triangleArea(target)
+        guard targetArea > 0 else { return 0 }
+        let shared = Self.triangleArea(Self.clip(panel, to: target))
+        return Int((min(shared / targetArea, 1) * 100).rounded())
+    }
+
+    private static func triangleArea(_ poly: [(Double, Double)]) -> Double {
+        guard poly.count >= 3 else { return 0 }
+        var a = 0.0
+        for i in 0..<poly.count {
+            let j = (i + 1) % poly.count
+            a += poly[i].0 * poly[j].1 - poly[j].0 * poly[i].1
+        }
+        return abs(a) / 2
+    }
+
+    /// Sutherland–Hodgman: clip convex `subject` against convex `clipPoly`.
+    private static func clip(_ subject: [(Double, Double)], to clipPoly: [(Double, Double)]) -> [(Double, Double)] {
+        // Normalise the clip polygon to counter-clockwise so "inside" is a
+        // consistent sign whichever way the primaries were listed.
+        var signed = 0.0
+        for i in 0..<clipPoly.count {
+            let j = (i + 1) % clipPoly.count
+            signed += clipPoly[i].0 * clipPoly[j].1 - clipPoly[j].0 * clipPoly[i].1
+        }
+        let cp = signed < 0 ? clipPoly.reversed().map { $0 } : clipPoly
+        var out = subject
+        for i in 0..<cp.count {
+            let a = cp[i], b = cp[(i + 1) % cp.count]
+            let input = out
+            out = []
+            if input.isEmpty { break }
+            func side(_ p: (Double, Double)) -> Double {
+                (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+            }
+            func crossing(_ p: (Double, Double), _ q: (Double, Double)) -> (Double, Double) {
+                let sp = side(p), sq = side(q)
+                let t = sp / (sp - sq)
+                return (p.0 + t * (q.0 - p.0), p.1 + t * (q.1 - p.1))
+            }
+            var prev = input.last!
+            for cur in input {
+                let curIn = side(cur) >= 0, prevIn = side(prev) >= 0
+                if curIn {
+                    if !prevIn { out.append(crossing(prev, cur)) }
+                    out.append(cur)
+                } else if prevIn {
+                    out.append(crossing(prev, cur))
+                }
+                prev = cur
+            }
+        }
+        return out
+    }
+
     var extensionBlockCount: Int { Int(raw[126]) }
 
     // MARK: Descriptors

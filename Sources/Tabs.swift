@@ -579,12 +579,60 @@ struct InfoRow: View {
 struct ColorTab: View {
     @ObservedObject var controller: MonitorController
 
+    /// A white the user has dragged the dot to, overriding the active space's
+    /// default. Cleared when the colour mode changes so the dot snaps to the new
+    /// space's white.
+    @State private var whiteOverride: EDID.Chromaticity?
+
+    private static let d65 = EDID.Chromaticity(x: 0.3127, y: 0.3290)
+
+    /// What the diagram should draw right now: the triangle of the colour space in
+    /// force, whether that is a standard target or the panel's native gamut, and
+    /// the white that space aims for.
+    private struct ActiveSpace {
+        let gamut: EDID.ColourPrimaries
+        let name: String
+        /// A standard space emulated over the native panel — draw the native gamut
+        /// faintly behind it, and leave the white fixed (not draggable).
+        let isStandard: Bool
+        let white: EDID.Chromaticity
+    }
+
+    private func activeSpace(_ edid: EDID) -> ActiveSpace {
+        let native = edid.colourPrimaries
+        let nativeWhite = edid.nativeWhitePoint ?? Self.d65
+        func ref(_ name: String) -> EDID.ColourPrimaries {
+            guard let r = EDID.referenceGamuts.first(where: { $0.name == name }) else { return native }
+            return EDID.ColourPrimaries(red: r.red, green: r.green, blue: r.blue, white: Self.d65)
+        }
+        switch controller.features[0xDC]?.current ?? 0x00 {
+        case 0x01: return ActiveSpace(gamut: ref("sRGB"),   name: "sRGB",       isStandard: true,  white: Self.d65)
+        case 0x02: return ActiveSpace(gamut: ref("BT.709"), name: "BT.709",     isStandard: true,  white: Self.d65)
+        case 0x05: return ActiveSpace(gamut: ref("DCI-P3"), name: "Display P3", isStandard: true,  white: Self.d65)
+        default:
+            // Native-primary modes (Native, Color Match, the white-balance
+            // presets, Enhance+): native gamut, white read back from the live
+            // gains where possible, else the panel's declared white.
+            let w = controller.whitePointForCurrentGains(primaries: native) ?? nativeWhite
+            let name = HPProfile.colorMode(for: controller.features[0xDC]?.current ?? 0x00)?.name ?? "Native"
+            return ActiveSpace(gamut: native, name: name, isStandard: false, white: w)
+        }
+    }
+
+    private func gamutCaption(_ a: ActiveSpace) -> String {
+        if a.isStandard {
+            return "White triangle: \(a.name) · dashed: native panel gamut · dot: D65 white"
+        }
+        return "White triangle: \(a.name) gamut · dot: white point — drag to re-balance"
+    }
+
     var body: some View {
         // Explicit columns rather than the shared two-up grid. The grid fills
         // row by row, which put Black Level under Color Mode; the two channel
         // cards belong together, one under the other.
         VStack(alignment: .trailing, spacing: 9) {
         HStack(alignment: .top, spacing: 16) {
+            VStack(spacing: 16) {
             Card(title: "Color Mode", systemImage: "paintpalette",
                  help: "The nine modes on the monitor's Colour menu (0xDC). They are "
                      + "three different kinds of setting, so they are grouped rather "
@@ -593,7 +641,10 @@ struct ColorTab: View {
                 if let mode = controller.features[0xDC], mode.readable {
                     ColorModeList(current: mode.current,
                                   enabled: controller.controlsLive) { value in
-                        Task<Void, Never> { await controller.set(code: 0xDC, value: value) }
+                        // Writes the mode, then re-reads the gains and black levels
+                        // it recomputes; holds refreshingColor so the sliders dim
+                        // until the new values land.
+                        Task<Void, Never> { await controller.setColorMode(value) }
                     }
                 } else {
                     StyledPicker(options: [(value: UInt16(1), label: "sRGB")],
@@ -601,17 +652,64 @@ struct ColorTab: View {
                     MonitorSideUnavailable(controller: controller)
                 }
             }
-            // Stretch to the height of the column beside it, so the two columns
-            // end level instead of the taller one trailing off on its own.
+            // Stretch so the mode list fills above the white-point card and the
+            // two columns end level instead of the taller one trailing off alone.
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+
+            // The white point in force — the active space's target, or a custom
+            // balance dragged on the diagram below. Updates live with the mode and
+            // the dot, so it sits with the modes as a readout of the current white.
+            Card(title: "White Point", systemImage: "sun.max",
+                 help: "The white point in force: the active colour space's target, "
+                     + "or the custom balance you drag the diagram's dot to — as CIE "
+                     + "1931 x, y and correlated colour temperature. Drag the dot in "
+                     + "Native or a white-balance mode to re-balance the panel.") {
+                if let edid = controller.selected?.edid {
+                    let active = activeSpace(edid)
+                    let w = whiteOverride ?? active.white
+                    VStack(alignment: .leading, spacing: 8) {
+                        ControlRow(label: "CIE 1931") {
+                            Text(w.label)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(Theme.textSecond)
+                        }
+                        if let cct = EDID.cct(x: w.x, y: w.y) {
+                            ControlRow(label: "Temperature") {
+                                Text("\(cct) K"
+                                     + (EDID.illuminant(x: w.x, y: w.y).map { "  ·  \($0)" } ?? ""))
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Theme.textSecond)
+                            }
+                        }
+                        ControlRow(label: whiteOverride == nil ? "Space" : "Balance") {
+                            Text(whiteOverride == nil ? active.name : "Custom")
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.textSecond)
+                        }
+                    }
+                } else {
+                    Text("Not declared in the EDID.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textDim)
+                }
+            }
+            }
+            .frame(maxWidth: .infinity, alignment: .top)
 
             VStack(spacing: 16) {
             Card(title: "RGB Gain", systemImage: "slider.horizontal.3",
                  help: "MCCS video gain: red 0x16, green 0x18, blue 0x1A.") {
                 if [0x16, 0x18, 0x1A].contains(where: { controller.features[$0]?.readable == true }) {
-                    FeatureSlider(code: 0x16, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
-                    FeatureSlider(code: 0x18, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
-                    FeatureSlider(code: 0x1A, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
+                    Group {
+                        FeatureSlider(code: 0x16, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
+                        FeatureSlider(code: 0x18, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
+                        FeatureSlider(code: 0x1A, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
+                    }
+                    // Dim and lock while a mode change re-reads them, so the
+                    // outgoing values do not read as current mid-swap.
+                    .opacity(controller.refreshingColor ? 0.35 : 1)
+                    .disabled(controller.refreshingColor)
+                    .animation(.easeInOut(duration: 0.2), value: controller.refreshingColor)
                 } else {
                     ForEach(["Red", "Green", "Blue"], id: \.self) { channel in
                         SliderRow(label: channel, value: .constant(50), range: 0...100, enabled: false)
@@ -623,9 +721,14 @@ struct ColorTab: View {
             Card(title: "Black Level", systemImage: "circle.lefthalf.filled",
                  help: "MCCS video black level: red 0x6C, green 0x6E, blue 0x70.") {
                 if [0x6C, 0x6E, 0x70].contains(where: { controller.features[$0]?.readable == true }) {
-                    FeatureSlider(code: 0x6C, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
-                    FeatureSlider(code: 0x6E, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
-                    FeatureSlider(code: 0x70, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
+                    Group {
+                        FeatureSlider(code: 0x6C, label: "Red", controller: controller, tint: Color(red: 0.92, green: 0.34, blue: 0.34))
+                        FeatureSlider(code: 0x6E, label: "Green", controller: controller, tint: Color(red: 0.34, green: 0.82, blue: 0.44))
+                        FeatureSlider(code: 0x70, label: "Blue", controller: controller, tint: Color(red: 0.36, green: 0.58, blue: 0.98))
+                    }
+                    .opacity(controller.refreshingColor ? 0.35 : 1)
+                    .disabled(controller.refreshingColor)
+                    .animation(.easeInOut(duration: 0.2), value: controller.refreshingColor)
                 } else {
                     ForEach(["Red", "Green", "Blue"], id: \.self) { channel in
                         SliderRow(label: channel, value: .constant(50), range: 0...100, enabled: false)
@@ -639,6 +742,91 @@ struct ColorTab: View {
         }
         .fixedSize(horizontal: false, vertical: true)
 
+        // The panel's colour identity from the EDID — read-only, a picture of what
+        // it can reproduce, kept full-width below the controls.
+        if let edid = controller.selected?.edid {
+            let active = activeSpace(edid)
+            Card(title: "Colour Gamut", systemImage: "triangle",
+                 help: "The colour space in force on the CIE 1931 diagram — the "
+                     + "calibrated space a mode selects, or the panel's native gamut "
+                     + "— and how much of each standard space the panel covers. Drag "
+                     + "the white dot in Native or a white-balance mode to re-balance "
+                     + "the panel live.") {
+                HStack(alignment: .top, spacing: 22) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        GamutDiagram(
+                            gamut: active.gamut,
+                            nativeOutline: active.isStandard ? edid.colourPrimaries : nil,
+                            white: Binding(
+                                get: { whiteOverride ?? active.white },
+                                set: { whiteOverride = $0 }),
+                            draggable: controller.controlsLive && !active.isStandard,
+                            onWhite: { x, y, commit in
+                                guard let nw = edid.nativeWhitePoint else { return }
+                                controller.setWhitePoint(x: x, y: y,
+                                                         primaries: edid.colourPrimaries,
+                                                         nativeWhite: nw, commit: commit)
+                            })
+                            .frame(maxWidth: 260)
+                        Text(gamutCaption(active))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(Theme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("COVERAGE")
+                                .font(.system(size: 9.5, weight: .semibold)).kerning(0.6)
+                                .foregroundStyle(Theme.textDim)
+                            // sRGB and BT.709 share primaries, so BT.709 would just
+                            // repeat sRGB's number — left out.
+                            ForEach(EDID.referenceGamuts.filter { $0.name != "BT.709" }, id: \.name) { ref in
+                                ControlRow(label: ref.name) {
+                                    Text("\(edid.coverage(of: ref))%")
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(Theme.textSecond)
+                                }
+                            }
+                        }
+                        Divider().overlay(Theme.rule)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("PANEL")
+                                .font(.system(size: 9.5, weight: .semibold)).kerning(0.6)
+                                .foregroundStyle(Theme.textDim)
+                            if let g = edid.gamma {
+                                ControlRow(label: "Gamma") {
+                                    Text(String(format: "%.1f", g))
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(Theme.textSecond)
+                                }
+                            }
+                            if let bd = edid.bitDepth {
+                                ControlRow(label: "Colour depth") {
+                                    Text("\(bd)-bit")
+                                        .font(.system(size: 13, design: .monospaced))
+                                        .foregroundStyle(Theme.textSecond)
+                                }
+                            }
+                            if let enc = edid.pixelEncodings {
+                                ControlRow(label: "Encoding") {
+                                    Text(enc.joined(separator: ", "))
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundStyle(Theme.textSecond)
+                                }
+                            }
+                            ControlRow(label: "sRGB default") {
+                                Text(edid.defaultsToSRGB ? "Yes" : "No")
+                                    .font(.system(size: 13, design: .monospaced))
+                                    .foregroundStyle(Theme.textSecond)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+
         // A whole card for one button was more furniture than the action
         // deserved. As a line of text under the columns it is still findable and
         // stops competing with the settings for attention.
@@ -650,6 +838,18 @@ struct ColorTab: View {
         .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.textDim)
         .disabled(!controller.monitorControlAvailable)
         .help("MCCS restore factory colour defaults (0x08).")
+        }
+        // Pin the white-balance reference from the panel's native state, so a
+        // dragged white solves against gains known to produce the native white.
+        .onAppear {
+            if let w = controller.selected?.edid?.nativeWhitePoint {
+                controller.captureWhiteReference(nativeWhite: w)
+            }
+        }
+        // A new colour mode brings its own white; drop any custom drag so the dot
+        // snaps to the new space rather than lingering on the old balance.
+        .onChange(of: controller.features[0xDC]?.current) { _, _ in
+            whiteOverride = nil
         }
     }
 }
