@@ -86,3 +86,37 @@ Register-ScheduledTask -TaskName $reclaimName -Action $reclaimAction `
 
 $reclaimTask = Get-ScheduledTask -TaskName $reclaimName -ErrorAction SilentlyContinue
 if ($reclaimTask) { "RECLAIM TASK REGISTERED" } else { "RECLAIM TASK MISSING" }
+
+# ---------------------------------------------------------------------------
+# Third task: the secure-desktop injector, as SYSTEM.
+#
+# This is what lets the Mac's keyboard reach the login/lock screen. That screen
+# is Windows' secure desktop (Winlogon), owned by SYSTEM; a process running as
+# the user — even the High-integrity logon task above — is refused when it tries
+# to attach to it, so its SendInput lands nowhere. And before anyone signs in
+# there is no interactive session for that task to run in at all.
+#
+# So, like the reclaim task, this is SYSTEM (it needs to borrow winlogon's token
+# to place a worker on the secure desktop) and has NO trigger — the Mac starts
+# it on demand over plain SSH the moment it crosses onto a machine sitting at the
+# sign-in screen:
+#     schtasks /run /tn BezelSecureInject
+# reachable pre-auth precisely because SSH is, and the agent's own relay is not.
+# The worker it spawns is short-lived and only ever injects while the secure
+# desktop is up, so SYSTEM never holds a standing hand on a signed-in desktop.
+$secureName = "BezelSecureInject"
+
+$secureAction = New-ScheduledTaskAction -Execute $exe -Argument "secure-inject" -WorkingDirectory $dir
+$securePrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" `
+                        -LogonType ServiceAccount -RunLevel Highest
+$secureSettings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
+                        -DontStopIfGoingOnBatteries -StartWhenAvailable `
+                        -ExecutionTimeLimit (New-TimeSpan -Minutes 6)
+
+Register-ScheduledTask -TaskName $secureName -Action $secureAction `
+    -Principal $securePrincipal -Settings $secureSettings `
+    -Description "Types at the Windows login/lock (secure) screen for the Bezel KVM. SYSTEM, on demand." `
+    -Force | Out-Null
+
+$secureTask = Get-ScheduledTask -TaskName $secureName -ErrorAction SilentlyContinue
+if ($secureTask) { "SECURE INJECT TASK REGISTERED" } else { "SECURE INJECT TASK MISSING" }

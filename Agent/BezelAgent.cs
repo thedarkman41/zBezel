@@ -579,6 +579,11 @@ internal static class BezelAgent
             // Reclaim never touches a monitor, and must work when no session
             // exists yet — so it dispatches here, before enumeration.
             case "reclaim":   return CmdReclaim();
+            // Secure-desktop injection for the login/lock screen. Like reclaim,
+            // these run before any interactive session exists.
+            case "secure-inject": return CmdSecureInject();  // SYSTEM launcher (scheduled task)
+            case "secure-worker": return CmdSecureWorker();  // SYSTEM, on the Winlogon desktop
+            case "secure-kvm":    return CmdSecureKvm();      // stdin -> secure pipe, over SSH
         }
 
         List<Target> targets;
@@ -853,9 +858,10 @@ internal static class BezelAgent
     // account, including another user logged on at the same time, is refused by
     // the kernel before a byte is read.
 
-    private const string InputPipeName  = "BezelAgentInput";   // pointer + keys, Mac -> PC
-    private const string ClipInPipeName = "BezelAgentClipIn";  // clipboard,     Mac -> PC
-    private const string BackPipeName   = "BezelAgentBack";    // clipboard,     PC -> Mac
+    private const string InputPipeName  = "BezelAgentInput";       // pointer + keys, Mac -> PC
+    private const string SecureInputPipeName = "BezelAgentSecureInput"; // keys at the login/lock screen, Mac -> SYSTEM worker
+    private const string ClipInPipeName = "BezelAgentClipIn";      // clipboard,     Mac -> PC
+    private const string BackPipeName   = "BezelAgentBack";        // clipboard,     PC -> Mac
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern IntPtr GetStdHandle(int handle);
@@ -1871,6 +1877,25 @@ internal static class BezelAgent
         return security;
     }
 
+    /// The secure-desktop input pipe's DACL. Unlike the interactive pipe, this one
+    /// runs before anyone has logged in, so there is no console user to name.
+    /// SYSTEM is the worker itself; local Administrators covers the SSH relay,
+    /// which authenticates as an administrator (the SSH key is the real gate).
+    /// Neither is a privilege the caller lacks — an administrator can already
+    /// elevate — and no lower-integrity account is admitted at all.
+    private static PipeSecurity SecureInputPipeSecurity()
+    {
+        var security = new PipeSecurity();
+        var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        security.SetAccessRule(new PipeAccessRule(
+            system, PipeAccessRights.FullControl, AccessControlType.Allow));
+        security.SetAccessRule(new PipeAccessRule(
+            admins, PipeAccessRights.ReadWrite | PipeAccessRights.CreateNewInstance,
+            AccessControlType.Allow));
+        return security;
+    }
+
     /// Inbound clipboard, Mac -> PC. Its own pipe, deliberately: sharing the
     /// input pipe put a multi-megabyte paste in front of every pointer event
     /// behind it, and the pointer froze mid-motion until it drained.
@@ -2303,7 +2328,315 @@ internal static class BezelAgent
     /// the session-1 service through the pipe. One SSH channel is opened for the
     /// whole session, so the ~0.8s PowerShell login cost is paid once at the
     /// crossing rather than per event.
-    private static int CmdKvm()
+    // ---------------------------------------------------------------------
+    // Secure-desktop injection (typing at the login / lock screen)
+    // ---------------------------------------------------------------------
+    //
+    // The interactive KVM injector cannot reach the sign-in screen. That screen
+    // is Windows' *secure desktop* ("Winlogon"), owned by SYSTEM, and a process
+    // running as the user — even High integrity — is refused when it tries to
+    // OpenInputDesktop it, so SendInput lands nowhere. And before anyone logs in
+    // there is no interactive session for the logon task to live in at all.
+    //
+    // So this path is SYSTEM, on demand. `secure-inject` runs as SYSTEM from a
+    // scheduled task (fired over SSH, exactly like the reclaim task, because
+    // pre-auth the agent's own relay is not up and SSH is the only way in). It is
+    // in session 0 with no desktop of its own, so it borrows winlogon.exe's token
+    // to place a `secure-worker` process on the console's Winlogon desktop. That
+    // worker — SYSTEM, on the secure desktop — runs the ordinary injector against
+    // a pipe the Mac feeds through `secure-kvm`. It only ever injects while the
+    // input desktop is Winlogon, and it is short-lived by design, so SYSTEM never
+    // has a standing hand on a logged-in user's desktop.
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr h);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateTokenEx(IntPtr existing, uint access, IntPtr attrs,
+        int impersonationLevel, int tokenType, out IntPtr dup);
+    [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcessAsUser(IntPtr token, string appName,
+        StringBuilder cmdLine, IntPtr procAttrs, IntPtr threadAttrs, bool inherit,
+        uint flags, IntPtr env, string curDir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO
+    {
+        public int cb;
+        public string lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute;
+        public int dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+
+    private const uint PROCESS_QUERY_INFORMATION = 0x0400;
+    private const uint TOKEN_ASSIGN_PRIMARY = 0x0001, TOKEN_DUPLICATE = 0x0002, TOKEN_QUERY = 0x0008;
+    private const int SecurityImpersonationLevel = 2, TokenTypePrimary = 1;
+    private const uint CREATE_NO_WINDOW = 0x08000000;
+
+    private static void EmitSecure(StringBuilder sb)
+    {
+        Console.WriteLine(sb.ToString());
+        SecureLog(sb.ToString());
+    }
+
+    /// Diagnostics for the secure path go beside the executable, not through
+    /// Log(): the worker runs as SYSTEM, whose %UserProfile% is
+    /// C:\Windows\system32\config\systemprofile — a log there is unreachable in
+    /// practice. AppDomain.BaseDirectory is the exe's own folder, which is the
+    /// user's bezel dir and readable over SSH. Still tee to Log() in case this is
+    /// the launcher, running under an account whose agent.log is the live one.
+    private static void SecureLog(string message)
+    {
+        Log(message);
+        try
+        {
+            var path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "secure-inject.log");
+            File.AppendAllText(path, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + message + Environment.NewLine);
+        }
+        catch (Exception) { }
+    }
+
+    /// The session-0 launcher, run as SYSTEM from the BezelSecureInject task.
+    /// Borrows winlogon's token to spawn a worker on the console's secure desktop.
+    /// The verdict goes to stdout and secure-inject.log, so the Mac (which only
+    /// gets "task queued" back from schtasks) can confirm a worker actually came
+    /// up — the same reason CmdReclaim keeps reclaim.log.
+    private static int CmdSecureInject()
+    {
+        var sb = new StringBuilder();
+        int console = ConsoleSessionId();
+        if (console < 0)
+        {
+            sb.Append("{\"ok\":false,\"reason\":\"no console session\"}");
+            EmitSecure(sb);
+            return 2;
+        }
+
+        Process winlogon = null;
+        foreach (var p in Process.GetProcessesByName("winlogon"))
+        {
+            try { if (p.SessionId == console) { winlogon = p; break; } }
+            catch (Exception) { }
+        }
+        if (winlogon == null)
+        {
+            sb.Append("{\"ok\":false,\"reason\":\"no winlogon in console session ").Append(console).Append("\"}");
+            EmitSecure(sb);
+            return 2;
+        }
+
+        IntPtr hProc = IntPtr.Zero, hTok = IntPtr.Zero, hDup = IntPtr.Zero;
+        try
+        {
+            hProc = OpenProcess(PROCESS_QUERY_INFORMATION, false, (uint)winlogon.Id);
+            if (hProc == IntPtr.Zero)
+            {
+                sb.Append("{\"ok\":false,\"reason\":\"OpenProcess(winlogon) win32 ").Append(Marshal.GetLastWin32Error()).Append("\"}");
+                EmitSecure(sb); return 1;
+            }
+            if (!OpenProcessToken(hProc, TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, out hTok))
+            {
+                sb.Append("{\"ok\":false,\"reason\":\"OpenProcessToken win32 ").Append(Marshal.GetLastWin32Error()).Append("\"}");
+                EmitSecure(sb); return 1;
+            }
+            if (!DuplicateTokenEx(hTok, MAXIMUM_ALLOWED, IntPtr.Zero, SecurityImpersonationLevel, TokenTypePrimary, out hDup))
+            {
+                sb.Append("{\"ok\":false,\"reason\":\"DuplicateTokenEx win32 ").Append(Marshal.GetLastWin32Error()).Append("\"}");
+                EmitSecure(sb); return 1;
+            }
+
+            string exe = Process.GetCurrentProcess().MainModule.FileName;
+            var cmd = new StringBuilder("\"" + exe + "\" secure-worker");
+            var si = new STARTUPINFO();
+            si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+            si.lpDesktop = "WinSta0\\Winlogon";
+            PROCESS_INFORMATION pi;
+            bool ok = CreateProcessAsUser(hDup, exe, cmd, IntPtr.Zero, IntPtr.Zero, false,
+                                          CREATE_NO_WINDOW, IntPtr.Zero, null, ref si, out pi);
+            if (!ok)
+            {
+                sb.Append("{\"ok\":false,\"reason\":\"CreateProcessAsUser win32 ").Append(Marshal.GetLastWin32Error()).Append("\"}");
+                EmitSecure(sb); return 1;
+            }
+            if (pi.hThread != IntPtr.Zero) CloseHandle(pi.hThread);
+            if (pi.hProcess != IntPtr.Zero) CloseHandle(pi.hProcess);
+            sb.Append("{\"ok\":true,\"worker\":").Append(pi.dwProcessId).Append(",\"console\":").Append(console).Append("}");
+            EmitSecure(sb);
+            return 0;
+        }
+        finally
+        {
+            if (hDup != IntPtr.Zero) CloseHandle(hDup);
+            if (hTok != IntPtr.Zero) CloseHandle(hTok);
+            if (hProc != IntPtr.Zero) CloseHandle(hProc);
+        }
+    }
+
+    /// The worker, SYSTEM, launched onto WinSta0\Winlogon by CmdSecureInject.
+    private static int CmdSecureWorker()
+    {
+        AttachToInputDesktop();
+        string dtop = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+        SecureLog("secure-worker: running as \"" + WindowsIdentity.GetCurrent().Name
+                  + "\", session " + OwnSessionId() + ", desktop \"" + dtop + "\"");
+        SecureShot("startup on " + dtop);
+
+        // A locked machine's sign-in UI goes idle — the display sleeps or the lock
+        // curtain is up — and in that state the input desktop reads "Default", not
+        // "Winlogon". A pointer nudge wakes it and brings the credential provider
+        // forward, which switches the input desktop to Winlogon. So if we didn't
+        // land on the secure desktop, jiggle and re-check before giving up.
+        if (!string.Equals(dtop, "Winlogon", StringComparison.OrdinalIgnoreCase))
+        {
+            for (int i = 0; i < 4; i++)
+            {
+                // Jiggle to wake the display, then Up-arrow (the "swipe up" that
+                // dismisses the lock curtain) to bring the credential field forward.
+                Inject("M 60 60"); Inject("M -60 -60"); Inject("M 0 50"); Inject("M 0 -50");
+                Inject("K 38 1"); Inject("K 38 0");
+                Thread.Sleep(600);
+                AttachToInputDesktop();
+                dtop = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+                SecureLog("wake attempt " + (i + 1) + ": desktop \"" + dtop + "\"");
+                if (string.Equals(dtop, "Winlogon", StringComparison.OrdinalIgnoreCase)) break;
+            }
+            SecureShot("after wake, on " + dtop);
+        }
+
+        // Inject only on the secure desktop. A genuinely unlocked session shows
+        // "Default", and that belongs to the interactive service — SYSTEM has no
+        // business typing there, so hand back rather than reach in.
+        if (!string.Equals(dtop, "Winlogon", StringComparison.OrdinalIgnoreCase))
+        {
+            SecureLog("secure-worker: still not on secure desktop (" + dtop + "); nothing to do");
+            return 0;
+        }
+        SecureInputLoop();
+        return 0;
+    }
+
+    /// Capture whatever this worker's desktop currently shows, to a file the Mac
+    /// can pull back — the only way to see the sign-in screen from the outside.
+    private static void SecureShot(string tag)
+    {
+        try
+        {
+            int sw, sh;
+            var jpg = CaptureJpeg(1600, 70, out sw, out sh);
+            File.WriteAllBytes(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "secure-shot.jpg"), jpg);
+            SecureLog("SHOT (" + tag + ") " + sw + "x" + sh);
+        }
+        catch (Exception e) { SecureLog("SHOT (" + tag + ") failed: " + e.Message); }
+    }
+
+    /// Serve the secure input pipe and inject, bounded three ways so SYSTEM never
+    /// keeps a standing hand on the console: a 5-minute backstop, exit the moment
+    /// the desktop leaves Winlogon (someone signed in / unlocked), and exit if no
+    /// client turns up within 90 s of a stray trigger.
+    private static void SecureInputLoop()
+    {
+        SecureLog("secure input pipe: listening on \\\\.\\pipe\\" + SecureInputPipeName);
+        var deadline = DateTime.UtcNow.AddMinutes(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            AttachToInputDesktop();
+            string dtop = DesktopName(GetThreadDesktop(GetCurrentThreadId()));
+            if (!string.Equals(dtop, "Winlogon", StringComparison.OrdinalIgnoreCase))
+            {
+                SecureLog("secure input pipe: desktop is now \"" + dtop + "\"; exiting");
+                return;
+            }
+            try
+            {
+                using (var pipe = new NamedPipeServerStream(
+                           SecureInputPipeName, PipeDirection.In, 1,
+                           PipeTransmissionMode.Byte, PipeOptions.Asynchronous,
+                           4096, 4096, SecureInputPipeSecurity()))
+                {
+                    var ar = pipe.BeginWaitForConnection(null, null);
+                    if (!ar.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(90)))
+                    {
+                        SecureLog("secure input pipe: no client within 90s; exiting");
+                        return;
+                    }
+                    pipe.EndWaitForConnection(ar);
+                    AttachToInputDesktop();      // the crossing may have switched desktops
+                    SecureLog("secure input pipe: client connected on desktop \""
+                              + DesktopName(GetThreadDesktop(GetCurrentThreadId())) + "\"");
+                    int injected = 0, discarded = 0;
+                    using (var reader = new StreamReader(pipe, new UTF8Encoding(false)))
+                    {
+                        string line;
+                        while ((line = reader.ReadLine()) != null)
+                        {
+                            // "SHOT" captures THIS thread's desktop — which is the
+                            // Winlogon secure desktop — to a file, so the Mac can see
+                            // the sign-in screen it is driving. A user process is
+                            // refused here ("handle is invalid"); SYSTEM, attached to
+                            // the desktop, may not be — and if it is, the error says.
+                            if (line == "SHOT")
+                            {
+                                try
+                                {
+                                    int sw, sh;
+                                    var jpg = CaptureJpeg(1600, 70, out sw, out sh);
+                                    var shotPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "secure-shot.jpg");
+                                    File.WriteAllBytes(shotPath, jpg);
+                                    SecureLog("SHOT captured " + sw + "x" + sh + " -> " + shotPath);
+                                }
+                                catch (Exception e) { SecureLog("SHOT failed: " + e.Message); }
+                                continue;
+                            }
+
+                            // SAFETY GATE — the whole point of this class. Only ever
+                            // inject on the secure desktop. If the session is, or
+                            // becomes, unlocked ("Default"), these keystrokes would
+                            // land in whatever window has focus — which is how a
+                            // password once got typed into a shell. Re-check per event
+                            // and DISCARD off the secure desktop rather than leak. A
+                            // mid-stream unlock (the moment the password submits) stops
+                            // injection right here, so trailing events go nowhere.
+                            AttachToInputDesktop();
+                            if (!string.Equals(DesktopName(GetThreadDesktop(GetCurrentThreadId())),
+                                               "Winlogon", StringComparison.OrdinalIgnoreCase))
+                            {
+                                discarded++;
+                                continue;
+                            }
+                            try { Inject(line); injected++; }
+                            catch (Exception e) { SecureLog("secure: bad event \"" + line + "\": " + e.Message); }
+                        }
+                    }
+                    SecureLog(discarded > 0
+                        ? "secure input pipe: injected " + injected + ", DISCARDED " + discarded + " off the secure desktop"
+                        : "secure input pipe: client disconnected after " + injected + " event(s)");
+                }
+            }
+            catch (Exception e)
+            {
+                SecureLog("secure input pipe: " + e.Message);
+                Thread.Sleep(300);
+            }
+        }
+        SecureLog("secure input pipe: 5-minute backstop reached; exiting");
+    }
+
+    private static int CmdKvm() { return RelayStdinToInputPipe(InputPipeName); }
+
+    /// The secure-desktop twin of `kvm`: the same stdin-to-pipe relay, but aimed
+    /// at the SYSTEM worker's pipe so keystrokes reach the login/lock (Winlogon)
+    /// screen. Fire `secure-inject` first (over SSH, via its scheduled task) so a
+    /// worker is listening; see CmdSecureInject.
+    private static int CmdSecureKvm() { return RelayStdinToInputPipe(SecureInputPipeName); }
+
+    private static int RelayStdinToInputPipe(string pipeName)
     {
         // Relays are no longer evicted, and must not be.
         //
@@ -2318,7 +2651,7 @@ internal static class BezelAgent
         // would kill the other on startup.
         try
         {
-            using (var pipe = new NamedPipeClientStream(".", InputPipeName, PipeDirection.Out))
+            using (var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out))
             {
                 pipe.Connect(5000);
                 using (var writer = new System.IO.StreamWriter(pipe, new UTF8Encoding(false)))
