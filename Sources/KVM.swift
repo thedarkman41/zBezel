@@ -574,8 +574,8 @@ final class KVMController {
         // A machine at its Windows sign-in screen accepts keystrokes only through
         // the SYSTEM secure-input worker; route there while it is locked, and back
         // to the ordinary channel the instant it signs in. secureLocked is driven
-        // by engageSecureIfLocked / pollSecureUnlock, both on the main thread — the
-        // same thread this getter is read from (the event tap).
+        // by superviseLockState (engageSecure / disengageSecure), all on the main
+        // thread — the same thread this getter is read from (the event tap).
         secureLocked.contains(host) ? securePipe(for: host) : pipe(for: host)
     }
 
@@ -839,6 +839,8 @@ final class KVMController {
         for pipe in secureTransports.values { pipe.disconnect() }
         secureTransports.removeAll()
         secureLocked.removeAll()
+        supervising.removeAll()
+        secureSetPointerLock = false
         isEnabled = false
         status = "off"
         onChange?()
@@ -1446,10 +1448,11 @@ final class KVMController {
         let name = machines.first(where: { $0.host == host })?.name ?? host
         status = "controlling \(name) — its left edge brings you back"
         onChange?()
-        // If this machine is sitting at its Windows sign-in screen, reroute the
-        // keyboard through the secure worker and wake the screen so you can type
-        // your password; hands back automatically once it signs in.
-        engageSecureIfLocked(host)
+        // Watch this machine's sign-in state for as long as we control it, so the
+        // keyboard routes through the secure worker the instant it locks — on
+        // arrival OR later, if you press Win+L while on it — and hands back the
+        // instant it signs in.
+        superviseLockState(host)
     }
 
     /// The machine's short name, or its host when it is a bare proxy.
@@ -1457,57 +1460,64 @@ final class KVMController {
         machines.first(where: { $0.host == machineHost })?.name ?? machineHost
     }
 
-    /// On arriving at a machine, ask the far side whether it is at its sign-in
-    /// screen and reconcile the secure routing: engage it if newly locked, drop it
-    /// if it turns out to be signed in. The query is a ~second of SSH, so it runs
-    /// off the crossing; input flows on the ordinary channel until it lands, which
-    /// at a sign-in screen simply goes nowhere until the secure channel takes over.
-    private func engageSecureIfLocked(_ machineHost: String) {
-        Task { @MainActor [weak self] in
-            let status = await SecureDesktop.status(host: machineHost)
-            guard let self, self.isEnabled, self.side == .there, self.host == machineHost else { return }
-            let locked = status?.locked ?? false
-            if locked && !self.secureLocked.contains(machineHost) {
-                self.secureLocked.insert(machineHost)
-                self.securePipe(for: machineHost).connect(host: machineHost,
-                    exePath: self.exePath, fallback: self.addressForHost?(machineHost))
-                Task { await SecureDesktop.wake(host: machineHost) }
-                KVMLog.write("\(machineHost) is locked; routing keyboard to secure-kvm")
-                self.status = "\(self.nameFor(machineHost)) is locked — type your password to sign in"
-                self.onChange?()
-                self.pollSecureUnlock(machineHost)
-            } else if !locked && self.secureLocked.contains(machineHost) {
-                self.disengageSecure(machineHost)
-            }
-        }
-    }
+    /// One supervisor per machine, so pressing Win+L while controlling it is
+    /// caught, not just a lock found on arrival.
+    private var supervising: Set<String> = []
 
-    /// Poll the far side while we are controlling a locked machine; the instant it
-    /// signs in, hand the keyboard back to the ordinary channel. Stops on its own
-    /// when the pointer leaves the machine (the next arrival reconciles).
-    private func pollSecureUnlock(_ machineHost: String) {
+    /// Watch a machine's lock state and reconcile the secure routing on every
+    /// change: engage when it locks (route the keyboard to `secure-kvm`, wake the
+    /// sign-in, pin the pointer), disengage when it signs in. Runs while we control
+    /// the machine, and keeps running while it is still in secure mode after the
+    /// pointer leaves, so a cross-away mid-sign-in still hands back. ~2 s cadence.
+    private func superviseLockState(_ machineHost: String) {
+        guard !supervising.contains(machineHost) else { return }
+        supervising.insert(machineHost)
         Task { @MainActor [weak self] in
-            // Keep polling even after the pointer leaves the machine — one might
-            // cross away mid-sign-in, and the keyboard must still be handed back
-            // the moment it signs in, not left routed to the secure worker. Give
-            // up after ~5 minutes (the worker has exited by then) and hand back
-            // anyway rather than leave a machine stuck on the secure channel.
-            for _ in 0..<200 {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+            while let self,
+                  (self.side == .there && self.host == machineHost) || self.secureLocked.contains(machineHost) {
                 let st = await SecureDesktop.status(host: machineHost)
-                guard let self, self.secureLocked.contains(machineHost) else { return }
-                if st?.locked == false { self.disengageSecure(machineHost); return }
+                let locked = st?.locked ?? false
+                if locked && !self.secureLocked.contains(machineHost) {
+                    self.engageSecure(machineHost)
+                } else if !locked && self.secureLocked.contains(machineHost) {
+                    self.disengageSecure(machineHost)
+                }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
             }
-            self?.disengageSecure(machineHost)
+            self?.supervising.remove(machineHost)
         }
     }
 
-    /// Leave secure mode for a machine: drop the secure channel and make the
-    /// ordinary one live again.
+    /// Did we engage the pointer-lock for a sign-in, so we release only ours.
+    private var secureSetPointerLock = false
+
+    /// Enter secure mode: route the keyboard to the secure worker, wake the
+    /// sign-in, and pin the pointer to the machine so entering the password cannot
+    /// stray off the edge.
+    private func engageSecure(_ machineHost: String) {
+        secureLocked.insert(machineHost)
+        securePipe(for: machineHost).connect(host: machineHost,
+            exePath: exePath, fallback: addressForHost?(machineHost))
+        Task { await SecureDesktop.wake(host: machineHost) }
+        if lockedIndex == nil, let idx = machines.firstIndex(where: { $0.host == machineHost }) {
+            lockTo(machineIndex: idx, why: "locked at the sign-in screen")
+            secureSetPointerLock = true
+        }
+        KVMLog.write("\(machineHost) is locked; routing keyboard to secure-kvm")
+        status = "\(nameFor(machineHost)) is locked — type your password to sign in"
+        onChange?()
+    }
+
+    /// Leave secure mode for a machine: drop the secure channel, release the
+    /// pointer-lock if we set it, and make the ordinary channel live again.
     private func disengageSecure(_ machineHost: String) {
         secureLocked.remove(machineHost)
         secureTransports[machineHost]?.disconnect()
         secureTransports[machineHost] = nil
+        if secureSetPointerLock, lockedIndex == machines.firstIndex(where: { $0.host == machineHost }) {
+            clearLock()
+            secureSetPointerLock = false
+        }
         pipe(for: machineHost).connect(host: machineHost, exePath: exePath,
                                        fallback: addressForHost?(machineHost))
         KVMLog.write("\(machineHost) signed in; keyboard back on the ordinary channel")
