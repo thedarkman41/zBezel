@@ -570,7 +570,25 @@ final class KVMController {
     /// One connection per machine, opened when the KVM is armed so that a
     /// crossing costs no SSH handshake.
     private var transports: [String: KVMTransport] = [:]
-    private var transport: KVMTransport { pipe(for: host) }
+    private var transport: KVMTransport {
+        // A machine at its Windows sign-in screen accepts keystrokes only through
+        // the SYSTEM secure-input worker; route there while it is locked, and back
+        // to the ordinary channel the instant it signs in. secureLocked is driven
+        // by engageSecureIfLocked / pollSecureUnlock, both on the main thread — the
+        // same thread this getter is read from (the event tap).
+        secureLocked.contains(host) ? securePipe(for: host) : pipe(for: host)
+    }
+
+    /// Machines the far side reports are at their sign-in screen, so input is
+    /// routed through `secure-kvm` instead of `kvm`. Empty is the normal case.
+    private var secureLocked: Set<String> = []
+    private var secureTransports: [String: KVMTransport] = [:]
+    private func securePipe(for machineHost: String) -> KVMTransport {
+        if let existing = secureTransports[machineHost] { return existing }
+        let fresh = KVMTransport(command: "secure-kvm")
+        secureTransports[machineHost] = fresh
+        return fresh
+    }
 
     /// The channel to a machine by name. A drag's messages go to the machine
     /// its bytes went to, which by the time the copy finishes need not be the
@@ -818,6 +836,9 @@ final class KVMController {
         heartbeat = nil
         for pipe in transports.values { pipe.disconnect() }
         for pipe in clipTransports.values { pipe.disconnect() }
+        for pipe in secureTransports.values { pipe.disconnect() }
+        secureTransports.removeAll()
+        secureLocked.removeAll()
         isEnabled = false
         status = "off"
         onChange?()
@@ -1400,7 +1421,7 @@ final class KVMController {
         // control recovers within the second rather than staying dead.
         if !transport.isConnected {
             KVMLog.write("arrive: channel to \(host) was down; reopening")
-            transport.connect(host: host, exePath: exePath, fallback: addressForHost?(host))
+            pipe(for: host).connect(host: host, exePath: exePath, fallback: addressForHost?(host))
         }
 
         // Send the pointer first, then the panel. The pointer is already on the
@@ -1425,6 +1446,75 @@ final class KVMController {
         let name = machines.first(where: { $0.host == host })?.name ?? host
         status = "controlling \(name) — its left edge brings you back"
         onChange?()
+        // If this machine is sitting at its Windows sign-in screen, reroute the
+        // keyboard through the secure worker and wake the screen so you can type
+        // your password; hands back automatically once it signs in.
+        engageSecureIfLocked(host)
+    }
+
+    /// The machine's short name, or its host when it is a bare proxy.
+    private func nameFor(_ machineHost: String) -> String {
+        machines.first(where: { $0.host == machineHost })?.name ?? machineHost
+    }
+
+    /// On arriving at a machine, ask the far side whether it is at its sign-in
+    /// screen and reconcile the secure routing: engage it if newly locked, drop it
+    /// if it turns out to be signed in. The query is a ~second of SSH, so it runs
+    /// off the crossing; input flows on the ordinary channel until it lands, which
+    /// at a sign-in screen simply goes nowhere until the secure channel takes over.
+    private func engageSecureIfLocked(_ machineHost: String) {
+        Task { @MainActor [weak self] in
+            let status = await SecureDesktop.status(host: machineHost)
+            guard let self, self.isEnabled, self.side == .there, self.host == machineHost else { return }
+            let locked = status?.locked ?? false
+            if locked && !self.secureLocked.contains(machineHost) {
+                self.secureLocked.insert(machineHost)
+                self.securePipe(for: machineHost).connect(host: machineHost,
+                    exePath: self.exePath, fallback: self.addressForHost?(machineHost))
+                Task { await SecureDesktop.wake(host: machineHost) }
+                KVMLog.write("\(machineHost) is locked; routing keyboard to secure-kvm")
+                self.status = "\(self.nameFor(machineHost)) is locked — type your password to sign in"
+                self.onChange?()
+                self.pollSecureUnlock(machineHost)
+            } else if !locked && self.secureLocked.contains(machineHost) {
+                self.disengageSecure(machineHost)
+            }
+        }
+    }
+
+    /// Poll the far side while we are controlling a locked machine; the instant it
+    /// signs in, hand the keyboard back to the ordinary channel. Stops on its own
+    /// when the pointer leaves the machine (the next arrival reconciles).
+    private func pollSecureUnlock(_ machineHost: String) {
+        Task { @MainActor [weak self] in
+            // Keep polling even after the pointer leaves the machine — one might
+            // cross away mid-sign-in, and the keyboard must still be handed back
+            // the moment it signs in, not left routed to the secure worker. Give
+            // up after ~5 minutes (the worker has exited by then) and hand back
+            // anyway rather than leave a machine stuck on the secure channel.
+            for _ in 0..<200 {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                let st = await SecureDesktop.status(host: machineHost)
+                guard let self, self.secureLocked.contains(machineHost) else { return }
+                if st?.locked == false { self.disengageSecure(machineHost); return }
+            }
+            self?.disengageSecure(machineHost)
+        }
+    }
+
+    /// Leave secure mode for a machine: drop the secure channel and make the
+    /// ordinary one live again.
+    private func disengageSecure(_ machineHost: String) {
+        secureLocked.remove(machineHost)
+        secureTransports[machineHost]?.disconnect()
+        secureTransports[machineHost] = nil
+        pipe(for: machineHost).connect(host: machineHost, exePath: exePath,
+                                       fallback: addressForHost?(machineHost))
+        KVMLog.write("\(machineHost) signed in; keyboard back on the ordinary channel")
+        if side == .there, host == machineHost {
+            status = "controlling \(nameFor(machineHost)) — its left edge brings you back"
+            onChange?()
+        }
     }
 
     /// The user picked a machine from the chooser.

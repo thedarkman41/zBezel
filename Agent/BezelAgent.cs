@@ -584,6 +584,7 @@ internal static class BezelAgent
             case "secure-inject": return CmdSecureInject();  // SYSTEM launcher (scheduled task)
             case "secure-worker": return CmdSecureWorker();  // SYSTEM, on the Winlogon desktop
             case "secure-kvm":    return CmdSecureKvm();      // stdin -> secure pipe, over SSH
+            case "secure-status": return CmdSecureStatus();  // is the console at the sign-in screen?
         }
 
         List<Target> targets;
@@ -2477,6 +2478,32 @@ internal static class BezelAgent
             if (hTok != IntPtr.Zero) CloseHandle(hTok);
             if (hProc != IntPtr.Zero) CloseHandle(hProc);
         }
+    }
+
+    /// Report whether the console is at the secure desktop (the lock/sign-in
+    /// screen), for the Mac to decide when to route the keyboard through the
+    /// secure path. LogonUI.exe runs in the console session exactly while that
+    /// screen is up — curtain, sign-in, or UAC — which is a more reliable signal
+    /// than the input-desktop name (that reads "Default" while the lock curtain is
+    /// merely idle). Runs anywhere, including over plain SSH before anyone signs
+    /// in, so it works for a cold boot as well as a Win+L lock.
+    private static int CmdSecureStatus()
+    {
+        int console = ConsoleSessionId();
+        bool locked = false;
+        try
+        {
+            foreach (var p in Process.GetProcessesByName("LogonUI"))
+            {
+                try { if (console >= 0 && p.SessionId == console) { locked = true; break; } }
+                catch (Exception) { }
+            }
+        }
+        catch (Exception) { }
+        string user = console >= 0 ? SessionUser((uint)console) : "";
+        Console.WriteLine("{\"ok\":true,\"locked\":" + (locked ? "true" : "false")
+            + ",\"user\":\"" + Esc(user) + "\",\"console\":" + console + "}");
+        return 0;
     }
 
     /// The worker, SYSTEM, launched onto WinSta0\Winlogon by CmdSecureInject.
