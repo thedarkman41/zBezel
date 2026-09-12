@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <IOKit/IOKitLib.h>
 #include <IOKit/i2c/IOI2CInterface.h>
+#include <IOKit/graphics/IOGraphicsTypes.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <CoreFoundation/CoreFoundation.h>
 
@@ -90,6 +91,36 @@ static io_service_t framebuffer_for_display(uint32_t displayID) {
 
     if (exact) { if (loose) IOObjectRelease(loose); return exact; }
     return loose;
+}
+
+// ---------------------------------------------------------------------------
+// Framebuffer rotation.
+//
+// Turning the panel is a GPU transform on the IOFramebuffer, NOT a monitor
+// command — so it works on this Mac even though the dock refuses DDC/CI and
+// every VCP has to be proxied through the PC. IOServiceRequestProbe carries the
+// request; kIOFBSetTransform (0x400) is the private option that tells the
+// framebuffer to read a rotation out of bits 16+, and the rotation is one of the
+// public kIOScaleRotate* scaler flags. This is the mechanism fb-rotate and its
+// kin have used for years; it is stable where it is present (Intel).
+// ---------------------------------------------------------------------------
+
+#define BEZEL_FB_SET_TRANSFORM 0x00000400u
+
+int32_t bezel_display_rotate(uint32_t displayID, int32_t degrees) {
+    uint32_t flag;
+    switch (((degrees % 360) + 360) % 360) {
+        case 0:   flag = kIOScaleRotate0;   break;
+        case 90:  flag = kIOScaleRotate90;  break;
+        case 180: flag = kIOScaleRotate180; break;
+        case 270: flag = kIOScaleRotate270; break;
+        default:  return BEZEL_ERR_ARG;
+    }
+    io_service_t fb = framebuffer_for_display(displayID);
+    if (!fb) return BEZEL_ERR_NO_FB;
+    kern_return_t kr = IOServiceRequestProbe(fb, BEZEL_FB_SET_TRANSFORM | (flag << 16));
+    IOObjectRelease(fb);
+    return kr == KERN_SUCCESS ? BEZEL_OK : BEZEL_ERR_IO;
 }
 
 // ---------------------------------------------------------------------------

@@ -584,6 +584,108 @@ final class MonitorController: ObservableObject {
         await writeSub(0x3E, osdMenuTimeout)
     }
 
+    // MARK: Pivot (framebuffer rotation)
+
+    /// The panel's local display id, but only when the panel is actually in this
+    /// Mac's display list — i.e. the Mac holds the live input. Rotating is only
+    /// meaningful then; when the panel is showing the PC it has left the Mac's
+    /// display list and there is nothing local to turn.
+    var pivotDisplayID: CGDirectDisplayID? {
+        guard let id = selectedID, displays.contains(where: { $0.id == id }) else { return nil }
+        return id
+    }
+
+    /// Current framebuffer rotation of the panel — 0/90/180/270 — so the Pivot
+    /// control can show which way the picture is turned.
+    @Published var pivotDegrees: Int = 0
+    @Published var pivotBusy = false
+
+    /// Re-read the rotation from the window server. Cheap and side-effect free.
+    func refreshPivot() {
+        if let id = pivotDisplayID { pivotDegrees = DisplayRotation.current(id) }
+    }
+
+    /// Rotate the Mac's picture on the panel to `degrees`, fading across the
+    /// switch, then re-read what the window server actually settled on.
+    func applyPivot(_ degrees: Int) async {
+        guard let id = pivotDisplayID, !pivotBusy else { return }
+        pivotBusy = true
+        _ = await DisplayRotation.rotate(id, to: degrees, fade: true)
+        pivotDegrees = DisplayRotation.current(id)
+        pivotBusy = false
+        // Rotation changes the panel's bounds, and the KVM edge-map is built from
+        // them — re-hand it the geometry so a crossing still lands.
+        syncKVMPortal()
+    }
+
+    // MARK: Pivot auto-follow (physical orientation from the phone on rigel)
+
+    /// Whether the app is tracking the panel's physical orientation and rotating
+    /// to match. Off by default and not persisted: it only makes sense once the
+    /// phone is mounted and calibrated, so arming it is a deliberate act.
+    @Published var pivotAutoFollow = false
+    /// A short line for the Pivot card: what the follow loop is currently doing.
+    @Published var pivotFollowStatus = ""
+    private var pivotFollowTask: Task<Void, Never>?
+
+    func setPivotAutoFollow(_ on: Bool) {
+        guard on != pivotAutoFollow else { return }
+        pivotAutoFollow = on
+        pivotFollowTask?.cancel()
+        pivotFollowStatus = ""
+        if on { pivotFollowTask = Task { [weak self] in await self?.pivotFollowLoop() } }
+        else  { pivotFollowTask = nil }
+    }
+
+    /// Poll the panel's physical orientation and rotate the Mac's picture to
+    /// match. The reading arrives already snapped to 0/90/180/270 with the phone's
+    /// own 45°-boundary hysteresis, so this only adds two guards: ignore readings
+    /// while the panel lies flat (`inplane` low, orientation undefined), and
+    /// require a changed orientation to persist across a couple of polls before
+    /// committing a fade+rotate — so a hand brushing the panel mid-pivot, or a
+    /// single stray sample, never kicks one off.
+    private func pivotFollowLoop() async {
+        var candidate: Int?
+        var candidateSince = Date.distantPast
+        while !Task.isCancelled {
+            // The phone is cabled to the proxy host (rigel) — not the Mac, and not
+            // through the monitor's hub — so the feed is always read there, no
+            // matter which machine currently drives the panel.
+            let host = proxyHost
+            guard !host.isEmpty else {
+                pivotFollowStatus = "No PC set for the phone feed."
+                try? await Task.sleep(nanoseconds: 2_000_000_000); continue
+            }
+            guard pivotDisplayID != nil else {
+                pivotFollowStatus = "Waiting — the Mac isn't the panel's input."
+                candidate = nil
+                try? await Task.sleep(nanoseconds: 1_500_000_000); continue
+            }
+
+            if let r = await PanelOrientation.read(host: host) {
+                if r.inplane < 1.5 {
+                    pivotFollowStatus = "Panel near flat — holding \(pivotDegrees)°."
+                    candidate = nil
+                } else if r.orient == pivotDegrees {
+                    pivotFollowStatus = "Following · \(r.orient)°"
+                    candidate = nil
+                } else if candidate != r.orient {
+                    candidate = r.orient
+                    candidateSince = Date()
+                    pivotFollowStatus = "Panel at \(r.orient)°…"
+                } else if Date().timeIntervalSince(candidateSince) >= 0.3 {
+                    candidate = nil
+                    pivotFollowStatus = "Rotating to \(r.orient)°…"
+                    await applyPivot(r.orient)   // fades; suspends the loop until done
+                }
+            } else {
+                pivotFollowStatus = "Phone feed unreachable via \(host)."
+                candidate = nil
+            }
+            try? await Task.sleep(nanoseconds: 700_000_000)   // ~0.7 s between polls
+        }
+    }
+
     private var jogTask: Task<Void, Never>?
     private var jogDirection: Bool?
     private var jogDelay: UInt64 = 0

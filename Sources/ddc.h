@@ -78,6 +78,12 @@ int32_t bezel_diagnose(uint32_t displayID, BezelLinkReport *out);
 // Returns bytes read, or a negative error.
 int32_t bezel_read_edid(uint32_t displayID, uint8_t *out, uint32_t outCapacity);
 
+// Rotate the framebuffer driving displayID to `degrees` (0/90/180/270). A GPU
+// transform via IOFramebuffer, independent of DDC/I2C — so it works even where a
+// dock blocks DDC/CI. Returns BEZEL_OK, BEZEL_ERR_ARG, BEZEL_ERR_NO_FB, or
+// BEZEL_ERR_IO.
+int32_t bezel_display_rotate(uint32_t displayID, int32_t degrees);
+
 #ifdef __cplusplus
 }
 #endif

@@ -860,63 +860,185 @@ struct ViewTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        CardGrid {
-            // Three settings HP's Menu screen owns, reachable only as 0xE1
-            // sub-selectors and readable through no channel at all — so these
-            // show what this app last set, and start at HP's factory values
-            // rather than pretending to have asked the panel.
-            Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
-                 help: "Where the monitor's own menu appears, how long it stays up, "
-                     + "and how transparent it is. Vendor sub-selectors 0x3B, 0x3C, "
-                     + "0x3E and 0x56 — set only, never reported back.") {
-                if controller.controlsLive {
-                    OSDMenuPreview(
-                        horizontal: controller.osdMenuH,
-                        vertical: controller.osdMenuV,
-                        transparency: controller.osdTransparency,
-                        enabled: true,
-                        onMove: { h, v in
-                            Task<Void, Never> {
-                                await controller.applyOSDMenu(horizontal: h)
-                                await controller.applyOSDMenu(vertical: v)
-                            }
-                        },
-                        onTransparency: { step in
-                            Task<Void, Never> {
-                                await controller.applyOSDMenu(transparency: step)
-                            }
-                        })
-                    OSDMenuSlider(label: "Stays up for", value: controller.osdMenuTimeout,
-                                  range: 5...60, suffix: "s") { v in
-                        Task<Void, Never> { await controller.applyOSDMenu(timeout: v) }
-                    }
-                } else {
-                    SliderRow(label: "Position across", value: .constant(97),
-                              range: 0...100, enabled: false)
-                    MonitorSideUnavailable(controller: controller)
-                }
+        // Two explicit columns rather than a flowing grid. Monitor Menu is much
+        // taller than the other two cards (it carries the OSD preview and its
+        // sliders), so a 2-column auto-grid stretched the first row, left a gap
+        // under Pivot, and stranded the bottom-right cell empty. Stacking the two
+        // short cards on the left against Monitor Menu on the right balances the
+        // heights and fills the tab — the same idiom InputTab uses.
+        HStack(alignment: .top, spacing: 16) {
+            VStack(spacing: 16) {
+                pivotCard
+                onScreenDisplayCard
             }
+            .frame(maxWidth: .infinity)
 
-            Card(title: "On-Screen Display", systemImage: "character.bubble",
-                 help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
-                FieldLabel(text: "Language")
-                if controller.features[0xCC]?.readable == true {
-                    FeaturePicker(code: 0xCC, controller: controller)
-                } else {
-                    StyledPicker(options: [(value: UInt16(2), label: "English")],
-                                 selection: .constant(UInt16(2)), enabled: false, width: 220)
-                }
-                FieldLabel(text: "Controls")
-                if controller.features[0xCA]?.readable == true {
-                    FeaturePicker(code: 0xCA, controller: controller)
-                } else {
-                    StyledPicker(options: [(value: UInt16(2), label: "OSD enabled")],
-                                 selection: .constant(UInt16(2)), enabled: false, width: 220)
-                    MonitorSideUnavailable(controller: controller)
-                }
+            VStack(spacing: 16) {
+                monitorMenuCard
             }
-
+            .frame(maxWidth: .infinity)
         }
+    }
+
+    private var pivotCard: some View {
+        Card(title: "Pivot", systemImage: "rotate.right",
+             help: "Turns the Mac's picture on the panel to match how the "
+                 + "display is physically pivoted. A GPU framebuffer transform "
+                 + "(IOFramebuffer), faded across the switch — it needs no DDC, "
+                 + "so it works even though monitor control is proxied through "
+                 + "the PC. Live while the Mac holds the panel's input.") {
+            if controller.pivotDisplayID != nil {
+                PivotControl(current: controller.pivotDegrees,
+                             enabled: !controller.pivotBusy,
+                             busy: controller.pivotBusy) { deg in
+                    Task<Void, Never> { await controller.applyPivot(deg) }
+                }
+            } else {
+                PivotControl(current: 0, enabled: false, busy: false) { _ in }
+                Text("Live when the Mac is the panel's current input.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.textDim)
+            }
+
+            Divider().overlay(Theme.rule).padding(.vertical, 2)
+
+            Toggle(isOn: Binding(get: { controller.pivotAutoFollow },
+                                 set: { controller.setPivotAutoFollow($0) })) {
+                Text("Auto-follow panel")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.textPrimary)
+            }
+            .toggleStyle(StatusToggleStyle())
+
+            Text(pivotFollowCaption)
+                .font(.system(size: 11.5))
+                .foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { controller.refreshPivot() }
+    }
+
+    /// The line under the Auto-follow toggle: the live loop status when armed, or
+    /// what it will do — with the not-yet-calibrated caveat — when idle.
+    private var pivotFollowCaption: String {
+        if controller.pivotAutoFollow {
+            return controller.pivotFollowStatus.isEmpty ? "Reading the panel…"
+                                                        : controller.pivotFollowStatus
+        }
+        let via = controller.proxyHost.isEmpty ? "the PC" : controller.proxyHost
+        return "Rotates automatically as you pivot the panel, from the phone on its back "
+            + "(read via \(via)). Not yet calibrated — the mapping is provisional until the "
+            + "panel is mounted and calibrated."
+    }
+
+    // Three settings HP's Menu screen owns, reachable only as 0xE1 sub-selectors
+    // and readable through no channel at all — so these show what this app last
+    // set, and start at HP's factory values rather than pretending to have asked
+    // the panel.
+    private var monitorMenuCard: some View {
+        Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
+             help: "Where the monitor's own menu appears, how long it stays up, "
+                 + "and how transparent it is. Vendor sub-selectors 0x3B, 0x3C, "
+                 + "0x3E and 0x56 — set only, never reported back.") {
+            if controller.controlsLive {
+                OSDMenuPreview(
+                    horizontal: controller.osdMenuH,
+                    vertical: controller.osdMenuV,
+                    transparency: controller.osdTransparency,
+                    enabled: true,
+                    onMove: { h, v in
+                        Task<Void, Never> {
+                            await controller.applyOSDMenu(horizontal: h)
+                            await controller.applyOSDMenu(vertical: v)
+                        }
+                    },
+                    onTransparency: { step in
+                        Task<Void, Never> {
+                            await controller.applyOSDMenu(transparency: step)
+                        }
+                    })
+                OSDMenuSlider(label: "Stays up for", value: controller.osdMenuTimeout,
+                              range: 5...60, suffix: "s") { v in
+                    Task<Void, Never> { await controller.applyOSDMenu(timeout: v) }
+                }
+            } else {
+                SliderRow(label: "Position across", value: .constant(97),
+                          range: 0...100, enabled: false)
+                MonitorSideUnavailable(controller: controller)
+            }
+        }
+    }
+
+    private var onScreenDisplayCard: some View {
+        Card(title: "On-Screen Display", systemImage: "character.bubble",
+             help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
+            FieldLabel(text: "Language")
+            if controller.features[0xCC]?.readable == true {
+                FeaturePicker(code: 0xCC, controller: controller)
+            } else {
+                StyledPicker(options: [(value: UInt16(2), label: "English")],
+                             selection: .constant(UInt16(2)), enabled: false, width: 220)
+            }
+            FieldLabel(text: "Controls")
+            if controller.features[0xCA]?.readable == true {
+                FeaturePicker(code: 0xCA, controller: controller)
+            } else {
+                StyledPicker(options: [(value: UInt16(2), label: "OSD enabled")],
+                             selection: .constant(UInt16(2)), enabled: false, width: 220)
+                MonitorSideUnavailable(controller: controller)
+            }
+        }
+    }
+}
+
+/// The four-orientation Pivot picker, laid out like HP's: a monitor glyph turned
+/// to each angle, a radio dot, and the degree label. The chosen angle is tinted
+/// with the accent; tapping one asks the controller to rotate (which fades).
+private struct PivotControl: View {
+    let current: Int
+    var enabled: Bool
+    var busy: Bool
+    var onPick: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(DisplayRotation.steps, id: \.self) { deg in
+                cell(deg)
+            }
+        }
+        .opacity(enabled ? (busy ? 0.7 : 1) : 0.4)
+        .overlay(alignment: .center) {
+            if busy { ProgressView().controlSize(.small).colorScheme(.dark) }
+        }
+    }
+
+    private func cell(_ deg: Int) -> some View {
+        let chosen = current == deg
+        return VStack(spacing: 9) {
+            Image(systemName: "display")
+                .font(.system(size: 30, weight: .thin))
+                .foregroundStyle(chosen ? Theme.accent : Theme.textSecond)
+                .rotationEffect(.degrees(Double(deg)))
+                .frame(height: 42)
+            HStack(spacing: 6) {
+                ZStack {
+                    Circle().stroke(chosen ? Theme.accent : Theme.textDim, lineWidth: 1.5)
+                    if chosen { Circle().fill(Theme.accent).padding(3) }
+                }
+                .frame(width: 13, height: 13)
+                Text("\(deg)°")
+                    .font(.system(size: 12))
+                    .foregroundStyle(chosen ? Theme.textPrimary : Theme.textSecond)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+        .background(RoundedRectangle(cornerRadius: 6)
+            .fill(chosen ? Theme.accent.opacity(0.08) : Color.clear))
+        .overlay(RoundedRectangle(cornerRadius: 6)
+            .stroke(chosen ? Theme.accentDim : Theme.cardStroke, lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { if enabled && !busy { onPick(deg) } }
     }
 }
 
