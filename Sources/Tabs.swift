@@ -887,7 +887,7 @@ struct ViewTab: View {
                  + "(IOFramebuffer), faded across the switch — it needs no DDC, "
                  + "so it works even though monitor control is proxied through "
                  + "the PC. Live while the Mac holds the panel's input.") {
-            if controller.pivotDisplayID != nil {
+            if controller.pivotAvailable {
                 PivotControl(current: controller.pivotDegrees,
                              enabled: !controller.pivotBusy,
                              busy: controller.pivotBusy) { deg in
@@ -895,7 +895,7 @@ struct ViewTab: View {
                 }
             } else {
                 PivotControl(current: 0, enabled: false, busy: false) { _ in }
-                Text("Live when the Mac is the panel's current input.")
+                Text("Live when a machine is on the panel — the Mac, or a PC on USB-C.")
                     .font(.system(size: 12))
                     .foregroundStyle(Theme.textDim)
             }
@@ -926,9 +926,8 @@ struct ViewTab: View {
                                                         : controller.pivotFollowStatus
         }
         let via = controller.proxyHost.isEmpty ? "the PC" : controller.proxyHost
-        return "Rotates automatically as you pivot the panel, from the phone on its back "
-            + "(read via \(via)). Not yet calibrated — the mapping is provisional until the "
-            + "panel is mounted and calibrated."
+        return "Rotates whatever's on the panel — the Mac, or the PC on USB-C — as you "
+            + "physically pivot it, sensed by the phone on the panel back (read via \(via))."
     }
 
     // Three settings HP's Menu screen owns, reachable only as 0xE1 sub-selectors

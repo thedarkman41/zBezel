@@ -129,29 +129,6 @@ struct MenuPanel: View {
                     .toggleStyle(StatusToggleStyle())
                     .disabled(controller.proxyHost.isEmpty)
             }
-            // The Space that stands for the PC. Separate switch, because it is a
-            // bigger commitment than arming the edge: it puts a full-screen
-            // window on the panel and takes over a Mission Control slot.
-            HStack(spacing: 8) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("\(target) as a Space")
-                        .font(.system(size: 13))
-                        .foregroundStyle(controller.kvmEnabled ? Theme.textPrimary : Theme.textDim)
-                    Text(controller.pcSpaceOpen
-                         ? "in Mission Control — switch to it to use \(target)"
-                         : "adds it beside your desktops")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(Theme.textSecond)
-                }
-                Spacer(minLength: 6)
-                Toggle("", isOn: Binding(
-                    get: { controller.pcSpaceOpen },
-                    set: { on in controller.setPCSpace(on) }))
-                    .labelsHidden()
-                    .toggleStyle(StatusToggleStyle())
-                    .disabled(!controller.kvmEnabled)
-            }
-
             if let problem = controller.kvmError {
                 Text(problem)
                     .font(.system(size: 10.5))

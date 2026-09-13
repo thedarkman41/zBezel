@@ -167,8 +167,6 @@ final class MonitorController: ObservableObject {
             }
         }
     }
-    private let pcSpace = PCSpace()
-    @Published private(set) var pcSpaceOpen = false
     @Published private(set) var kvmEnabled = false
     @Published private(set) var kvmControllingRemote = false
     @Published private(set) var kvmStatus = "off"
@@ -214,16 +212,8 @@ final class MonitorController: ObservableObject {
             Task { @MainActor in self?.kvmError = note }
         }
 
-        // The Space and the KVM are one gesture: entering it switches the panel
-        // and hands over the keyboard and pointer together, because showing the
-        // PC's screen while an invisible Mac pointer moved over it would be
-        // worse than doing neither.
-        pcSpace.onEnter = { [weak self] in self?.kvm.takeControlForSpace() }
-        pcSpace.onLeave = { [weak self] in self?.kvm.releaseControlForSpace() }
-        pcSpace.onWantScreenshot = { [weak self] in self?.kvm.requestScreenshot() }
         kvm.onScreenshot = { [weak self] data in
             guard let image = NSImage(data: data) else { return }
-            self?.pcSpace.show(image)
             self?.pcSnapshot = image
         }
     }
@@ -584,38 +574,94 @@ final class MonitorController: ObservableObject {
         await writeSub(0x3E, osdMenuTimeout)
     }
 
-    // MARK: Pivot (framebuffer rotation)
+    // MARK: Pivot (rotate whichever machine's desktop is on the panel)
 
-    /// The panel's local display id, but only when the panel is actually in this
-    /// Mac's display list — i.e. the Mac holds the live input. Rotating is only
-    /// meaningful then; when the panel is showing the PC it has left the Mac's
-    /// display list and there is nothing local to turn.
+    /// Where a Pivot rotation should land, decided by which machine the panel is
+    /// currently showing. Rotating the machine that ISN'T on screen would be
+    /// invisible — the Mac enumerates the panel even while a PC drives it — so the
+    /// live input, not the display list, chooses the target.
+    enum PivotTarget: Equatable {
+        case mac(CGDirectDisplayID)   // the Mac is on screen: turn its framebuffer
+        case agent(host: String)      // a PC is on screen: ask its agent to turn its desktop
+        case none                     // nothing rotatable right now
+    }
+
+    var pivotTarget: PivotTarget {
+        if kvm.panelShowsMac {
+            if let id = pivotDisplayID { return .mac(id) }
+            return .none
+        }
+        // A PC is on screen. Turn the machine on the live input — but only when it
+        // is the host whose agent relay we already hold (the proxy host); a
+        // different machine would need its own relay, which we do not keep open.
+        if !proxyHost.isEmpty,
+           let m = kvm.machines.first(where: { $0.input == kvm.currentInput }),
+           m.host.lowercased() == proxyHost.lowercased() {
+            return .agent(host: m.host)
+        }
+        return .none
+    }
+
+    /// True when there is something on the panel we can rotate right now.
+    var pivotAvailable: Bool { pivotTarget != .none }
+
+    /// Who the rotation will land on, for the card's status ("Mac" or a hostname).
+    var pivotTargetLabel: String {
+        switch pivotTarget {
+        case .mac:              return "Mac"
+        case .agent(let host):  return host
+        case .none:             return ""
+        }
+    }
+
+    /// The panel's local display id, but only when the Mac is the LIVE input —
+    /// not merely enumerated. Through this dock the Mac lists the panel whether or
+    /// not it is on screen, so `panelShowsMac` is the honest gate.
     var pivotDisplayID: CGDirectDisplayID? {
-        guard let id = selectedID, displays.contains(where: { $0.id == id }) else { return nil }
+        guard kvm.panelShowsMac, let id = selectedID,
+              displays.contains(where: { $0.id == id }) else { return nil }
         return id
     }
 
-    /// Current framebuffer rotation of the panel — 0/90/180/270 — so the Pivot
-    /// control can show which way the picture is turned.
+    /// Rotation shown on the Pivot control. For the Mac it is the live framebuffer
+    /// angle; for a PC it is the last angle we asked for (its desktop can't be read
+    /// back cheaply).
     @Published var pivotDegrees: Int = 0
     @Published var pivotBusy = false
 
-    /// Re-read the rotation from the window server. Cheap and side-effect free.
+    /// Re-read the Mac's live rotation. Cheap, side-effect free; no-op for a PC.
     func refreshPivot() {
-        if let id = pivotDisplayID { pivotDegrees = DisplayRotation.current(id) }
+        if case .mac(let id) = pivotTarget { pivotDegrees = DisplayRotation.current(id) }
     }
 
-    /// Rotate the Mac's picture on the panel to `degrees`, fading across the
-    /// switch, then re-read what the window server actually settled on.
+    /// Rotate whatever machine is currently on the panel to `degrees`.
     func applyPivot(_ degrees: Int) async {
-        guard let id = pivotDisplayID, !pivotBusy else { return }
-        pivotBusy = true
-        _ = await DisplayRotation.rotate(id, to: degrees, fade: true)
-        pivotDegrees = DisplayRotation.current(id)
-        pivotBusy = false
-        // Rotation changes the panel's bounds, and the KVM edge-map is built from
-        // them — re-hand it the geometry so a crossing still lands.
-        syncKVMPortal()
+        guard !pivotBusy else { return }
+        switch pivotTarget {
+        case .mac(let id):
+            pivotBusy = true
+            _ = await DisplayRotation.rotate(id, to: degrees, fade: true)
+            pivotDegrees = DisplayRotation.current(id)
+            pivotBusy = false
+            // Rotation changes the panel's bounds, and the KVM edge-map is built
+            // from them — re-hand it the geometry so a crossing still lands.
+            syncKVMPortal()
+        case .agent(let host):
+            pivotBusy = true
+            if await rotateRemote(host: host, degrees: degrees) { pivotDegrees = degrees }
+            pivotBusy = false
+        case .none:
+            break
+        }
+    }
+
+    /// Ask the PC on the live input to rotate its own desktop. Goes through the
+    /// shared agent relay, which lands in that machine's interactive session — the
+    /// only place ChangeDisplaySettingsEx turns the visible desktop. The agent is
+    /// already pointed at the proxy host, which is the live PC here.
+    private func rotateRemote(host: String, degrees: Int) async -> Bool {
+        do { try await agent.rotate(degrees: degrees); return true }
+        catch { lastError = "Rotate on \(host) failed: \(error.localizedDescription)"; return false }
     }
 
     // MARK: Pivot auto-follow (physical orientation from the phone on rigel)
@@ -647,6 +693,8 @@ final class MonitorController: ObservableObject {
     private func pivotFollowLoop() async {
         var candidate: Int?
         var candidateSince = Date.distantPast
+        var lastTried: Int?          // the orientation we last asked for…
+        var lastTriedStuck = false   // …and whether it failed to take effect
         while !Task.isCancelled {
             // The phone is cabled to the proxy host (rigel) — not the Mac, and not
             // through the monitor's hub — so the feed is always read there, no
@@ -656,18 +704,30 @@ final class MonitorController: ObservableObject {
                 pivotFollowStatus = "No PC set for the phone feed."
                 try? await Task.sleep(nanoseconds: 2_000_000_000); continue
             }
-            guard pivotDisplayID != nil else {
-                pivotFollowStatus = "Waiting — the Mac isn't the panel's input."
+            guard pivotAvailable else {
+                pivotFollowStatus = "Waiting — nothing on the panel to rotate."
                 candidate = nil
                 try? await Task.sleep(nanoseconds: 1_500_000_000); continue
             }
 
             if let r = await PanelOrientation.read(host: host) {
+                // Where the target actually sits now. The Mac we can read live, so
+                // a sleep or signal-drop reset self-heals; a PC we cannot read
+                // back, so we trust the last angle we set.
+                let actual: Int
+                if case .mac(let id) = pivotTarget { actual = DisplayRotation.current(id) }
+                else { actual = pivotDegrees }
+
                 if r.inplane < 1.5 {
-                    pivotFollowStatus = "Panel near flat — holding \(pivotDegrees)°."
+                    pivotFollowStatus = "Panel near flat — holding \(actual)°."
                     candidate = nil
-                } else if r.orient == pivotDegrees {
-                    pivotFollowStatus = "Following · \(r.orient)°"
+                } else if r.orient == actual {
+                    pivotFollowStatus = "Following · \(r.orient)° (\(pivotTargetLabel))"
+                    candidate = nil; lastTried = nil; lastTriedStuck = false
+                } else if lastTriedStuck && lastTried == r.orient {
+                    // Already tried this and it did not take — do not fade-loop;
+                    // wait for the orientation to change again.
+                    pivotFollowStatus = "Couldn't rotate to \(r.orient)°."
                     candidate = nil
                 } else if candidate != r.orient {
                     candidate = r.orient
@@ -676,7 +736,12 @@ final class MonitorController: ObservableObject {
                 } else if Date().timeIntervalSince(candidateSince) >= 0.3 {
                     candidate = nil
                     pivotFollowStatus = "Rotating to \(r.orient)°…"
-                    await applyPivot(r.orient)   // fades; suspends the loop until done
+                    await applyPivot(r.orient)   // fades / round-trips; suspends the loop
+                    let now: Int
+                    if case .mac(let id) = pivotTarget { now = DisplayRotation.current(id) }
+                    else { now = pivotDegrees }
+                    lastTried = r.orient
+                    lastTriedStuck = (now != r.orient)
                 }
             } else {
                 pivotFollowStatus = "Phone feed unreachable via \(host)."
@@ -1358,27 +1423,6 @@ final class MonitorController: ObservableObject {
         syncKVMState()
     }
 
-    /// Open or close the Space that stands for the PC.
-    func setPCSpace(_ on: Bool) {
-        guard on != pcSpace.isOpen else { return }
-        if on {
-            guard let id = selectedID, displays.contains(where: { $0.id == id }) else {
-                kvmError = "No external display is selected to put the Space on."
-                return
-            }
-            guard kvm.isEnabled else {
-                kvmError = "Switch on Control \(proxyHost) first — the Space hands over "
-                         + "the keyboard and pointer as well as the picture."
-                return
-            }
-            pcSpace.open(on: id, title: proxyHost.isEmpty ? "PC" : proxyHost)
-        } else {
-            pcSpace.close()
-        }
-        pcSpaceOpen = pcSpace.isOpen
-        UserDefaults.standard.set(pcSpaceOpen, forKey: "pcSpaceOpen")
-    }
-
     /// Unwind the KVM synchronously on the way out.
     ///
     /// Handing control over decouples the pointer from the mouse and hides the
@@ -1386,7 +1430,6 @@ final class MonitorController: ObservableObject {
     /// that moves nothing, so this cannot be left to an async Task that may not
     /// get a chance to run before the process goes.
     func shutdownKVM() {
-        pcSpace.close()
         kvm.disable()
     }
 

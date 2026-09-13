@@ -390,6 +390,14 @@ actor RemoteAgent {
         return (json["capabilities"] as? String) ?? ""
     }
 
+    /// Rotate the far machine's own desktop to `degrees` (0/90/180/270). Lands in
+    /// the interactive (session 1) agent via the relay — the only place
+    /// ChangeDisplaySettingsEx can turn the visible desktop. `run` already throws
+    /// on a transport error or an agent that answers `ok:false`.
+    func rotate(degrees: Int) throws {
+        _ = try run(["rotate", String(degrees)])
+    }
+
     /// One round trip for many codes — the whole point, given the per-call cost.
     func read(monitor: Int, codes: [UInt8]) throws -> [UInt8: RemoteReading] {
         guard !codes.isEmpty else { return [:] }
