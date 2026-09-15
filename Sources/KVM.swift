@@ -1236,8 +1236,12 @@ final class KVMController {
             // offering none.
             refuseCrossing(at: point, doorway: doorway)
             return
-        } else if machines.count > 1, let ask = presentChooser {
-            // More than one place to go and nothing on screen to imply which.
+        } else if !machines.isEmpty, let ask = presentChooser {
+            // Always ask when the panel is showing the Mac — even for a single
+            // machine. The tiles are the ONLY gesture that switches the panel, so
+            // a stray brush of the right edge can never switch inputs on its own.
+            // (This once fired only for two or more machines, and a lone machine
+            // was switched to directly, which read as an inadvertent switch.)
             // Hold the crossing, nudge the pointer off the edge so it is not
             // sitting on the trigger, and ask.
             pendingCrossing = (point, doorway)
@@ -1248,6 +1252,8 @@ final class KVMController {
             DispatchQueue.main.async { ask(point); self.onChange?() }
             return
         } else if let first = machines.first {
+            // No chooser UI wired up (should not happen in the app) — fall back to
+            // the single deterministic target rather than trapping the pointer.
             activate(first, at: 0)
         }
         // Keep the spot on the glass.
