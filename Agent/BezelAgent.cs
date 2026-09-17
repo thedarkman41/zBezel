@@ -80,6 +80,60 @@ internal static class BezelAgent
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern bool EnumDisplayDevices(string device, uint index, ref DISPLAY_DEVICE info, uint flags);
 
+    // Desktop rotation for the `rotate` verb. Must run in the interactive session
+    // (session 1) to move the VISIBLE desktop — ChangeDisplaySettingsEx only
+    // affects the calling session's desktop — so `rotate` lives in RunCommand,
+    // which the session-1 serve agent executes, not the top-level switch.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int EnumDisplaySettings(string deviceName, int modeNum, ref DEVMODE dm);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int ChangeDisplaySettingsEx(string deviceName, ref DEVMODE dm, IntPtr hwnd,
+                                                      uint flags, IntPtr param);
+
+    private const int ENUM_CURRENT_SETTINGS = -1;
+    private const int DM_PELSWIDTH = 0x00080000;
+    private const int DM_PELSHEIGHT = 0x00100000;
+    private const int DM_DISPLAYORIENTATION = 0x00000080;
+    private const uint CDS_UPDATEREGISTRY = 0x00000001;
+    private const uint CDS_TEST = 0x00000002;
+    private const int DISP_CHANGE_SUCCESSFUL = 0;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DEVMODE
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion;
+        public short dmDriverVersion;
+        public short dmSize;
+        public short dmDriverExtra;
+        public int   dmFields;
+        // POINTL dmPosition (display DEVMODE union), then orientation fields.
+        public int   dmPositionX;
+        public int   dmPositionY;
+        public int   dmDisplayOrientation;
+        public int   dmDisplayFixedOutput;
+        public short dmColor;
+        public short dmDuplex;
+        public short dmYResolution;
+        public short dmTTOption;
+        public short dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels;
+        public int   dmBitsPerPel;
+        public int   dmPelsWidth;
+        public int   dmPelsHeight;
+        public int   dmDisplayFlags;
+        public int   dmDisplayFrequency;
+        public int   dmICMMethod;
+        public int   dmICMIntent;
+        public int   dmMediaType;
+        public int   dmDitherType;
+        public int   dmReserved1;
+        public int   dmReserved2;
+        public int   dmPanningWidth;
+        public int   dmPanningHeight;
+    }
+
     [DllImport("dxva2.dll", SetLastError = true)]
     private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr h, ref uint count);
     [DllImport("dxva2.dll", SetLastError = true)]
@@ -292,6 +346,7 @@ internal static class BezelAgent
             case "clip":     CmdClip();              return true;
             case "screenshot": CmdScreenshot(args);  return true;
             case "stream":     CmdStream(args);      return true;
+            case "rotate":     CmdRotate(args);      return true;
             default:       return false;
         }
     }
@@ -563,7 +618,7 @@ internal static class BezelAgent
         // Before anything reads a coordinate or a metric.
         MakeDpiAware();
         Console.OutputEncoding = Encoding.UTF8;
-        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe|screenshot|stream|reclaim"); return 1; }
+        if (args.Length == 0) { Fail("usage: BezelAgent list|caps|get|set|probe|screenshot|stream|orient|rotate|reclaim"); return 1; }
 
         // serve/client/relay never touch a monitor themselves, and the client runs
         // in session 0 where there are never any monitors — so enumerating first
@@ -579,6 +634,9 @@ internal static class BezelAgent
             // Reclaim never touches a monitor, and must work when no session
             // exists yet — so it dispatches here, before enumeration.
             case "reclaim":   return CmdReclaim();
+            // Talks to the panel-tilt phone over adb-forwarded loopback, not a
+            // monitor — so it also dispatches before enumeration.
+            case "orient":    return CmdOrient(args);
             // Secure-desktop injection for the login/lock screen. Like reclaim,
             // these run before any interactive session exists.
             case "secure-inject": return CmdSecureInject();  // SYSTEM launcher (scheduled task)
@@ -1809,6 +1867,228 @@ internal static class BezelAgent
                 Console.WriteLine(ScreenStream.Status());
                 return 0;
         }
+    }
+
+    // ---- desktop rotation --------------------------------------------------
+
+    /// Rotate the primary display's desktop to an absolute orientation.
+    ///
+    ///   rotate <deg>   deg ∈ {0, 90, 180, 270}
+    ///
+    /// Runs in RunCommand so the session-1 serve agent executes it on the
+    /// interactive desktop (session 0 has no visible desktop to turn). Used when
+    /// a PC — not the Mac — is the panel's live input, so framebuffer rotation on
+    /// the Mac would be invisible. Mapping is pass-through: the phone's orient
+    /// value goes straight to DMDO_DEFAULT/90/180/270 (deg / 90); if a host's
+    /// handedness comes out reversed, a per-host flip is layered on top later.
+    private static int CmdRotate(string[] args)
+    {
+        if (args.Length < 2) { Fail("rotate needs a degree: 0|90|180|270"); return 1; }
+        int deg;
+        if (!int.TryParse(args[1], out deg) || (deg != 0 && deg != 90 && deg != 180 && deg != 270))
+        {
+            Fail("rotate degree must be 0, 90, 180 or 270");
+            return 1;
+        }
+        int target = deg / 90;   // 0..3 == DMDO_DEFAULT..DMDO_270
+
+        var dm = new DEVMODE();
+        dm.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        if (EnumDisplaySettings(null, ENUM_CURRENT_SETTINGS, ref dm) == 0)
+        {
+            Fail("EnumDisplaySettings failed for the primary display");
+            return 1;
+        }
+
+        int current = dm.dmDisplayOrientation;
+        if (current == target)
+        {
+            Console.WriteLine("{\"ok\":true,\"orient\":" + deg + "}");
+            return 0;
+        }
+
+        // Landscape (0/180) ⇄ portrait (90/270) toggles the raster dimensions.
+        if (((current ^ target) & 1) == 1)
+        {
+            int t = dm.dmPelsWidth; dm.dmPelsWidth = dm.dmPelsHeight; dm.dmPelsHeight = t;
+        }
+        dm.dmDisplayOrientation = target;
+        dm.dmFields = DM_DISPLAYORIENTATION | DM_PELSWIDTH | DM_PELSHEIGHT;
+
+        int test = ChangeDisplaySettingsEx(null, ref dm, IntPtr.Zero, CDS_TEST, IntPtr.Zero);
+        if (test != DISP_CHANGE_SUCCESSFUL)
+        {
+            Fail("display rejected orientation " + deg + " (code " + test + ")");
+            return 1;
+        }
+        int applied = ChangeDisplaySettingsEx(null, ref dm, IntPtr.Zero, CDS_UPDATEREGISTRY, IntPtr.Zero);
+        if (applied != DISP_CHANGE_SUCCESSFUL)
+        {
+            Fail("ChangeDisplaySettingsEx failed for orientation " + deg + " (code " + applied + ")");
+            return 1;
+        }
+        Console.WriteLine("{\"ok\":true,\"orient\":" + deg + "}");
+        return 0;
+    }
+
+    // ---- panel-tilt phone --------------------------------------------------
+
+    /// Bridges the PanelTilt phone to the agent's line-oriented JSON world.
+    ///
+    /// A dead HTC One M7 is taped to the back of the monitor; PanelTilt on it
+    /// serves one JSON line per orientation change on the phone's own loopback,
+    /// and `adb forward tcp:PORT tcp:PORT` maps that onto this box's loopback.
+    /// This verb (re)establishes that forward when needed, then:
+    ///
+    ///   orient              connect, read the current orientation, print it once
+    ///   orient watch [secs] stream lines to stdout for secs (0 = until the
+    ///                       socket closes) — for eyeballing over SSH
+    ///   orient forward      just (re)establish the adb forward and report
+    ///
+    /// The phone greets every new connection with its current state, so `get`
+    /// never waits for the panel to move. The reply is the phone's own JSON with
+    /// `"ok":true` spliced in, so it parses like every other agent response.
+    ///
+    /// adb is found on PATH as `adb`; set BEZEL_ADB to override, or pass --adb.
+    private static int CmdOrient(string[] args)
+    {
+        string sub = "get";
+        int port = 6000;
+        int seconds = 0;
+        string adb = Environment.GetEnvironmentVariable("BEZEL_ADB");
+
+        int i = 1;
+        if (args.Length > 1 && !args[1].StartsWith("--")) { sub = args[1].ToLowerInvariant(); i = 2; }
+        for (; i < args.Length; i++)
+        {
+            if (args[i] == "--port" && i + 1 < args.Length) int.TryParse(args[++i], out port);
+            else if (args[i] == "--adb" && i + 1 < args.Length) adb = args[++i];
+            else if (args[i] == "--seconds" && i + 1 < args.Length) int.TryParse(args[++i], out seconds);
+            else if (sub == "watch" && seconds == 0) int.TryParse(args[i], out seconds); // `orient watch 30`
+        }
+        if (string.IsNullOrEmpty(adb)) adb = "adb";
+
+        if (sub == "forward")
+        {
+            string ferr;
+            bool fok = EnsureForward(adb, port, out ferr);
+            if (fok) Console.WriteLine("{\"ok\":true,\"forwarded\":" + port + "}");
+            else Fail("adb forward failed: " + ferr);
+            return fok ? 0 : 1;
+        }
+
+        // Connect; if the port is refused, (re)establish the forward once and retry.
+        System.Net.Sockets.TcpClient client = ConnectLoopback(port, 1500);
+        if (client == null)
+        {
+            string err;
+            if (!EnsureForward(adb, port, out err)) { Fail("no tilt socket and adb forward failed: " + err); return 1; }
+            client = ConnectLoopback(port, 2500);
+            if (client == null) { Fail("tilt socket " + port + " unreachable after adb forward (is PanelTilt running on the phone?)"); return 1; }
+        }
+
+        try
+        {
+            using (client)
+            using (var stream = client.GetStream())
+            {
+                var reader = new System.IO.StreamReader(stream, Encoding.UTF8);
+                var writer = new System.IO.StreamWriter(stream, new UTF8Encoding(false));
+                writer.NewLine = "\n";
+                writer.AutoFlush = true;
+
+                if (sub == "watch")
+                {
+                    // Pass the phone's lines straight through, bounded by `seconds`
+                    // if given, else until the phone closes the socket.
+                    DateTime until = seconds > 0 ? DateTime.UtcNow.AddSeconds(seconds) : DateTime.MaxValue;
+                    client.ReceiveTimeout = 1000;
+                    while (DateTime.UtcNow < until)
+                    {
+                        string line;
+                        try { line = reader.ReadLine(); }
+                        catch (System.IO.IOException) { continue; } // read timeout: re-check the clock
+                        if (line == null) break;                    // socket closed
+                        line = line.Trim();
+                        if (line.Length == 0) continue;
+                        Console.WriteLine(line);
+                        Console.Out.Flush();
+                    }
+                    return 0;
+                }
+
+                // get: nudge with an explicit request (harmless — the greeting may
+                // already be in flight) and take the first well-formed line.
+                try { writer.WriteLine("get"); } catch { }
+                client.ReceiveTimeout = 3000;
+                string first = null;
+                for (int attempts = 0; attempts < 4; attempts++)
+                {
+                    string line;
+                    try { line = reader.ReadLine(); }
+                    catch (System.IO.IOException) { break; }
+                    if (line == null) break;
+                    line = line.Trim();
+                    if (line.StartsWith("{") && line.Contains("\"orient\"")) { first = line; break; }
+                }
+                if (first == null) { Fail("no orientation line from the phone"); return 1; }
+
+                // Splice ok:true into the phone's own JSON so the reply matches the
+                // agent's {"ok":true,...} convention without reparsing every field.
+                Console.WriteLine("{\"ok\":true," + first.Substring(1));
+                return 0;
+            }
+        }
+        catch (Exception e)
+        {
+            Fail("orient: " + e.Message);
+            return 1;
+        }
+    }
+
+    /// A loopback TCP connect with a timeout — TcpClient.Connect otherwise blocks
+    /// far too long on a refused port. Returns null on failure.
+    private static System.Net.Sockets.TcpClient ConnectLoopback(int port, int timeoutMs)
+    {
+        var client = new System.Net.Sockets.TcpClient();
+        try
+        {
+            IAsyncResult ar = client.BeginConnect(System.Net.IPAddress.Loopback, port, null, null);
+            if (!ar.AsyncWaitHandle.WaitOne(timeoutMs))
+            {
+                try { client.Close(); } catch { }
+                return null;
+            }
+            client.EndConnect(ar);
+            return client;
+        }
+        catch
+        {
+            try { client.Close(); } catch { }
+            return null;
+        }
+    }
+
+    /// `adb forward tcp:PORT tcp:PORT` — idempotent, so it is safe on every miss.
+    private static bool EnsureForward(string adb, int port, out string error)
+    {
+        error = "";
+        try
+        {
+            var psi = new ProcessStartInfo(adb, "forward tcp:" + port + " tcp:" + port);
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            psi.RedirectStandardError = true;
+            psi.RedirectStandardOutput = true;
+            using (var proc = Process.Start(psi))
+            {
+                string stderr = proc.StandardError.ReadToEnd();
+                proc.WaitForExit(5000);
+                if (proc.ExitCode != 0) { error = stderr.Trim(); return false; }
+                return true;
+            }
+        }
+        catch (Exception e) { error = e.Message; return false; }
     }
 
     private static int CmdClip()
