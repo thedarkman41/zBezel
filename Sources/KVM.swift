@@ -82,6 +82,11 @@ final class KVMTransport {
     private var lastHost: String?
     private var lastExePath = ""
     private var reconnecting = false
+    /// Set by disconnect(), cleared by connect(). A reconnect or fallback timer
+    /// that was already in flight when we deliberately closed the channel must
+    /// NOT fire — otherwise a channel shut on purpose (e.g. handed to secure-kvm
+    /// at the sign-in screen) reopens itself a second later and thrashes.
+    private var closed = false
     /// The IP the machine announced itself from, tried if the hostname never
     /// resolves. A discovered box whose name the Mac cannot look up is still
     /// reachable at the address its packet arrived on. Nil for a plain host.
@@ -131,6 +136,7 @@ final class KVMTransport {
         lastExePath = exePath
         lastFallback = (fallback == host) ? nil : fallback
         disconnect()
+        closed = false        // AFTER disconnect() (which sets it): we are opening.
         readyLock.lock(); readyFlag = false; readyLock.unlock()
 
         let task = Process()
@@ -295,6 +301,7 @@ final class KVMTransport {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             guard let self else { return }
             self.reconnecting = false
+            guard !self.closed else { return }   // deliberately shut in the meantime
             self.connect(host: host, exePath: exe, fallback: fallback)
         }
     }
@@ -312,6 +319,7 @@ final class KVMTransport {
         guard let ip = lastFallback else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
             guard let self,
+                  !self.closed,                     // not deliberately shut since
                   self.lastHost == attemptHost,   // not already reconnected elsewhere
                   self.lastFallback == ip,          // fallback still pending
                   !self.isReady                     // and it never came up
@@ -322,6 +330,7 @@ final class KVMTransport {
     }
 
     func disconnect() {
+        closed = true       // suppress any reconnect/fallback timer already in flight
         // Stop reading FIRST: disarm the handlers and close the read ends before
         // the child exits, so terminating it cannot leave a handle "readable at
         // EOF" spinning a core, and the pipe fds are released rather than orphaned
@@ -1502,6 +1511,14 @@ final class KVMController {
     /// stray off the edge.
     private func engageSecure(_ machineHost: String) {
         secureLocked.insert(machineHost)
+        // Hush the ordinary channels first. At the Windows secure desktop the
+        // session-1 `kvm` and `clipboard` workers are refused, so their pipes hit
+        // stdout EOF and reconnect every ~30s — pointless thrash against a box
+        // that can only be typed at through the SYSTEM secure-input worker. Drop
+        // them; the secure channel below carries the keyboard until sign-in, and
+        // reconcileTransports leaves a secure-locked host's ordinary channels shut.
+        pipe(for: machineHost).disconnect()
+        clipPipe(for: machineHost).disconnect()
         securePipe(for: machineHost).connect(host: machineHost,
             exePath: exePath, fallback: addressForHost?(machineHost))
         Task { await SecureDesktop.wake(host: machineHost) }
@@ -1524,8 +1541,11 @@ final class KVMController {
             clearLock()
             secureSetPointerLock = false
         }
+        let fallback = addressForHost?(machineHost)
         pipe(for: machineHost).connect(host: machineHost, exePath: exePath,
-                                       fallback: addressForHost?(machineHost))
+                                       fallback: fallback)
+        clipPipe(for: machineHost).connect(host: machineHost, exePath: exePath,
+                                           fallback: fallback)
         KVMLog.write("\(machineHost) signed in; keyboard back on the ordinary channel")
         if side == .there, host == machineHost {
             status = "controlling \(nameFor(machineHost)) — its left edge brings you back"
@@ -1987,6 +2007,12 @@ final class KVMController {
         guard isEnabled else { return }
         let wanted = Set(machines.map(\.host))
         for machine in machines {
+            // A machine locked at its sign-in screen takes input only through the
+            // secure-kvm channel; its ordinary input + clipboard channels are
+            // refused at the secure desktop and would thrash (connect, EOF,
+            // reconnect). engageSecure shut them — leave them shut until it signs
+            // in, when disengageSecure brings them back.
+            if secureLocked.contains(machine.host) { continue }
             let fallback = addressForHost?(machine.host)
             let pipe = transports[machine.host] ?? KVMTransport(command: "kvm")
             transports[machine.host] = pipe
