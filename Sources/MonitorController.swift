@@ -856,12 +856,17 @@ final class MonitorController: ObservableObject {
         // crossing that would need one is refused before the pointer is
         // captured: no tiles, no frozen cursor. See KVMController.canSwitchPanel.
         kvm.canSwitchPanel = { [weak self] in self?.transport.isAvailable ?? false }
-        // The IP a machine announced itself from, for the KVM to fall back on when
-        // its hostname will not resolve. Looked up live, so a box that moved keeps
-        // working. Empty address (a hand-pinned host) yields no fallback.
+        // What the KVM falls back to when a machine's primary (Tailscale) name is
+        // unreachable — the whole reason "KVM before login" failed after a reboot:
+        // the box was on the LAN but not yet on Tailscale. Prefer the IP the
+        // machine announced itself from (looked up live, so a box that moved keeps
+        // working); when it is not discovered — a hand-pinned host, or one just
+        // rebooted and not yet on the tailnet — fall back to its LAN mDNS name,
+        // which is up as soon as the box is. Only a bare short name has a `.local`.
         kvm.addressForHost = { [weak self] host in
             let target = self?.discovery.agents[host.lowercased()]?.fallbackTarget ?? ""
-            return target.isEmpty ? nil : target
+            if !target.isEmpty { return target }
+            return (host.contains(".") || host.isEmpty) ? nil : "\(host).local"
         }
         // Coming home gets the mirror of a pick's dissolve: fade the machine out
         // on its own side, switch, then reveal the Mac with its curtain.
