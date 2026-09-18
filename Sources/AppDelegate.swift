@@ -19,6 +19,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var refreshTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Arm the amber-blink instrumentation: macOS display-reconfiguration and
+        // sleep/wake go to linkwatch.log with no DDC cost, so the next mid-work
+        // link drop leaves a timestamped trail. See LinkWatch.swift.
+        DisplayEventMonitor.start()
+
         // Tell Beacon who we are, so its panel can offer a Trust button and
         // store-secret.sh can resolve "--app zBezel" to a signing identifier.
         // Idempotent by design; the contract says to call it every startup.
