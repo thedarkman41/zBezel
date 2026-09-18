@@ -4,22 +4,21 @@ import AppKit
 
 /// Debug instrumentation for the intermittent "blinking amber" link drop: the
 /// HP Z27k falls into DPMS standby (no-signal, blinking amber LED) MID-WORK
-/// while the source stays awake. The working theory is contended DDC/CI on the
-/// panel — zBezel drives DDC through the rigel proxy while BetterDisplay drives
-/// its OWN DDC (hardware brightness + input) over the Mac's connection, and two
-/// masters on one monitor's MCU can wedge it into dropping the live link.
+/// while the source stays awake, NOT when going to sleep. The cause is still
+/// unknown; it hits whichever input is lit, so it is at the shared panel rather
+/// than one source's cable.
 ///
 /// The drop is rare and unpredictable, so this records a timestamped trail we
-/// can read AFTER it happens:
+/// can read AFTER it happens, and is cause-agnostic:
 ///  - every macOS display-reconfiguration event (zero DDC cost),
 ///  - system/screen sleep + wake, so a mid-work drop is provably NOT a sleep,
 ///  - transitions in the panel link telemetry zBezel already reads on its
 ///    normal polls, and every DDC WRITE zBezel itself issues — so a change we
-///    caused is distinguishable from one BetterDisplay caused.
+///    caused is distinguishable from one caused by anything else.
 ///
 /// Deliberately PASSIVE about DDC: it adds no polling of its own, because more
-/// DDC traffic is the very thing suspected of triggering the drop. See memory
-/// bezel-amber-blink-betterdisplay-ddc-contention.
+/// DDC traffic is one thing that could plausibly trigger the drop. See memory
+/// bezel-amber-blink-instrumentation.
 enum LinkWatchLog {
     private static let queue = DispatchQueue(label: "com.darkstar.zBezel.linkwatch.log")
     private static let dir: URL = {

@@ -365,7 +365,7 @@ actor RemoteAgent {
         lastSession = AgentSession.parse(json["session"]) ?? lastSession
 
         // Every DDC write zBezel makes, so a change we caused is never mistaken
-        // for one BetterDisplay caused when reading the log back.
+        // for one caused by anything else when reading the log back.
         if let verb = args.first, verb == "set" || verb == "setraw" || verb == "setget",
            args.count >= 4 {
             LinkWatchLog.write("zBezel DDC WRITE via \(config.host): mon \(args[1]) vcp 0x\(args[2]) = \(args[3])")
