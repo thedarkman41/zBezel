@@ -279,8 +279,7 @@ actor RemoteAgent {
             if let ok = json["ok"] as? Bool, ok == false {
                 throw RemoteAgentError(message: (json["error"] as? String) ?? "agent reported failure")
             }
-            lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
-            lastSession = AgentSession.parse(json["session"]) ?? lastSession
+            absorb(json, args: agentArgs)
             return json
         }
 
@@ -353,10 +352,41 @@ actor RemoteAgent {
         if let ok = json["ok"] as? Bool, ok == false {
             throw RemoteAgentError(message: (json["error"] as? String) ?? "agent reported failure")
         }
-        lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
-        lastSession = AgentSession.parse(json["session"]) ?? lastSession
+        absorb(json, args: agentArgs)
         return json
     }
+
+    /// Fold a reply's link telemetry into `last*`, and — for the amber-blink hunt
+    /// — record any change in the panel's link state plus every DDC write we
+    /// issue. Passive: it reads only what the reply already carried and never
+    /// polls, since more DDC traffic is the suspected trigger. See LinkWatch.swift.
+    private func absorb(_ json: [String: Any], args: [String]) {
+        lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
+        lastSession = AgentSession.parse(json["session"]) ?? lastSession
+
+        // Every DDC write zBezel makes, so a change we caused is never mistaken
+        // for one BetterDisplay caused when reading the log back.
+        if let verb = args.first, verb == "set" || verb == "setraw" || verb == "setget",
+           args.count >= 4 {
+            LinkWatchLog.write("zBezel DDC WRITE via \(config.host): mon \(args[1]) vcp 0x\(args[2]) = \(args[3])")
+        }
+
+        // Panel link telemetry — only when it CHANGES, so steady polling is silent
+        // and a degradation stands out. Present only on replies that carry a link
+        // block (the DDC reads); other verbs are skipped.
+        guard let link = json["link"] as? String else { return }
+        let stable = json["stable"] as? Bool
+        let readFailures = json["readFailures"] as? Int ?? 0
+        let enumAttempts = json["enumAttempts"] as? Int ?? 0
+        let key = "\(link)|\(stable.map { "\($0)" } ?? "?")|\(readFailures)|\(enumAttempts)"
+        guard key != lastTelemetryKey else { return }
+        lastTelemetryKey = key
+        let degraded = link != "active" || stable == false || readFailures > 0
+        LinkWatchLog.write("panel link via \(config.host): link=\(link) "
+            + "stable=\(stable.map { "\($0)" } ?? "?") readFailures=\(readFailures) "
+            + "enumAttempts=\(enumAttempts)\(degraded ? "   <<< LINK DEGRADED" : "")")
+    }
+    private var lastTelemetryKey = ""
 
     /// Link quality reported by the most recent call.
     private(set) var lastLinkQuality: LinkQuality = .unknown
