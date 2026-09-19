@@ -636,7 +636,11 @@ final class MonitorController: ObservableObject {
 
     /// Rotate whatever machine is currently on the panel to `degrees`.
     func applyPivot(_ degrees: Int) async {
-        guard !pivotBusy else { return }
+        guard !pivotBusy else {
+            LinkWatchLog.write("PIVOT applyPivot(\(degrees)°) SKIPPED — already busy")
+            return
+        }
+        LinkWatchLog.write("PIVOT applyPivot -> \(degrees)° target=\(pivotTargetLabel) autoFollow=\(pivotAutoFollow)")
         switch pivotTarget {
         case .mac(let id):
             pivotBusy = true
@@ -677,6 +681,7 @@ final class MonitorController: ObservableObject {
     func setPivotAutoFollow(_ on: Bool) {
         guard on != pivotAutoFollow else { return }
         pivotAutoFollow = on
+        LinkWatchLog.write("PIVOT auto-follow \(on ? "ARMED" : "DISARMED")")
         pivotFollowTask?.cancel()
         pivotFollowStatus = ""
         if on { pivotFollowTask = Task { [weak self] in await self?.pivotFollowLoop() } }
