@@ -182,6 +182,9 @@ enum DisplayModes {
         guard CGBeginDisplayConfiguration(&config) == .success, let config else { return false }
         CGConfigureDisplayWithDisplayMode(config, id, target, nil)
         let scope: CGConfigureOption = permanent ? .permanently : .forSession
-        return CGCompleteDisplayConfiguration(config, scope) == .success
+        let ok = CGCompleteDisplayConfiguration(config, scope) == .success
+        // Forensic trace: a mode/config change is a heavy DP1-side reconfigure.
+        LinkWatchLog.write("DISPLAYMODE set display=\(id) -> \(target.width)x\(target.height)@\(Int(target.refreshRate))Hz permanent=\(permanent) -> ok=\(ok)")
+        return ok
     }
 }

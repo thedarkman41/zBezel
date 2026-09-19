@@ -37,14 +37,16 @@ enum LinkWatchLog {
     }()
 
     /// Append one line. Unlike KVMLog (a small "what is it doing now" buffer that
-    /// is discarded on overflow), this KEEPS HISTORY: at 5 MB the current file is
+    /// is discarded on overflow), this KEEPS HISTORY: at 16 MB the current file is
     /// rotated to `linkwatch.1.log` rather than deleted, so the window leading up
-    /// to a drop survives until we get to read it.
+    /// to a drop survives until we get to read it. Sized for a VERBOSE forensic
+    /// trace (every DDC op, rotation, fade, mode-set) so the pre-drop run-up is
+    /// fully captured across the days a drop may take to recur.
     static func write(_ message: String) {
         let line = stamp.string(from: Date()) + "  " + message + "\n"
         queue.async {
             if let size = try? FileManager.default
-                .attributesOfItem(atPath: url.path)[.size] as? UInt64, size > 5 * 1024 * 1024 {
+                .attributesOfItem(atPath: url.path)[.size] as? UInt64, size > 16 * 1024 * 1024 {
                 try? FileManager.default.removeItem(at: rolled)
                 try? FileManager.default.moveItem(at: url, to: rolled)
             }

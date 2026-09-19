@@ -364,29 +364,24 @@ actor RemoteAgent {
         lastLinkQuality = LinkQuality(rawValue: (json["link"] as? String) ?? "") ?? .unknown
         lastSession = AgentSession.parse(json["session"]) ?? lastSession
 
-        // Every DDC write zBezel makes, so a change we caused is never mistaken
-        // for one caused by anything else when reading the log back.
-        if let verb = args.first, verb == "set" || verb == "setraw" || verb == "setget",
-           args.count >= 4 {
-            LinkWatchLog.write("zBezel DDC WRITE via \(config.host): mon \(args[1]) vcp 0x\(args[2]) = \(args[3])")
-        }
-
-        // Panel link telemetry — only when it CHANGES, so steady polling is silent
-        // and a degradation stands out. Present only on replies that carry a link
-        // block (the DDC reads); other verbs are skipped.
-        guard let link = json["link"] as? String else { return }
+        // Forensic trace: log EVERY DDC operation with its result and the panel's
+        // link telemetry, so the run-up to a drop shows exactly what the app asked
+        // the panel to do and when. Reads are logged too — DDC bus activity to the
+        // panel's MCU is itself a candidate for disturbing the live input's link.
+        let verb = args.first ?? "?"
+        let isWrite = verb == "set" || verb == "setraw" || verb == "setget"
+        var detail = args.dropFirst().joined(separator: " ")
+        if detail.count > 60 { detail = String(detail.prefix(57)) + "…" }  // vendor/subselector sweeps are huge
+        let ok = (json["ok"] as? Bool) ?? true
+        let link = (json["link"] as? String) ?? "?"
         let stable = json["stable"] as? Bool
         let readFailures = json["readFailures"] as? Int ?? 0
         let enumAttempts = json["enumAttempts"] as? Int ?? 0
-        let key = "\(link)|\(stable.map { "\($0)" } ?? "?")|\(readFailures)|\(enumAttempts)"
-        guard key != lastTelemetryKey else { return }
-        lastTelemetryKey = key
-        let degraded = link != "active" || stable == false || readFailures > 0
-        LinkWatchLog.write("panel link via \(config.host): link=\(link) "
-            + "stable=\(stable.map { "\($0)" } ?? "?") readFailures=\(readFailures) "
-            + "enumAttempts=\(enumAttempts)\(degraded ? "   <<< LINK DEGRADED" : "")")
+        let degraded = (link != "active" && link != "?") || stable == false || readFailures > 0
+        LinkWatchLog.write("DDC \(isWrite ? "WRITE" : "read ") \(verb) [\(detail)] via \(config.host)"
+            + " -> ok=\(ok) link=\(link) stable=\(stable.map { "\($0)" } ?? "?")"
+            + " rf=\(readFailures) ea=\(enumAttempts)\(degraded ? "   <<< LINK DEGRADED" : "")")
     }
-    private var lastTelemetryKey = ""
 
     /// Link quality reported by the most recent call.
     private(set) var lastLinkQuality: LinkQuality = .unknown
