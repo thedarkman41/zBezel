@@ -1057,12 +1057,39 @@ final class MonitorController: ObservableObject {
             while !Task.isCancelled {
                 guard let self else { return }
                 await self.pollInput()
-                // Close attention while the KVM is live, a background courtesy
-                // otherwise. Nobody changes inputs faster than a few seconds.
-                let seconds: UInt64 = self.kvm.isEnabled ? 3 : 15
-                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                // Adaptive cadence, to cut DDC traffic to the panel (the amber-blink
+                // suspect) without losing responsiveness: poll every 20s while the
+                // user is active, back off to 180s once they have been idle 5
+                // minutes, and snap straight back the instant they touch the mouse
+                // or keyboard again. (Was a flat 3s while the KVM was live, which is
+                // ~28k DDC reads/day to the panel's MCU.)
+                if self.secondsSinceUserInput() < 300 {
+                    try? await Task.sleep(nanoseconds: 20 * 1_000_000_000)
+                } else {
+                    // Long idle wait, re-checked every 5s so a return to activity
+                    // brings the next poll forward instead of waiting out the 180s.
+                    var waited = 0
+                    while waited < 180, !Task.isCancelled,
+                          self.secondsSinceUserInput() >= 300 {
+                        try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+                        waited += 5
+                    }
+                }
             }
         }
+    }
+
+    /// Seconds since the user last physically used the mouse or keyboard, for the
+    /// adaptive poll cadence above. Real HID activity still registers here even
+    /// while the KVM event tap is consuming those events, so driving a remote PC
+    /// keeps the fast rate. kCGAnyInputEventType is a C macro and isn't importable
+    /// to Swift, so take the minimum across the input types that signal presence.
+    private func secondsSinceUserInput() -> CFTimeInterval {
+        let types: [CGEventType] = [.mouseMoved, .leftMouseDown, .rightMouseDown,
+                                    .leftMouseDragged, .keyDown, .flagsChanged, .scrollWheel]
+        return types
+            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
+            .min() ?? .greatestFiniteMagnitude
     }
 
     func stopWatchingInput() {
