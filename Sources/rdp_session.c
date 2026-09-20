@@ -60,6 +60,11 @@ struct zbezel_rdp_session
     char       *fingerprint_out;
     int         fingerprint_out_len;
     int         fingerprint_matched;
+    /* Set the moment the server presents a certificate. Without it,
+     * "fingerprint did not match" is indistinguishable from "we never got far
+     * enough to see one" — and a machine that is simply switched off then
+     * reports a host-key mismatch. See the error naming in session_thread. */
+    int         cert_checked;
 
     int         want_width, want_height;
 
@@ -174,21 +179,60 @@ static BOOL zb_desktop_resize(rdpContext *context)
     return TRUE;
 }
 
-static DWORD zb_verify_certificate(freerdp *instance, const char *host, UINT16 port,
-                                   const char *common_name, const char *subject,
-                                   const char *issuer, const char *fingerprint, DWORD flags)
+/// The one place a certificate is judged, shared by the new- and
+/// changed-certificate callbacks.
+///
+/// Returns 1 ("accept AND STORE") rather than 2 ("accept for this session
+/// only") on a match, deliberately: returning 2 leaves FreeRDP's own store
+/// empty, so every later connection re-enters the new/changed path and depends
+/// on a callback answering correctly. Storing keeps FreeRDP's view in step
+/// with the pin instead of letting the two drift apart.
+static DWORD zb_decide_certificate(zbezel_rdp_session *s, const char *fingerprint)
 {
-    (void)host; (void)port; (void)common_name; (void)subject; (void)issuer; (void)flags;
-    zbezel_rdp_session *s = owner_of(instance->context);
+    s->cert_checked = 1;
     if (s->fingerprint_out && s->fingerprint_out_len > 0 && fingerprint)
     {
         strncpy(s->fingerprint_out, fingerprint, (size_t)s->fingerprint_out_len - 1);
         s->fingerprint_out[s->fingerprint_out_len - 1] = '\0';
     }
-    if (!s->expected_fingerprint || !s->expected_fingerprint[0]) { s->fingerprint_matched = 1; return 2; }
-    if (fingerprint && strcmp(fingerprint, s->expected_fingerprint) == 0) { s->fingerprint_matched = 1; return 2; }
+    /* No pin yet: first contact, take it and record it (the caller reads it
+     * back out of fingerprint_out and pins it). */
+    if (!s->expected_fingerprint || !s->expected_fingerprint[0]) { s->fingerprint_matched = 1; return 1; }
+    if (fingerprint && strcmp(fingerprint, s->expected_fingerprint) == 0) { s->fingerprint_matched = 1; return 1; }
     s->fingerprint_matched = 0;
     return 0;
+}
+
+static DWORD zb_verify_certificate(freerdp *instance, const char *host, UINT16 port,
+                                   const char *common_name, const char *subject,
+                                   const char *issuer, const char *fingerprint, DWORD flags)
+{
+    (void)host; (void)port; (void)common_name; (void)subject; (void)issuer; (void)flags;
+    return zb_decide_certificate(owner_of(instance->context), fingerprint);
+}
+
+/// The CHANGED-certificate callback.
+///
+/// FreeRDP keeps its own known-hosts store (~/.config/freerdp/server/*.pem)
+/// alongside our pin, and when the certificate it has on file differs from the
+/// one presented it asks HERE rather than through VerifyCertificateEx. Leaving
+/// this NULL means "reject", which is how a machine whose certificate we pin
+/// and accept could still fail verification — the two stores disagreeing, with
+/// only FreeRDP's getting a vote.
+///
+/// Our pin is the authority: this defers to exactly the same comparison. The
+/// old fingerprint is deliberately ignored — what the far end presents either
+/// matches what the user pinned or it does not, and FreeRDP's cached opinion of
+/// a previous certificate adds nothing to that question.
+static DWORD zb_verify_changed_certificate(freerdp *instance, const char *host, UINT16 port,
+                                           const char *common_name, const char *subject,
+                                           const char *issuer, const char *new_fingerprint,
+                                           const char *old_subject, const char *old_issuer,
+                                           const char *old_fingerprint, DWORD flags)
+{
+    (void)host; (void)port; (void)common_name; (void)subject; (void)issuer;
+    (void)old_subject; (void)old_issuer; (void)old_fingerprint; (void)flags;
+    return zb_decide_certificate(owner_of(instance->context), new_fingerprint);
 }
 
 static BOOL zb_authenticate(freerdp *instance, char **u, char **p, char **d, rdp_auth_reason reason)
@@ -260,6 +304,9 @@ static BOOL zb_client_new(freerdp *instance, rdpContext *context)
     instance->PostConnect         = zb_post_connect;
     instance->PostDisconnect      = zb_post_disconnect;
     instance->VerifyCertificateEx = zb_verify_certificate;
+    /* Without this one, a certificate FreeRDP has cached and now sees differ
+     * is rejected outright, whatever our pin says. */
+    instance->VerifyChangedCertificateEx = zb_verify_changed_certificate;
     instance->AuthenticateEx      = zb_authenticate;
     return TRUE;
 }
@@ -327,7 +374,17 @@ static void *session_thread(void *arg)
         UINT32 code = freerdp_get_last_error(context);
         const char *name = code ? freerdp_get_last_error_name(code) : NULL;
         pthread_mutex_lock(&s->lock);
-        if (s->expected_fingerprint && s->expected_fingerprint[0] && !s->fingerprint_matched)
+        /* Only the certificate can be blamed for a certificate problem.
+         *
+         * This used to say HOST_KEY_MISMATCH whenever a fingerprint was
+         * pinned and had not matched — but a connection that never reached
+         * TLS never calls the verify callback, so `fingerprint_matched` is
+         * still 0 and an unreachable machine was reported as a changed host
+         * key. That sends you to check a pin that is fine while the box is
+         * simply switched off, asleep, or off the tailnet. `cert_checked`
+         * says whether a certificate was ever actually presented. */
+        if (s->cert_checked && s->expected_fingerprint && s->expected_fingerprint[0]
+            && !s->fingerprint_matched)
             snprintf(s->error_name, sizeof s->error_name, "HOST_KEY_MISMATCH");
         else
             snprintf(s->error_name, sizeof s->error_name, "%s", name ? name : "CONNECT_FAILED");
