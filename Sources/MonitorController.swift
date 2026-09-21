@@ -1298,7 +1298,18 @@ final class MonitorController: ObservableObject {
             .sorted(by: { $0.host.lowercased() < $1.host.lowercased() }) {
             var machine = KVMController.Machine(name: agent.host, host: agent.host,
                                                 input: agent.input, width: 3840, height: 2160)
-            if let known = kvmMachines.first(where: {
+            // A hand-pinned size is AUTHORITATIVE — the user set it precisely
+            // because discovery/learning gets it wrong. rigel is the case in
+            // point: it reports its RDP virtual display (1920x1080) rather than
+            // its real console (3840x2160), and that stale learned value, once
+            // carried over, halves the KVM pointer range at the sign-in screen.
+            // So prefer the pin; fall back to a carried-over learned size only
+            // when there is no pin.
+            if let pin = manualPins.first(where: {
+                $0.host.lowercased() == agent.host.lowercased() }), pin.width > 1 {
+                machine.width = pin.width
+                machine.height = pin.height
+            } else if let known = kvmMachines.first(where: {
                 $0.host.lowercased() == agent.host.lowercased() }), known.width > 1 {
                 machine.width = known.width
                 machine.height = known.height
@@ -1391,7 +1402,15 @@ final class MonitorController: ObservableObject {
             var chain = kvmMachines
             var unreachable: [String] = []
             for i in chain.indices {
-                if let size = RemoteAgent.desktopSize(host: chain[i].host, exePath: exe) {
+                // A hand-pinned size is authoritative — never overwrite it with a
+                // learned one. rigel reports its RDP virtual display (1920x1080)
+                // from desktopSize rather than its real console (3840x2160), and
+                // learning that halves the KVM pointer range at the sign-in screen.
+                if let pin = manualPins.first(where: {
+                    $0.host.lowercased() == chain[i].host.lowercased() }), pin.width > 1 {
+                    chain[i].width = pin.width
+                    chain[i].height = pin.height
+                } else if let size = RemoteAgent.desktopSize(host: chain[i].host, exePath: exe) {
                     chain[i].width = size.width
                     chain[i].height = size.height
                 } else if chain[i].width <= 1 {
