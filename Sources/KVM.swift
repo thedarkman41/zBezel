@@ -1523,6 +1523,13 @@ final class KVMController {
             exePath: exePath, fallback: addressForHost?(machineHost))
         Task { await SecureDesktop.wake(host: machineHost) }
         if lockedIndex == nil, let idx = machines.firstIndex(where: { $0.host == machineHost }) {
+            // Point the single-remote machinery at this machine BEFORE locking —
+            // above all its remoteSize. lockTo does not activate, and the secure
+            // desktop is often reached without a prior edge-crossing, so without
+            // this remoteSize stays at the 1920x1080 default. On a 3840x2160 panel
+            // that confines the pointer to the top-left quarter, leaving the
+            // sign-in field (below the midline) unreachable. Mirrors followManualInput.
+            if machineIndex != idx { activate(machines[idx], at: idx) }
             lockTo(machineIndex: idx, why: "locked at the sign-in screen")
             secureSetPointerLock = true
         }
