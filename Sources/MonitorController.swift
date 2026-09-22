@@ -1052,18 +1052,43 @@ final class MonitorController: ObservableObject {
 
     func startWatchingInput() {
         guard inputWatchTask == nil else { return }   // already watching
-        KVMLog.write("input watch: baseline read only — periodic 0x60 poll DISABLED (amber-blink DDC experiment)")
-        // One read to learn which input is live at startup, then NO periodic
-        // polling. The continuous 0x60 poll was the ONLY background DDC zBezel did,
-        // and the amber-blink drop recurred (2026-09-20) with nothing else in the
-        // trace — no rotation, fade, burst or write — so we eliminate it to test
-        // whether DDC reads to the panel are the trigger at all. Cost: a switch
-        // made on the monitor's OWN buttons is no longer followed (the user does
-        // not use that). Every app-driven switch still works — it knows what it
-        // commanded and never needed the poll. Revert this to restore following.
+        KVMLog.write("input watch: started (throttled 20s / 180s idle)")
+        // RESTORED after the amber-blink DDC experiment concluded: the drop
+        // recurred with zBezel doing zero DDC (poll off), so its DDC is EXONERATED
+        // and there is no reason to keep the poll off — and the KVM depends on it.
+        // Tracking 0x60 is what tells the app which input the panel shows, which
+        // drives panelShowsMac/lockedIndex; with it off, a panel returned to the
+        // Mac out-of-band (e.g. an amber-blink recovery) is never noticed, so the
+        // doorway logic thinks a PC is up and puts the crossing on the built-in's
+        // edge instead of the panel's. Adaptive cadence keeps DDC light: 20s while
+        // the user is active, 180s once idle 5 min, snapping back on activity.
         inputWatchTask = Task { @MainActor [weak self] in
-            await self?.pollInput()
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.pollInput()
+                if self.secondsSinceUserInput() < 300 {
+                    try? await Task.sleep(nanoseconds: 20 * 1_000_000_000)
+                } else {
+                    var waited = 0
+                    while waited < 180, !Task.isCancelled,
+                          self.secondsSinceUserInput() >= 300 {
+                        try? await Task.sleep(nanoseconds: 5 * 1_000_000_000)
+                        waited += 5
+                    }
+                }
+            }
         }
+    }
+
+    /// Seconds since the user last physically used the mouse or keyboard, for the
+    /// adaptive poll cadence above. Real HID activity registers here even while
+    /// the KVM event tap consumes it, so driving a remote PC keeps the fast rate.
+    private func secondsSinceUserInput() -> CFTimeInterval {
+        let types: [CGEventType] = [.mouseMoved, .leftMouseDown, .rightMouseDown,
+                                    .leftMouseDragged, .keyDown, .flagsChanged, .scrollWheel]
+        return types
+            .map { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: $0) }
+            .min() ?? .greatestFiniteMagnitude
     }
 
     func stopWatchingInput() {
