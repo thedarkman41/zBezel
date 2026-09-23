@@ -310,14 +310,16 @@ final class KVMTransport {
     ///
     /// A working host answers in a second or two; a name that does not resolve
     /// fails in about one; an unreachable one takes the ten-second connect
-    /// timeout. Waiting six seconds and then, if the far side still has not said
-    /// "ready", switching to the IP covers the "name will not resolve" case the
-    /// audit flagged without stealing a slow-but-fine host away from its name. The
-    /// IP is authoritative — it is where the packet actually came from — so once
-    /// we fall back to it there is nothing further to fall back to.
+    /// timeout. A wedged tailnet (Tailscale stuck "starting") is that unreachable
+    /// case, and it used to cost a full six seconds on every switch before the LAN
+    /// mDNS fallback — which is up the instant the box is — took over. Two seconds
+    /// is enough for a healthy name to say "ready" first while cutting the
+    /// dead-name stall to a third of what it was; past that the IP is
+    /// authoritative — it is where the packet actually came from — so once we fall
+    /// back to it there is nothing further to fall back to.
     private func scheduleFallbackWatchdog(for attemptHost: String) {
         guard let ip = lastFallback else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 6.0) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self,
                   !self.closed,                     // not deliberately shut since
                   self.lastHost == attemptHost,   // not already reconnected elsewhere
@@ -1049,8 +1051,21 @@ final class KVMController {
                 // push of the mouse. The owner's rule is that the panel never
                 // goes Rigel<->Bellatrix except by a person's explicit choice,
                 // so the chain is gone: no stepping left, no advancing right.
-                handBack()
-                return
+                //
+                // But not while the channel that would carry control is still
+                // coming up. Until it is ready nothing is being forwarded and the
+                // far desktop is black, so a drift past the edge is someone
+                // flailing for a pointer that has not landed yet — not a
+                // deliberate exit. Crossing back on it is exactly the in/out
+                // thrash seen when switching to a box at its sign-in screen while
+                // its secure channel connects (worse when a wedged tailnet slows
+                // the connect). Pin the pointer to the edge until the channel is
+                // ready; then a deliberate push comes home as before.
+                if transport.isReady {
+                    handBack()
+                    return
+                }
+                remotePoint.x = 0
             }
 
             remotePoint.x = min(remotePoint.x, remoteSize.width - 1)
@@ -1532,6 +1547,26 @@ final class KVMController {
             if machineIndex != idx { activate(machines[idx], at: idx) }
             lockTo(machineIndex: idx, why: "locked at the sign-in screen")
             secureSetPointerLock = true
+        }
+        // activate() above set remoteSize from the machine's discovery size, which
+        // for a box first reached at its sign-in screen is a default guess rather
+        // than the truth — the ordinary channel that normally reports the real size
+        // via its `cursor` reply is refused at the secure desktop, so it never
+        // corrects. The injector on the far side normalises absolute coordinates
+        // against the whole virtual desktop (SM_C*VIRTUALSCREEN), so fetch exactly
+        // that with a one-off `client cursor` over the reachable address — the
+        // .local name when the tailnet is wedged — and adopt it, keeping absolute
+        // pointer positions meaning the same thing at both ends before sign-in.
+        // Off the main thread: the query blocks on ssh.
+        let sizeAddr = addressForHost?(machineHost) ?? machineHost
+        let sizeExe = exePath
+        DispatchQueue.global().async { [weak self] in
+            guard let size = RemoteAgent.desktopSize(host: sizeAddr, exePath: sizeExe) else { return }
+            DispatchQueue.main.async {
+                guard let self, self.secureLocked.contains(machineHost) else { return }
+                self.updateRemoteSize(size)
+                KVMLog.write("secure size for \(machineHost): \(Int(size.width))x\(Int(size.height))")
+            }
         }
         KVMLog.write("\(machineHost) is locked; routing keyboard to secure-kvm")
         status = "\(nameFor(machineHost)) is locked — type your password to sign in"

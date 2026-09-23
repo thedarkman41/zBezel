@@ -2,6 +2,34 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.2 — 2026-09-23
+
+**KVM: fast .local fallback, hold pointer on bring-up, live secure size**
+
+Three fixes for controlling bellatrix at its Windows sign-in screen,
+surfaced when its Tailscale wedged and the box was only reachable over
+LAN mDNS.
+
+A. Fallback watchdog cut from 6s to 2s. A wedged tailnet (Tailscale
+   stuck "starting") made every switch stall six seconds before the
+   .local fallback took over; two seconds still lets a healthy name win
+   the race while cutting the dead-name stall to a third.
+
+B. engageSecure now fetches the live virtual-desktop size via a one-off
+   `client cursor` over the reachable address and adopts it, instead of
+   trusting the discovery default. The far injector normalises absolute
+   coordinates against SM_C*VIRTUALSCREEN, and the ordinary channel that
+   normally reports that size is refused at the secure desktop, so a box
+   first reached at its sign-in screen kept a default guess (right for
+   bellatrix only by luck).
+
+C. The left-edge cross-back is suppressed while the control channel is
+   still coming up: with nothing forwarded yet and the far desktop black,
+   a leftward drift is flailing for a pointer that has not landed, not a
+   deliberate exit. Pin it to the edge until the channel is ready; then a
+   deliberate push comes home as before. Kills the in/out input thrash
+   seen switching to a locked box.
+
 ## 0.1.58 — 2026-09-05
 
 **Persist vendor-code readings across launches with a confirmation state**
