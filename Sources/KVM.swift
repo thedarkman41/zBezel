@@ -1973,7 +1973,16 @@ final class KVMController {
     /// goes down the pipe of whichever machine is current, and the one just
     /// chosen may not be.
     func followManualInput(_ input: UInt16) {
-        if input == macInput { clearLock(); return }
+        if input == macInput {
+            clearLock()
+            // Choosing the Mac by hand does not cross the pointer back, so if it
+            // was out on a machine (side == .there) it would be left trapped
+            // forwarding to a panel no longer showing that machine. Bring it home
+            // now — instantly, rather than waiting for the poll to notice. No-op
+            // when the pointer is already home.
+            reconcilePointerHome(reason: "chose the Mac by hand")
+            return
+        }
         guard let index = machines.firstIndex(where: { $0.input == input }) else {
             clearLock()   // an input with nobody behind it: nothing to hold
             return
@@ -2137,6 +2146,40 @@ final class KVMController {
             switchPanel(to: macInput, why: "returned to the Mac")
         }
         status = "armed — the panel's right edge crosses to \(host)"
+        onChange?()
+    }
+
+    /// Undo a crossing that the panel left out from under.
+    ///
+    /// The panel's input changed OUT-OF-BAND while `side == .there` — a by-hand
+    /// monitor/menu switch, an amber-blink recovery toggle, an Auto-Switch bounce
+    /// — so no cross-back ran. The pointer is left decoupled and hidden,
+    /// forwarding to a machine no longer on screen: every click reparks it "home"
+    /// and re-crossing the edge pops the chooser over a greyed panel. That is the
+    /// recurring "tiles on the wrong edge / pointer bounces back" wedge, and it
+    /// kept coming back because the input poll reconciled panelShowsMac and the
+    /// lock but never `side`.
+    ///
+    /// The fix, called from the poll the instant it observes the panel move: bring
+    /// the pointer home. Unlike handBack this drives NO 0x60 write and runs NO
+    /// dissolve — the panel is already where the poll just read it, and the poll
+    /// has already set panelShowsMac/currentInput from that fresh reading, so this
+    /// touches neither. It only reconciles the POINTER to that reality: release any
+    /// held modifiers, dismiss a half-open chooser, re-couple and show the cursor
+    /// on the Mac, and mark `side == .here`. A no-op when already home, so the poll
+    /// may call it on every observed move without racing a legitimate crossing.
+    func reconcilePointerHome(reason: String) {
+        guard side == .there else { return }
+        for vk in KeyMap.allModifierVKs { transport.send("K \(vk) 0") }
+        choosing = false
+        pendingCrossing = nil
+        suspendCrossing = false
+        let landing = mainBounds.isEmpty ? macBounds : mainBounds
+        CGAssociateMouseAndMouseCursorPosition(1)
+        CGDisplayShowCursor(CGMainDisplayID())
+        CGWarpMouseCursorPosition(CGPoint(x: landing.midX, y: landing.midY))
+        side = .here
+        KVMLog.write("reconciled pointer home — \(reason)")
         onChange?()
     }
 

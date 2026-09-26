@@ -2,6 +2,32 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.3 — 2026-09-25
+
+**KVM: reconcile pointer side on out-of-band panel input change**
+
+Reconcile the KVM pointer's `side` when the panel moves out-of-band.
+
+The recurring "tiles on the wrong edge / pointer bounces back to the
+primary, chooser pops over a greyed panel" wedge (3rd-4th recurrence)
+came from the panel's input changing while `side == .there` without a
+cross-back running: a by-hand monitor/menu switch, an amber-blink
+recovery toggle, or an Auto-Switch bounce. The input poll reconciled
+`panelShowsMac` and the lock but never `side`, so the pointer stayed
+decoupled/hidden and kept forwarding to a machine no longer on screen.
+
+New `KVMController.reconcilePointerHome(reason:)` un-strands it: guarded
+to `side == .there` (a no-op when already home, so it can't race a
+legitimate crossing), it releases held modifiers, dismisses a half-open
+chooser, re-couples and shows the cursor on the Mac, warps to the main
+display, and marks `side == .here`. It drives NO 0x60 write and runs NO
+dissolve — the poll has already set panelShowsMac/currentInput from the
+fresh reading; this only reconciles the pointer to that reality.
+
+Called from MonitorController.pollInput on both the .release (panel
+returned to the Mac) and .lock (panel moved to another machine) paths,
+and from followManualInput when the Mac input is chosen by hand.
+
 ## 1.3.2 — 2026-09-23
 
 **KVM: fast .local fallback, hold pointer on bring-up, live secure size**

@@ -1143,6 +1143,14 @@ final class MonitorController: ObservableObject {
         case .release:
             KVMLog.write("input watch: returned to this Mac; releasing the lock")
             kvm.clearLock()
+            // The panel came back to the Mac. If it did so out-of-band while the
+            // pointer was still out on a machine (side == .there) — a by-hand
+            // switch, an amber-blink recovery toggle, an Auto-Switch bounce — no
+            // cross-back ran, so `side` was never reconciled and the pointer stays
+            // trapped forwarding to a machine no longer on screen (clicks repark
+            // it, re-crossing pops the chooser). Bring it home now. A no-op after a
+            // normal cross-back, which already set side == .here.
+            kvm.reconcilePointerHome(reason: "input watch saw the panel return to the Mac")
         case .lock(let index, let why):
             guard kvm.machines.indices.contains(index) else { break }
             let host = kvm.machines[index].host
@@ -1156,6 +1164,12 @@ final class MonitorController: ObservableObject {
                 KVMLog.write("input watch: panel on \(host) is the KVM's own crossing; not locking")
                 break
             }
+            // The panel moved to a machine we are NOT crossing to. If the pointer
+            // was left out on a DIFFERENT machine (side == .there) by an out-of-band
+            // move, un-strand it before locking to this one — otherwise it keeps
+            // forwarding to a machine no longer on screen. A no-op when home, which
+            // is the ordinary by-hand-switch case.
+            kvm.reconcilePointerHome(reason: "input watch saw the panel move to \(host)")
             if !kvm.lockTo(machineIndex: index, why: why) {
                 KVMLog.write("input watch: wanted to lock to \(host) but could not")
             }
