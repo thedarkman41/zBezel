@@ -62,8 +62,13 @@ Full master-function → raw-code table: [`hp-z27k-vcp-master-map.tsv`](hp-z27k-
 ### The internal clock & timer times — master `0xE8`, sub-addressed, value-carrying
 The panel keeps a real-time clock (Set Current Time); when it drifts, the Sleep
 Timer fires at the wrong wall-clock time (this is what caused the ~16:20 amber-blink).
-Each field is a sub-addressed *continuous* value; write is (very likely)
-`SetVCPFeature(0xE8, (subIndex << 8) | value)` — **verify empirically before trusting.**
+Each field is a sub-addressed *continuous* value. ✅ **Encoding confirmed on
+hardware 2026-09-25:** `SetVCPFeature(0xE8, (subIndex << 8) | value)`, value in
+24-hour form. Writing current-time HH `set 0 E8 276` (0x0114 = sub 0x01, value 20)
+and MM `set 0 E8 554` (0x022A = sub 0x02, value 42) set the OSD clock to 20:42, and
+it then *ticked forward in real time* — so the write both lands and re-synchronises
+the RTC. The OSD renders 24-hour; a 12-hour UI must convert to the 24-hour byte
+before writing.
 
 | Field | sub | | Field | sub |
 |-------|-----|-|-------|-----|
