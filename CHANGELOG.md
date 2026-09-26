@@ -2,6 +2,29 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.4 — 2026-09-25
+
+**Power tab: HP panel Sleep Timer, Auto-Sleep, Sleep Now and clock**
+
+Add a Power tab for the HP panel's own sleep and clock controls.
+
+New declarative HPControl model (toggle / command / continuous kinds) plus a
+Power tab (after View) with two cards:
+- Sleep & Power: Sleep Timer and Auto-Sleep toggles and a Sleep Now command,
+  driving HP vendor codes 0xE8 (1/2/3) and 0xE1 (0x0F00/0x0F01).
+- Panel Clock: a live Mac-clock readout, one-tap Sync-to-Mac, and manual
+  12-hour HH:MM + AM/PM pickers that set the panel's 24-hour clock via 0xE8
+  sub 0x01/0x02 — the (sub<<8)|value encoding confirmed on hardware 2026-09-25.
+
+These codes are write-only, so the toggles show what the app last set, matching
+the existing PiP / Auto-Switch and Monitor-Menu write-only controls. Writes use
+the proxy's write-only verb, mirroring writeSub. This is the reusable base for
+the rest of the 269-control master map: each becomes one more HPControl value.
+
+Reviewed with a 3-lens adversarial verify pass; applied its confirmed findings:
+seed the clock pickers once rather than on every tab re-entry, do not persist
+the write-only clock value, and de-count a stale nav-width comment.
+
 ## 1.3.3 — 2026-09-25
 
 **KVM: reconcile pointer side on out-of-band panel input change**

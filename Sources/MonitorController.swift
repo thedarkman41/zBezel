@@ -188,6 +188,7 @@ final class MonitorController: ObservableObject {
                                     ?? 0x0F)
         vendorMap = VendorMap.load()
         vendorReadings = MonitorController.loadVendorReadings()
+        hpState = MonitorController.loadHPState()
         pipPlacement  = defaults.object(forKey: "pipPlacement") as? Int ?? 0
         // -1 means this app has never set a size, which is not the same as
         // "small" — the panel is not asked and so is not claimed.
@@ -572,6 +573,85 @@ final class MonitorController: ObservableObject {
     func applyOSDMenu(timeout seconds: Int) async {
         osdMenuTimeout = max(5, min(60, seconds))
         await writeSub(0x3E, osdMenuTimeout)
+    }
+
+    // MARK: HP panel controls (Power tab)
+    //
+    // Directly-known HP vendor controls decompiled from HP Display Center
+    // (Reference/HP-Z27k-G3-VCP-Reference.md), as opposed to the VendorControl
+    // bindings this app discovers by differential probing. The sleep/clock codes
+    // behind 0xE8 cannot be read back at all — a plain read returns whichever sub
+    // the panel is pinned on — so the interface shows what this app last set,
+    // remembered here, the same honest compromise the Monitor Menu card makes.
+
+    @Published private(set) var hpState: [String: UInt16] = [:] {
+        didSet {
+            guard let data = try? JSONEncoder().encode(hpState) else { return }
+            UserDefaults.standard.set(data, forKey: Self.hpStateKey)
+        }
+    }
+    private static let hpStateKey = "hpState"
+    private static func loadHPState() -> [String: UInt16] {
+        guard let data = UserDefaults.standard.data(forKey: hpStateKey),
+              let decoded = try? JSONDecoder().decode([String: UInt16].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    /// Whether a two-state HP control was last set to its "on" value.
+    func isHPToggleOn(_ control: HPControl) -> Bool {
+        guard case let .toggle(_, on) = control.kind else { return false }
+        return hpState[control.id] == on
+    }
+
+    /// Set a two-state HP control and remember the value (these are write-only).
+    func applyHPToggle(_ control: HPControl, on: Bool) async {
+        guard case let .toggle(off, onValue) = control.kind else { return }
+        let raw = on ? onValue : off
+        await writeHPRaw(code: control.code, value: raw)
+        hpState[control.id] = raw
+    }
+
+    /// Fire a one-shot HP command (e.g. Sleep Now). There is nothing to remember.
+    func fireHP(_ control: HPControl) async {
+        guard case let .command(value) = control.kind else { return }
+        await writeHPRaw(code: control.code, value: value)
+    }
+
+    /// Set a continuous sub-addressed HP field (e.g. the clock hour). The write is
+    /// (sub << 8) | value, clamped to the field's range and to a byte.
+    ///
+    /// Not remembered in `hpState`: the clock ticks forward the moment it is set, so
+    /// a stored value would be stale immediately and nothing reads it back — the
+    /// pickers seed from the Mac's live time, not from here.
+    func applyHP(_ control: HPControl, value: Int) async {
+        guard case let .continuous(sub, range, _) = control.kind else { return }
+        let clamped = min(max(value, range.lowerBound), range.upperBound)
+        let raw = UInt16(Int(sub) << 8 | (clamped & 0xFF))
+        await writeHPRaw(code: control.code, value: raw)
+    }
+
+    /// Set the panel's internal clock to the Mac's current time in one step. The
+    /// clock drifting out of sync is what fired the daily self-sleep; this puts it
+    /// right again.
+    func syncPanelClockToMac() async {
+        let now = Calendar.current.dateComponents([.hour, .minute], from: Date())
+        guard let hh = now.hour, let mm = now.minute else { return }
+        await applyHP(.currentTimeHH, value: hh)
+        await applyHP(.currentTimeMM, value: mm)
+    }
+
+    /// Write an HP vendor code without reading it back — these codes are write-only,
+    /// so a read-back round trip would only re-read the volatile MCCS codes. Uses
+    /// the proxy's write-only verb, exactly as `writeSub` does. Local (non-proxy)
+    /// DDC is unlikely to reach this panel (the dock blocks it) but is handled for
+    /// completeness.
+    private func writeHPRaw(code: UInt8, value: UInt16) async {
+        guard case .proxy(_, let index, _) = transport else {
+            await set(code: code, value: value)
+            return
+        }
+        try? await agent.writeOnly(monitor: index, code: code, value: value)
     }
 
     // MARK: Pivot (rotate whichever machine's desktop is on the panel)

@@ -5,6 +5,7 @@ enum PanelTab: String, CaseIterable, Identifiable {
     case color       = "Color"
     case input       = "Input"
     case view        = "View"
+    case power       = "Power"
     case advanced    = "Advanced"
     case multiScreen = "MultiScreen"
     case link        = "Link"
@@ -29,7 +30,7 @@ struct RootView: View {
         }
         .background(Theme.canvas)
         .background(WindowPlacement())
-        // A fixed width so the seven tabs and the two-column grid always lay out
+        // A fixed width so the tab row and the two-column grid always lay out
         // the same, and a height that follows whatever the current tab needs
         // rather than being padded out to match the tallest one.
         .frame(width: 980)
@@ -148,6 +149,7 @@ struct RootView: View {
                 case .color:       ColorTab(controller: controller)
                 case .input:       InputTab(controller: controller)
                 case .view:        ViewTab(controller: controller)
+                case .power:       PowerTab(controller: controller)
                 case .advanced:    AdvancedTab(controller: controller)
                 case .multiScreen: MultiScreenTab(controller: controller)
                 case .link:        LinkTab(controller: controller)
