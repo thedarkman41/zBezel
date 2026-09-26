@@ -2,6 +2,22 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.5 — 2026-09-25
+
+**Power tab: Wake Now paired with Sleep Now (app-state, DDC can't sense sleep)**
+
+Power tab: add Wake Now, paired with Sleep Now.
+
+The panel cannot report its DPMS/backlight state over DDC — a full week of
+20s linkwatch reads stayed link=active straight through every self-sleep, and
+vsync/power-mode/backlight registers all cache last-good — so sleep cannot be
+sensed. Instead the app tracks what it commanded: Sleep Now sets panelAsleep
+and the row swaps to Wake Now, which re-asserts the current input (any 0x60
+write pulls the panel out of DPMS, the wake proven earlier this session). The
+flag clears on Wake Now or when pollInput observes any input change, so a wake
+by other means reverts the button on its own. Labeled "last commanded", not
+sensed — the same honest write-only compromise the rest of the tab makes.
+
 ## 1.3.4 — 2026-09-25
 
 **Power tab: HP panel Sleep Timer, Auto-Sleep, Sleep Now and clock**

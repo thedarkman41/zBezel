@@ -97,17 +97,33 @@ private struct SleepPowerCard: View {
 
                 Divider().overlay(Theme.rule).padding(.vertical, 2)
 
-                ControlRow(label: "Put the panel to sleep now") {
-                    Button("Sleep Now") {
-                        Task<Void, Never> { await controller.fireHP(.sleepNow) }
+                if controller.panelAsleep {
+                    ControlRow(label: "Panel is asleep — last commanded") {
+                        Button("Wake Now") {
+                            Task<Void, Never> { await controller.wakePanel() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.ok)
                     }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.accent)
+                    Text("Wakes by re-selecting the current input. If it woke another "
+                         + "way, this clears on its own when the input next changes.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ControlRow(label: "Put the panel to sleep now") {
+                        Button("Sleep Now") {
+                            Task<Void, Never> { await controller.sleepPanelNow() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                    }
+                    Text("Any input activity wakes it again.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim)
                 }
-                Text("Any input activity wakes it again.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textDim)
             } else {
                 ToggleRow(label: HPControl.sleepTimer.name,
                           isOn: .constant(false), enabled: false)

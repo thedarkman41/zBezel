@@ -618,6 +618,29 @@ final class MonitorController: ObservableObject {
         await writeHPRaw(code: control.code, value: value)
     }
 
+    /// True after this app commanded Sleep Now, until it wakes the panel or sees an
+    /// input change. The panel cannot report its DPMS state over DDC — a week of
+    /// reads stayed link=active straight through its sleep — so this is
+    /// what-we-commanded, not what-we-sensed, the same honest compromise the rest
+    /// of the tab makes.
+    @Published private(set) var panelAsleep = false
+
+    /// Put the panel to sleep now (HP Sleep Now, 0xE8 = 3) and remember we did, so
+    /// the card can offer to wake it.
+    func sleepPanelNow() async {
+        await fireHP(.sleepNow)
+        panelAsleep = true
+    }
+
+    /// Wake the panel by re-asserting the input it is on: any 0x60 write pulls it
+    /// out of the DPMS standby Sleep Now put it in. byHand:false because it is the
+    /// same input already shown, not the user hand-picking one, so it must not
+    /// re-pin the KVM.
+    func wakePanel() async {
+        await set(code: VCP.inputSelect.code, value: lastCommandedInput, byHand: false)
+        panelAsleep = false
+    }
+
     /// Set a continuous sub-addressed HP field (e.g. the clock hour). The write is
     /// (sub << 8) | value, clamped to the field's range and to a byte.
     ///
@@ -1218,6 +1241,11 @@ final class MonitorController: ObservableObject {
         haveSettledInput = true
 
         guard let action = reading.action else { return }
+
+        // A settled input CHANGE means the panel is being driven again, so drop any
+        // stale "asleep" left by Sleep Now. A spontaneous wake with no input change
+        // cannot be seen here (DDC never reports the sleep), so this is best-effort.
+        panelAsleep = false
 
         switch action {
         case .release:
