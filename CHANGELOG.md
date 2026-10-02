@@ -2,6 +2,17 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.9 — 2026-10-02
+
+**UI: hold-to-open/release-to-close display pull-down**
+
+UI: the display pull-down opens on press and closes on release.
+
+SwiftUI's Menu latches open on a click and stays until you click again or click
+away. Replace the display picker with a small HeldMenu that pops a native NSMenu
+from mouseDown, so it behaves like a toolbar pull-down: hold to show, drag onto
+a display and release to pick it, release anywhere else to dismiss.
+
 ## 1.3.8 — 2026-10-02
 
 **UI: balance Display tab into two even columns (less blank space)**

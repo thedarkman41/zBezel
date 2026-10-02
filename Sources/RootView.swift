@@ -22,6 +22,23 @@ struct RootView: View {
         nonmutating set { storedTab = newValue.rawValue }
     }
 
+    /// The external displays, plus a disabled line for a proxy-only target —
+    /// what the display pull-down lists.
+    private var displayMenuItems: [HeldMenuItem] {
+        var items = controller.displays.filter { !$0.isBuiltIn }.map { display in
+            HeldMenuItem(title: display.name) {
+                controller.selectedID = display.id
+                Task<Void, Never> { await controller.probe() }
+            }
+        }
+        if !controller.hasLocalDisplay, let remote = controller.remoteTarget {
+            items.append(HeldMenuItem(
+                title: "\(remote.description) — reached through \(controller.proxyHost)",
+                isEnabled: false) {})
+        }
+        return items
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             navigationBar
@@ -55,19 +72,7 @@ struct RootView: View {
 
     private var navigationBar: some View {
         HStack(spacing: 0) {
-            Menu {
-                ForEach(controller.displays.filter { !$0.isBuiltIn }) { display in
-                    Button {
-                        controller.selectedID = display.id
-                        Task<Void, Never> { await controller.probe() }
-                    } label: {
-                        Text(display.name)
-                    }
-                }
-                if !controller.hasLocalDisplay, let remote = controller.remoteTarget {
-                    Text("\(remote.description) — reached through \(controller.proxyHost)")
-                }
-            } label: {
+            HeldMenu(items: displayMenuItems) {
                 HStack(spacing: 9) {
                     Image(systemName: "display")
                         .font(.system(size: 17))
@@ -80,8 +85,6 @@ struct RootView: View {
                         .foregroundStyle(Theme.textSecond)
                 }
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
             .fixedSize()
             .padding(.leading, 22)
 
