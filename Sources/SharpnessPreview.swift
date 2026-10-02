@@ -10,7 +10,7 @@ import SwiftUI
 ///
 /// It is a SIMULATION, drawn by the Mac. The panel's own scaler is what actually
 /// changes, and nothing reports the shape of its filter, so this shows the
-/// character of the setting rather than a prediction of the output. Labelled as
+/// character of the setting rather than a prediction of the output. Labeled as
 /// such, because a preview that quietly implies measurement would be worse than
 /// no preview.
 struct SharpnessPreview: View {

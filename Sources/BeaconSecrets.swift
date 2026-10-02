@@ -37,7 +37,7 @@ enum BeaconSecrets {
             case .locked:      return "Beacon is locked — unlock it to release the credential."
             case .timeout:     return "Waited for Beacon to be unlocked and it was not."
             case .notFound:    return "No secret enrolled under that name. Enroll it with Beacon's store-secret.sh."
-            case .denied:      return "Beacon does not recognise this build as the secret's owner. Is the app signed with its stable identifier?"
+            case .denied:      return "Beacon does not recognize this build as the secret's owner. Is the app signed with its stable identifier?"
             case .unavailable: return "Beacon is not running."
             case .other(let s): return s
             }

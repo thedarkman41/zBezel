@@ -75,7 +75,7 @@ private struct SleepPowerCard: View {
 
     var body: some View {
         Card(title: "Sleep & Power", systemImage: "powersleep",
-             help: "The panel's own sleep behaviour, held in the monitor rather than "
+             help: "The panel's own sleep behavior, held in the monitor rather than "
                  + "in macOS. These are HP manufacturer codes (0xE8 / 0xE1); the panel "
                  + "does not report them back, so each row shows what this app last set "
                  + "it to.") {

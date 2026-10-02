@@ -100,7 +100,7 @@ struct PiPPlacementPicker: View {
 /// rather than letting anything infer an ordering from the number.
 ///
 /// Mapped wrongly twice before anyone looked at the monitor's own menu, and every
-/// wrong answer came from inferring meaning out of behaviour: 2 looked like
+/// wrong answer came from inferring meaning out of behavior: 2 looked like
 /// "maximum" and 3 like "minimum" only because each happened to be bigger or
 /// smaller than wherever the panel sat at that moment, and 4 was called "medium"
 /// when it is the DEFAULT. A photograph of the OSD settled in a minute what hours
@@ -139,10 +139,10 @@ enum PiPSize: Int, CaseIterable, Identifiable {
 
     /// How strongly this box is tinted.
     ///
-    /// Distinct per size rather than one colour at one opacity. The boxes are
+    /// Distinct per size rather than one color at one opacity. The boxes are
     /// concentric, so each is seen as a ring around the next, and giving each its
     /// own shade makes the three read as three at a glance — deepest at the
-    /// centre, where the smallest sits.
+    /// center, where the smallest sits.
     var shade: Double {
         switch self {
         case .minimum:  return 0.78
@@ -183,10 +183,10 @@ struct PiPSizePicker: View {
     var enabled: Bool
     var busy: Bool = false
     var onPick: (PiPSize) -> Void
-    /// The knob is off centre: step in this direction, at this intensity.
+    /// The knob is off center: step in this direction, at this intensity.
     /// True grows. Intensity runs 0 at the dead zone to 1 at full deflection.
     var onJogBegin: (Bool, Double) -> Void
-    /// The knob was released or came back to centre: stop.
+    /// The knob was released or came back to center: stop.
     var onJogEnd: () -> Void
 
     var body: some View {
@@ -228,7 +228,7 @@ struct PiPSizePicker: View {
     }
 }
 
-/// A spring-loaded jog knob: hold it off centre to keep stepping, let go and it
+/// A spring-loaded jog knob: hold it off center to keep stepping, let go and it
 /// returns.
 ///
 /// Not a value slider. Its position means a RATE, not a size — which suits a
@@ -238,15 +238,15 @@ struct PiPSizePicker: View {
 private struct JogSlider: View {
     var enabled: Bool
     /// Direction and how hard, reported on every movement so the rate can follow
-    /// the knob rather than only its side of centre.
+    /// the knob rather than only its side of center.
     var onJog: (Bool, Double) -> Void
     var onEnd: () -> Void
 
     @State private var offset: CGFloat = 0
-    /// nil when centred; otherwise the direction currently being stepped.
+    /// nil when centered; otherwise the direction currently being stepped.
     @State private var direction: Bool?
 
-    /// How far from centre before it counts as a direction. Without it, the
+    /// How far from center before it counts as a direction. Without it, the
     /// tiniest tremor at rest would start and stop the write loop repeatedly.
     private let deadZone: CGFloat = 6
     private let knob: CGFloat = 22
@@ -296,7 +296,7 @@ private struct JogSlider: View {
             .font(.system(size: 9, weight: .semibold))
             .foregroundStyle(Theme.textDim)
             .padding(.horizontal, 7)
-            // Centre detent, so the resting position is visibly a position.
+            // Center detent, so the resting position is visibly a position.
             Rectangle()
                 .fill(Theme.textDim.opacity(0.5))
                 .frame(width: 1, height: 7)
@@ -327,7 +327,7 @@ private struct JogSlider: View {
     ///
     /// Reported on EVERY change, not only on crossing the dead zone, because the
     /// rate follows how far the knob is pushed and not merely which side of
-    /// centre it is on.
+    /// center it is on.
     private func update(travel: CGFloat) {
         let now: Bool? = offset > deadZone ? true : (offset < -deadZone ? false : nil)
         if now != direction {

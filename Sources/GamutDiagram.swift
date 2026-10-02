@@ -2,21 +2,21 @@ import SwiftUI
 import CoreGraphics
 
 /// A CIE 1931 xy chromaticity diagram in the standard form: the visible spectrum
-/// filled with its own colours (the "tongue"), the active colour space drawn over
+/// filled with its own colors (the "tongue"), the active color space drawn over
 /// it as a white triangle, and its white point marked.
 ///
 /// The tongue is a fixed image (it does not depend on the panel), built once on a
-/// background task and cached. The triangle is the colour space in force — the
+/// background task and cached. The triangle is the color space in force — the
 /// panel's native gamut, or the standard space a calibrated mode emulates — with
 /// the native gamut left as a faint dashed outline behind it when they differ.
 /// The white point is draggable: its CIE position maps back to RGB gains, so
 /// moving it re-balances the panel live (see `onWhite`).
 struct GamutDiagram: View {
-    /// The triangle drawn boldly — the colour space currently in force.
-    let gamut: EDID.ColourPrimaries
+    /// The triangle drawn boldly — the color space currently in force.
+    let gamut: EDID.ColorPrimaries
     /// The panel's native gamut, drawn as a faint dashed outline behind `gamut`
     /// when a calibrated mode has narrowed the active space. nil to omit it.
-    var nativeOutline: EDID.ColourPrimaries? = nil
+    var nativeOutline: EDID.ColorPrimaries? = nil
     /// The white point dot. Two-way so a drag can move it; the parent decides what
     /// it means (write gains, remember an override).
     @Binding var white: EDID.Chromaticity?
@@ -75,7 +75,7 @@ struct GamutDiagram: View {
                        style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
-        // The active colour space, a clean white triangle over the tongue.
+        // The active color space, a clean white triangle over the tongue.
         var tri = Path()
         tri.move(to: pt(gamut.red.x, gamut.red.y))
         tri.addLine(to: pt(gamut.green.x, gamut.green.y))
@@ -142,7 +142,7 @@ struct GamutDiagram: View {
 
     // MARK: Tongue rendering
 
-    /// The coloured tongue, built off the main thread and memoised so the Color
+    /// The colored tongue, built off the main thread and memoised so the Color
     /// tab never stalls on it. Returns immediately once cached.
     static func tongueImage() async -> CGImage? {
         await Task.detached(priority: .userInitiated) {
@@ -151,8 +151,8 @@ struct GamutDiagram: View {
     }
 
     /// Fill every pixel whose chromaticity lies inside the spectral locus with the
-    /// colour of that chromaticity: xy → XYZ (Y = 1) → linear sRGB, negatives
-    /// clamped and normalised to full brightness, then sRGB gamma. The edge is
+    /// color of that chromaticity: xy → XYZ (Y = 1) → linear sRGB, negatives
+    /// clamped and normalized to full brightness, then sRGB gamma. The edge is
     /// anti-aliased by 2×2 coverage sampling so it reads soft, not stair-stepped;
     /// outside the locus stays transparent.
     static func renderTongue(width: Int, height: Int) -> CGImage? {
@@ -177,7 +177,7 @@ struct GamutDiagram: View {
                 guard cov > 0 else { continue }
                 let alpha = Double(cov) / 4.0
 
-                // Colour at the pixel centre.
+                // Color at the pixel center.
                 let x = (Double(px) + 0.5) / Double(width) * xMax
                 let y = (Double(height) - (Double(py) + 0.5)) / Double(height) * yMax
                 guard y > 0 else { continue }
@@ -190,7 +190,7 @@ struct GamutDiagram: View {
                 guard m > 0 else { continue }
                 r /= m; g /= m; b /= m
 
-                // premultipliedLast: store colour scaled by coverage.
+                // premultipliedLast: store color scaled by coverage.
                 let i = py * bytesPerRow + px * 4
                 data[i + 0] = UInt8(max(0, min(255, gammaEncode(r) * 255 * alpha)))
                 data[i + 1] = UInt8(max(0, min(255, gammaEncode(g) * 255 * alpha)))

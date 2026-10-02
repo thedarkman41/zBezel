@@ -723,7 +723,7 @@ final class AgentInstaller: ObservableObject {
 
     /// Turns Smart App Control off.
     ///
-    /// This is a ONE-WAY DOOR. Microsoft's documented behaviour is that Smart
+    /// This is a ONE-WAY DOOR. Microsoft's documented behavior is that Smart
     /// App Control cannot be re-enabled once disabled without reinstalling
     /// Windows. Nothing here can put it back, so it is opt-in, defaulted off,
     /// and confirmed separately in the UI.

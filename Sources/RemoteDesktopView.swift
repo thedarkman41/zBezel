@@ -227,12 +227,12 @@ struct WakeConsoleCard: View {
         }
     }
 
-    private func label(_ text: String, _ symbol: String, _ colour: Color) -> some View {
+    private func label(_ text: String, _ symbol: String, _ color: Color) -> some View {
         HStack(spacing: 6) {
             Image(systemName: symbol).font(.system(size: 11))
             Text(text).font(.system(size: 11.5))
         }
-        .foregroundStyle(colour)
+        .foregroundStyle(color)
     }
 
     private func wake() async {

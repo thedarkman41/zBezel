@@ -92,7 +92,7 @@ final class MonitorController: ObservableObject {
     }
     @Published private(set) var capabilities: Capabilities?
     @Published private(set) var features: [UInt8: FeatureState] = [:]
-    /// True while a colour mode change is applying and its per-mode gains and
+    /// True while a color mode change is applying and its per-mode gains and
     /// black levels are being re-read — the sliders dim so the outgoing numbers
     /// do not read as current before the new ones land.
     @Published private(set) var refreshingColor = false
@@ -100,7 +100,7 @@ final class MonitorController: ObservableObject {
     /// The white-balance reference for the draggable white point: the RGB gains
     /// and the white they are taken to produce (the panel's native white). Set
     /// lazily from the current gains the first time the white point is dragged,
-    /// and cleared when a colour mode change moves the gains out from under it.
+    /// and cleared when a color mode change moves the gains out from under it.
     private var whiteBalanceReference: (gains: (Double, Double, Double), white: (Double, Double))?
 
     @Published private(set) var modeGroups: [(resolution: String, modes: [DisplayMode])] = []
@@ -897,7 +897,7 @@ final class MonitorController: ObservableObject {
         // display list is used only to choose the portal display.
         //
         // Without a control channel there is no reading to prefer, and the
-        // display list is all there is — so the old behaviour stands in.
+        // display list is all there is — so the old behavior stands in.
         if !haveSettledInput {
             kvm.panelShowsMac = present
             kvm.currentInput = present ? kvm.macInput : lastCommandedInput
@@ -940,7 +940,7 @@ final class MonitorController: ObservableObject {
             // The pick comes back as an INDEX and is applied to kvm.machines, so
             // the tiles must be built from that same array. kvmMachines is the
             // editable copy, made equal to it only when the KVM is armed; feed
-            // the chooser from that and a tile labelled Rigel can pick Bellatrix.
+            // the chooser from that and a tile labeled Rigel can pick Bellatrix.
             self.machineChooser.show(on: self.selectedID,
                                      machines: self.kvm.machines,
                                      near: exit,
@@ -1037,8 +1037,8 @@ final class MonitorController: ObservableObject {
             // 2. Carry the pointer across and command the input switch. handOver
             //    reopens the machine's channel if need be, so the arm below lands.
             //    deferCenterPark leaves the cursor where it is rather than jumping
-            //    it to the panel centre — the panel is still the Mac's black
-            //    curtain, where a centred cursor would show on the black.
+            //    it to the panel center — the panel is still the Mac's black
+            //    curtain, where a centered cursor would show on the black.
             kvm.deferCenterPark = true
             kvm.commitChoice()
             syncKVMState()
@@ -1056,7 +1056,7 @@ final class MonitorController: ObservableObject {
             // 4. Give the panel time to light the machine's input (per input —
             //    HDMI lights later), so the reveal lands on a lit panel.
             try? await Task.sleep(nanoseconds: Self.revealWait(forInput: arrivingInput))
-            // 5. The panel is on the machine now, so the centre is behind it and
+            // 5. The panel is on the machine now, so the center is behind it and
             //    safe to hide the cursor in. Then fade the machine in on its own
             //    side, and take the Mac's curtain down — invisible behind the
             //    machine's input.
@@ -1708,7 +1708,7 @@ final class MonitorController: ObservableObject {
     /// rotation happens to offer them, so a launch that does not catch one used
     /// to leave its radio group with nothing selected — a control that reads as
     /// "off, and also not on". A remembered value is a truthful answer to "what
-    /// did this last read as", and is labelled as remembered until the panel
+    /// did this last read as", and is labeled as remembered until the panel
     /// confirms it.
     @Published private(set) var vendorReadings: [String: VendorReading] = [:] {
         didSet { saveVendorReadings() }
@@ -2897,10 +2897,10 @@ final class MonitorController: ObservableObject {
         }
     }
 
-    /// Change the colour mode (0xDC) and pull the settings that follow from it.
+    /// Change the color mode (0xDC) and pull the settings that follow from it.
     ///
     /// The panel recomputes its per-mode RGB gains (0x16/0x18/0x1A) and black
-    /// levels (0x6C/0x6E/0x70) — and its colour preset mirror (0x14) — but the
+    /// levels (0x6C/0x6E/0x70) — and its color preset mirror (0x14) — but the
     /// mode write does not read them back, so the sliders kept showing the
     /// previous mode's numbers. This writes the mode, gives the panel a beat to
     /// apply it, then re-reads those so the sliders follow. `refreshingColor` is
@@ -2924,7 +2924,7 @@ final class MonitorController: ObservableObject {
 
     /// Capture the white-balance reference: the current RGB gains and the white
     /// they are taken to produce. Trusted only in Native mode, where the gains act
-    /// on the panel's own primaries rather than through a colour-space LUT. Once
+    /// on the panel's own primaries rather than through a color-space LUT. Once
     /// taken it is a fixed physical fact, so it is captured once and kept.
     func captureWhiteReference(nativeWhite: EDID.Chromaticity) {
         guard whiteBalanceReference == nil else { return }
@@ -2945,7 +2945,7 @@ final class MonitorController: ObservableObject {
     /// EDID's own: solve the primary scalings for the reference and target whites
     /// and rescale each gain by the ratio, holding the peak channel to preserve
     /// level. `commit` writes on release; otherwise the gains stream live.
-    func setWhitePoint(x: Double, y: Double, primaries: EDID.ColourPrimaries,
+    func setWhitePoint(x: Double, y: Double, primaries: EDID.ColorPrimaries,
                        nativeWhite: EDID.Chromaticity, commit: Bool) {
         captureWhiteReference(nativeWhite: nativeWhite)
         guard let inv = Self.invert3x3(Self.primaryMatrix(primaries)) else { return }
@@ -2991,7 +2991,7 @@ final class MonitorController: ObservableObject {
     /// The white the current RGB gains produce on the panel's native primaries —
     /// for placing the dot after a mode change. nil until a native reference has
     /// been captured (the caller then falls back to the declared white).
-    func whitePointForCurrentGains(primaries: EDID.ColourPrimaries) -> EDID.Chromaticity? {
+    func whitePointForCurrentGains(primaries: EDID.ColorPrimaries) -> EDID.Chromaticity? {
         guard let ref = whiteBalanceReference,
               ref.gains.0 > 0, ref.gains.1 > 0, ref.gains.2 > 0,
               let inv = Self.invert3x3(Self.primaryMatrix(primaries)) else { return nil }
@@ -3006,7 +3006,7 @@ final class MonitorController: ObservableObject {
         return EDID.Chromaticity(x: xyz.0 / sum, y: xyz.1 / sum)
     }
 
-    private static func primaryMatrix(_ p: EDID.ColourPrimaries) -> [[Double]] {
+    private static func primaryMatrix(_ p: EDID.ColorPrimaries) -> [[Double]] {
         func col(_ c: EDID.Chromaticity) -> (Double, Double, Double) {
             c.y > 0 ? (c.x / c.y, 1, (1 - c.x - c.y) / c.y) : (0, 0, 0)
         }

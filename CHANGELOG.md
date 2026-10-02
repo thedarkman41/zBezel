@@ -2,6 +2,22 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.7 — 2026-10-02
+
+**UI: live Connection value + American spellings throughout**
+
+UI: live Connection value, and American spellings throughout.
+
+- The Panel card's "Connection" showed the EDID digital interface — how the Mac
+  reaches the panel (DisplayPort via the dock), which never changes. Bind it to
+  the live input (controller.currentInputName) so it tracks what the panel is
+  actually showing (HDMI, USB-C, DisplayPort), falling back to the EDID value
+  only when no input has been read.
+- Convert British spellings to American across the UI and sources (colour→color,
+  grey→gray, behaviour→behavior, recognise→recognize, centre→center, labelled→
+  labeled, etc.). Mechanical; no behaviour change. "cancelled" is left as-is
+  where it is Swift's Task.isCancelled API, which requires that spelling.
+
 ## 1.3.6 — 2026-10-01
 
 **KVM: set panelShowsMac=true when the Mac is chosen by hand (fixes stuck crossing)**

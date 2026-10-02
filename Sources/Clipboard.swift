@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// Clipboard synchronisation between this Mac and the PC.
+/// Clipboard synchronization between this Mac and the PC.
 ///
 /// Copy on one machine, paste on the other. Plain text, rich text, HTML and
 /// images; anything else is left alone.

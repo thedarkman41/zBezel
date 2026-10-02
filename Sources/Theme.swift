@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Visual language modelled on HP Display Center: near-black canvas, flat cards
+/// Visual language modeled on HP Display Center: near-black canvas, flat cards
 /// with a hairline rule under each title, and a single blue accent.
 enum Theme {
     static let canvas       = Color(red: 0.078, green: 0.078, blue: 0.086)
@@ -186,7 +186,7 @@ struct StyledPicker<T: Hashable>: View {
     @Binding var selection: T
     var enabled: Bool = true
     var width: CGFloat? = nil
-    /// Centre the label and its chevron in the box rather than pinning the
+    /// Center the label and its chevron in the box rather than pinning the
     /// label left and the chevron hard right. Used where a column of these
     /// should read as a tidy stack rather than as full-width fields.
     var centered: Bool = false
@@ -233,7 +233,7 @@ struct SliderRow: View {
     /// Fires true when a drag starts and false when it ends.
     var onEditingChanged: (Bool) -> Void = { _ in }
     var onCommit: () -> Void = {}
-    /// The filled part of the track. Channel sliders use their own colour, so a
+    /// The filled part of the track. Channel sliders use their own color, so a
     /// row of three reads as red, green and blue at a glance rather than as three
     /// identical blue bars with words above them.
     var tint: Color = Theme.accent
@@ -374,9 +374,9 @@ struct HoverDim: ViewModifier {
     }
 }
 
-/// A switch that keeps its colour when the window is not the active one.
+/// A switch that keeps its color when the window is not the active one.
 ///
-/// The stock macOS switch draws itself grey whenever its window is inactive,
+/// The stock macOS switch draws itself gray whenever its window is inactive,
 /// and a menu bar popover is inactive most of the time — so the one control
 /// whose state matters at a glance was the one control refusing to show it.
 /// Reading "is the PC holding my keyboard right now" should not depend on which

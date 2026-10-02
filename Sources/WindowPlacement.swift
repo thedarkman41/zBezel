@@ -28,8 +28,8 @@ struct WindowPlacement: NSViewRepresentable {
 
     static func isOnPrimary(_ window: NSWindow) -> Bool {
         guard let primary = primaryScreen else { return true }
-        let centre = CGPoint(x: window.frame.midX, y: window.frame.midY)
-        return primary.frame.contains(centre)
+        let center = CGPoint(x: window.frame.midX, y: window.frame.midY)
+        return primary.frame.contains(center)
     }
 
     static func moveToPrimaryIfElsewhere(_ window: NSWindow) {

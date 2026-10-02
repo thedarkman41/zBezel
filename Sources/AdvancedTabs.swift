@@ -44,7 +44,7 @@ struct AdvancedTab: View {
                 Spacer(minLength: 0)
                 ResetButton(title: "Restore factory defaults", code: 0x04, controller: controller)
                 ResetButton(title: "Restore brightness & contrast", code: 0x05, controller: controller)
-                ResetButton(title: "Restore factory colour", code: 0x08, controller: controller)
+                ResetButton(title: "Restore factory color", code: 0x08, controller: controller)
             }
             .padding(.horizontal, 2)
         }
@@ -437,7 +437,7 @@ struct LinkTab: View {
                      detail: "proves the I2C path itself works")
             // Green when control genuinely works, wherever it works FROM. These
             // rows used to report only this Mac's own path, so a monitor being
-            // driven perfectly well through the proxy showed two grey dashes and
+            // driven perfectly well through the proxy showed two gray dashes and
             // read as a fault.
             let controlWorks = proxyHost != nil || report.monitorSideAvailable
             CheckRow("DDC/CI address acknowledged",

@@ -15,7 +15,7 @@ final class ChooserState: ObservableObject {
 /// It appears where the question arose — over the panel, at the moment the
 /// pointer reaches its edge — because that is where the user is looking. A
 /// menu-bar list would make them travel back across the screen to answer a
-/// question about travelling forward.
+/// question about traveling forward.
 ///
 /// A non-activating panel, so answering it does not pull focus away from
 /// whatever they were doing; the click lands on a tile and the pointer carries
@@ -129,7 +129,7 @@ private struct MachineChooserView: View {
             GeometryReader { geo in
                 let stackHeight = CGFloat(machines.count) * tileHeight
                     + CGFloat(max(machines.count - 1, 0)) * spacing
-                // Centred on where the pointer left, then pushed back inside the
+                // Centered on where the pointer left, then pushed back inside the
                 // screen if that would hang it off the top or bottom. The point
                 // is to appear under the hand, not to be geometrically pure.
                 let wanted = exitFromTop

@@ -5,7 +5,7 @@ import ScreenCaptureKit
 /// A still of one of this Mac's displays.
 ///
 /// Used to fill the left half of the side-by-side diagram, so it shows the two
-/// machines rather than two coloured rectangles.
+/// machines rather than two colored rectangles.
 ///
 /// ScreenCaptureKit rather than CGDisplayCreateImage: the older call is
 /// deprecated on macOS 14, and a deprecation is a build warning, and the ship

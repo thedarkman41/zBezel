@@ -29,12 +29,12 @@ enum VCP {
     static let restoreFactoryLuminance = VCPFeature(
         code: 0x05, name: "Restore Brightness & Contrast", kind: .nonContinuous)
     static let restoreFactoryColor = VCPFeature(
-        code: 0x08, name: "Restore Factory Colour", kind: .nonContinuous)
+        code: 0x08, name: "Restore Factory Color", kind: .nonContinuous)
 
     static let colorTemperatureIncrement = VCPFeature(
-        code: 0x0B, name: "Colour Temperature Increment", kind: .continuous)
+        code: 0x0B, name: "Color Temperature Increment", kind: .continuous)
     static let colorTemperatureRequest = VCPFeature(
-        code: 0x0C, name: "Colour Temperature Request", kind: .continuous)
+        code: 0x0C, name: "Color Temperature Request", kind: .continuous)
 
     static let luminance = VCPFeature(
         code: 0x10, name: "Brightness", kind: .continuous,
@@ -43,14 +43,14 @@ enum VCP {
         code: 0x12, name: "Contrast", kind: .continuous)
 
     static let selectColorPreset = VCPFeature(
-        code: 0x14, name: "Colour Preset", kind: .nonContinuous,
+        code: 0x14, name: "Color Preset", kind: .nonContinuous,
         values: [
             0x01: "sRGB", 0x02: "Native", 0x03: "4000 K", 0x04: "5000 K",
             0x05: "6500 K", 0x06: "7500 K", 0x07: "8200 K", 0x08: "9300 K",
             0x09: "10000 K", 0x0A: "11500 K",
             0x0B: "User 1", 0x0C: "User 2", 0x0D: "User 3",
         ],
-        blurb: "Colour temperature / gamut preset.")
+        blurb: "Color temperature / gamut preset.")
 
     static let videoGainRed = VCPFeature(code: 0x16, name: "Red Gain", kind: .continuous)
     static let videoGainGreen = VCPFeature(code: 0x18, name: "Green Gain", kind: .continuous)
@@ -112,12 +112,12 @@ enum VCP {
         // at native resolution nothing distinguishes them on screen.
         values: [0x01: "Pixel-for-Pixel", 0x02: "Fill to Screen",
                  0x05: "Fill to Screen (stretched)"],
-        blurb: "Image Scaling. The monitor greys this out while the source is at "
+        blurb: "Image Scaling. The monitor grays this out while the source is at "
              + "the panel's native resolution — there is nothing to scale — so a "
              + "change here stores and reads back but may do nothing visible.")
 
-    static let greyScaleExpansion = VCPFeature(
-        code: 0x2E, name: "Grey Scale Expansion", kind: .nonContinuous,
+    static let grayScaleExpansion = VCPFeature(
+        code: 0x2E, name: "Gray Scale Expansion", kind: .nonContinuous,
         values: [0x00: "0", 0x01: "1", 0x02: "2", 0x03: "3"],
         blurb: "Declared, writable, reads back — and controls nothing observable. "
              + "All four values were set while watching Brightness+ and Image: no "
@@ -149,23 +149,23 @@ enum VCP {
                  0x21: "Slovak", 0x22: "Slovenian", 0x23: "Thai", 0x24: "Ukrainian",
                  0x25: "Vietnamese"])
 
-    /// The nine colour presets on HP's Colour menu, named as that menu names them.
+    /// The nine color presets on HP's Color menu, named as that menu names them.
     ///
     /// MCCS calls 0xDC "display application" and defines it as picture modes —
     /// Standard, Productivity, Movie and so on. None of that applies here: on the
-    /// Z27k G3 this code IS the Colour menu, and its values are nowhere near the
+    /// Z27k G3 this code IS the Color menu, and its values are nowhere near the
     /// standard ones.
     ///
     /// Six were identified without touching the monitor, by writing a value and
     /// reading 0x14 back: that code mirrors the preset and answers with standard
-    /// MCCS names, so Native, sRGB and the three colour temperatures named
+    /// MCCS names, so Native, sRGB and the three color temperatures named
     /// themselves. The remaining three were read off the OSD.
     static let displayApplication = VCPFeature(
-        code: 0xDC, name: "Colour Preset", kind: .nonContinuous,
+        code: 0xDC, name: "Color Preset", kind: .nonContinuous,
         values: [0x00: "Native",       0x01: "sRGB (D65)",   0x02: "BT.709 (D65)",
                  0x13: "Warm",         0x15: "Neutral",      0x14: "Cool",
                  0x1D: "HP Enhance+",  0x21: "P3 (D65)",     0x2B: "Color Match"],
-        blurb: "The nine presets on the monitor's own Colour menu.")
+        blurb: "The nine presets on the monitor's own Color menu.")
 
     static let vcpVersion = VCPFeature(code: 0xDF, name: "MCCS Version", kind: .continuous)
 
@@ -191,7 +191,7 @@ enum VCP {
         0x04,   // restore factory defaults
         0x05,   // restore factory luminance and contrast
         0x06,   // restore factory geometry
-        0x08,   // restore factory colour
+        0x08,   // restore factory color
         0x0A,   // restore factory TV defaults
     ]
 
@@ -206,7 +206,7 @@ enum VCP {
             videoBlackLevelRed, videoBlackLevelGreen, videoBlackLevelBlue,
             sharpness, audioMute, horizontalFrequency, verticalFrequency,
             subPixelLayout, displayTechnology, displayUsageTime,
-            displayScaling, greyScaleExpansion,
+            displayScaling, grayScaleExpansion,
             applicationEnableKey, controllerType, firmwareLevel,
             osdControl, osdLanguage, displayApplication, vcpVersion, powerMode,
         ]

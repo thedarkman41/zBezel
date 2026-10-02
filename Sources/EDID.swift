@@ -72,7 +72,7 @@ struct EDID {
     }
     var gamma: Double? { raw[23] == 0xFF ? nil : (Double(raw[23]) + 100) / 100 }
 
-    // MARK: Colour (chromaticity block, bytes 25–34)
+    // MARK: Color (chromaticity block, bytes 25–34)
 
     /// A CIE 1931 (x, y) chromaticity point at the EDID's 10-bit precision.
     struct Chromaticity: Equatable {
@@ -81,22 +81,22 @@ struct EDID {
         var label: String { String(format: "%.4f, %.4f", x, y) }
     }
 
-    /// The panel's own colour primaries and white point, decoded from the EDID
+    /// The panel's own color primaries and white point, decoded from the EDID
     /// chromaticity block. Each coordinate is 10 bits: the high 8 in its own byte
     /// (27–34), the low 2 packed two-per-coordinate into bytes 25 and 26.
-    struct ColourPrimaries: Equatable {
+    struct ColorPrimaries: Equatable {
         var red: Chromaticity
         var green: Chromaticity
         var blue: Chromaticity
         var white: Chromaticity
     }
 
-    var colourPrimaries: ColourPrimaries {
+    var colorPrimaries: ColorPrimaries {
         func coord(_ hi: Int, _ lowByte: Int, _ shift: Int) -> Double {
             let v = (Int(raw[hi]) << 2) | ((Int(raw[lowByte]) >> shift) & 0x3)
             return Double(v) / 1024.0
         }
-        return ColourPrimaries(
+        return ColorPrimaries(
             red:   Chromaticity(x: coord(27, 25, 6), y: coord(28, 25, 4)),
             green: Chromaticity(x: coord(29, 25, 2), y: coord(30, 25, 0)),
             blue:  Chromaticity(x: coord(31, 26, 6), y: coord(32, 26, 4)),
@@ -106,11 +106,11 @@ struct EDID {
     /// The panel's native white point (CIE 1931 x, y). nil if the block is blank
     /// (an EDID that declined to declare one — all zeros).
     var nativeWhitePoint: Chromaticity? {
-        let w = colourPrimaries.white
+        let w = colorPrimaries.white
         return (w.x == 0 && w.y == 0) ? nil : w
     }
 
-    /// Correlated colour temperature of the native white point, via McCamy's
+    /// Correlated color temperature of the native white point, via McCamy's
     /// approximation, rounded to 50 K. nil when the point is far enough off the
     /// Planckian locus that the number would be meaningless.
     var whitePointCCT: Int? {
@@ -119,14 +119,14 @@ struct EDID {
     }
 
     /// The standard illuminant the native white point sits closest to, if within
-    /// a small tolerance — the name a person recognises (D65, D50, DCI, …).
+    /// a small tolerance — the name a person recognizes (D65, D50, DCI, …).
     var whitePointIlluminant: String? {
         guard let w = nativeWhitePoint else { return nil }
         return Self.illuminant(x: w.x, y: w.y)
     }
 
-    /// Correlated colour temperature of any CIE (x, y) via McCamy's approximation,
-    /// rounded to 50 K — for the *active* white, which can be a colour space's
+    /// Correlated color temperature of any CIE (x, y) via McCamy's approximation,
+    /// rounded to 50 K — for the *active* white, which can be a color space's
     /// target or a dragged custom balance, not only the panel's declared white.
     static func cct(x: Double, y: Double) -> Int? {
         guard y != 0.1858 else { return nil }
@@ -146,9 +146,9 @@ struct EDID {
         return standards.first { abs(x - $0.1) < 0.005 && abs(y - $0.2) < 0.005 }?.0
     }
 
-    // MARK: Colour capabilities (feature-support byte 24)
+    // MARK: Color capabilities (feature-support byte 24)
 
-    /// Whether the panel declares sRGB as its default colour space (a narrow-gamut
+    /// Whether the panel declares sRGB as its default color space (a narrow-gamut
     /// panel usually does; a wide-gamut one says no, as this one does).
     var defaultsToSRGB: Bool { isDigital && (raw[24] & 0x04 != 0) }
 
@@ -182,7 +182,7 @@ struct EDID {
     /// 100 is not possible by this measure (it is coverage, not relative volume);
     /// a panel wider than the reference still only "covers" 100% of it.
     func coverage(of ref: ReferenceGamut) -> Int {
-        let p = colourPrimaries
+        let p = colorPrimaries
         let panel = [(p.red.x, p.red.y), (p.green.x, p.green.y), (p.blue.x, p.blue.y)]
         let target = [(ref.red.x, ref.red.y), (ref.green.x, ref.green.y), (ref.blue.x, ref.blue.y)]
         let targetArea = Self.triangleArea(target)
@@ -203,7 +203,7 @@ struct EDID {
 
     /// Sutherland–Hodgman: clip convex `subject` against convex `clipPoly`.
     private static func clip(_ subject: [(Double, Double)], to clipPoly: [(Double, Double)]) -> [(Double, Double)] {
-        // Normalise the clip polygon to counter-clockwise so "inside" is a
+        // Normalize the clip polygon to counter-clockwise so "inside" is a
         // consistent sign whichever way the primaries were listed.
         var signed = 0.0
         for i in 0..<clipPoly.count {

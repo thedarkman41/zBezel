@@ -371,8 +371,8 @@ struct DisplayTab: View {
                     InfoRow("Serial", edid.serialString ?? "—")
                     InfoRow("Manufactured", "week \(edid.manufactureWeek), \(edid.manufactureYear)")
                     InfoRow("Panel size", String(format: "%.1f″ diagonal", edid.diagonalInches))
-                    InfoRow("Connection", edid.digitalInterface)
-                    if let depth = edid.bitDepth { InfoRow("Bit depth", "\(depth) bits per colour") }
+                    InfoRow("Connection", controller.currentInputName ?? edid.digitalInterface)
+                    if let depth = edid.bitDepth { InfoRow("Bit depth", "\(depth) bits per color") }
                     if let preferred = edid.preferredTiming {
                         InfoRow("Native timing", preferred.description)
                     }
@@ -580,17 +580,17 @@ struct ColorTab: View {
     @ObservedObject var controller: MonitorController
 
     /// A white the user has dragged the dot to, overriding the active space's
-    /// default. Cleared when the colour mode changes so the dot snaps to the new
+    /// default. Cleared when the color mode changes so the dot snaps to the new
     /// space's white.
     @State private var whiteOverride: EDID.Chromaticity?
 
     private static let d65 = EDID.Chromaticity(x: 0.3127, y: 0.3290)
 
-    /// What the diagram should draw right now: the triangle of the colour space in
+    /// What the diagram should draw right now: the triangle of the color space in
     /// force, whether that is a standard target or the panel's native gamut, and
     /// the white that space aims for.
     private struct ActiveSpace {
-        let gamut: EDID.ColourPrimaries
+        let gamut: EDID.ColorPrimaries
         let name: String
         /// A standard space emulated over the native panel — draw the native gamut
         /// faintly behind it, and leave the white fixed (not draggable).
@@ -599,11 +599,11 @@ struct ColorTab: View {
     }
 
     private func activeSpace(_ edid: EDID) -> ActiveSpace {
-        let native = edid.colourPrimaries
+        let native = edid.colorPrimaries
         let nativeWhite = edid.nativeWhitePoint ?? Self.d65
-        func ref(_ name: String) -> EDID.ColourPrimaries {
+        func ref(_ name: String) -> EDID.ColorPrimaries {
             guard let r = EDID.referenceGamuts.first(where: { $0.name == name }) else { return native }
-            return EDID.ColourPrimaries(red: r.red, green: r.green, blue: r.blue, white: Self.d65)
+            return EDID.ColorPrimaries(red: r.red, green: r.green, blue: r.blue, white: Self.d65)
         }
         switch controller.features[0xDC]?.current ?? 0x00 {
         case 0x01: return ActiveSpace(gamut: ref("sRGB"),   name: "sRGB",       isStandard: true,  white: Self.d65)
@@ -634,7 +634,7 @@ struct ColorTab: View {
         HStack(alignment: .top, spacing: 16) {
             VStack(spacing: 16) {
             Card(title: "Color Mode", systemImage: "paintpalette",
-                 help: "The nine modes on the monitor's Colour menu (0xDC). They are "
+                 help: "The nine modes on the monitor's Color menu (0xDC). They are "
                      + "three different kinds of setting, so they are grouped rather "
                      + "than listed flat. 0x14 mirrors the choice but is not what the "
                      + "OSD drives.") {
@@ -660,9 +660,9 @@ struct ColorTab: View {
             // balance dragged on the diagram below. Updates live with the mode and
             // the dot, so it sits with the modes as a readout of the current white.
             Card(title: "White Point", systemImage: "sun.max",
-                 help: "The white point in force: the active colour space's target, "
+                 help: "The white point in force: the active color space's target, "
                      + "or the custom balance you drag the diagram's dot to — as CIE "
-                     + "1931 x, y and correlated colour temperature. Drag the dot in "
+                     + "1931 x, y and correlated color temperature. Drag the dot in "
                      + "Native or a white-balance mode to re-balance the panel.") {
                 if let edid = controller.selected?.edid {
                     let active = activeSpace(edid)
@@ -742,12 +742,12 @@ struct ColorTab: View {
         }
         .fixedSize(horizontal: false, vertical: true)
 
-        // The panel's colour identity from the EDID — read-only, a picture of what
+        // The panel's color identity from the EDID — read-only, a picture of what
         // it can reproduce, kept full-width below the controls.
         if let edid = controller.selected?.edid {
             let active = activeSpace(edid)
-            Card(title: "Colour Gamut", systemImage: "triangle",
-                 help: "The colour space in force on the CIE 1931 diagram — the "
+            Card(title: "Color Gamut", systemImage: "triangle",
+                 help: "The color space in force on the CIE 1931 diagram — the "
                      + "calibrated space a mode selects, or the panel's native gamut "
                      + "— and how much of each standard space the panel covers. Drag "
                      + "the white dot in Native or a white-balance mode to re-balance "
@@ -756,7 +756,7 @@ struct ColorTab: View {
                     VStack(alignment: .leading, spacing: 8) {
                         GamutDiagram(
                             gamut: active.gamut,
-                            nativeOutline: active.isStandard ? edid.colourPrimaries : nil,
+                            nativeOutline: active.isStandard ? edid.colorPrimaries : nil,
                             white: Binding(
                                 get: { whiteOverride ?? active.white },
                                 set: { whiteOverride = $0 }),
@@ -764,7 +764,7 @@ struct ColorTab: View {
                             onWhite: { x, y, commit in
                                 guard let nw = edid.nativeWhitePoint else { return }
                                 controller.setWhitePoint(x: x, y: y,
-                                                         primaries: edid.colourPrimaries,
+                                                         primaries: edid.colorPrimaries,
                                                          nativeWhite: nw, commit: commit)
                             })
                             .frame(maxWidth: 260)
@@ -801,7 +801,7 @@ struct ColorTab: View {
                                 }
                             }
                             if let bd = edid.bitDepth {
-                                ControlRow(label: "Colour depth") {
+                                ControlRow(label: "Color depth") {
                                     Text("\(bd)-bit")
                                         .font(.system(size: 13, design: .monospaced))
                                         .foregroundStyle(Theme.textSecond)
@@ -830,14 +830,14 @@ struct ColorTab: View {
         // A whole card for one button was more furniture than the action
         // deserved. As a line of text under the columns it is still findable and
         // stops competing with the settings for attention.
-        Button("Restore factory colour") {
+        Button("Restore factory color") {
             Task<Void, Never> { await controller.set(code: 0x08, value: 1) }
         }
         .buttonStyle(.plain)
         .font(.system(size: 11.5))
         .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.textDim)
         .disabled(!controller.monitorControlAvailable)
-        .help("MCCS restore factory colour defaults (0x08).")
+        .help("MCCS restore factory color defaults (0x08).")
         }
         // Pin the white-balance reference from the panel's native state, so a
         // dragged white solves against gains known to produce the native white.
@@ -846,7 +846,7 @@ struct ColorTab: View {
                 controller.captureWhiteReference(nativeWhite: w)
             }
         }
-        // A new colour mode brings its own white; drop any custom drag so the dot
+        // A new color mode brings its own white; drop any custom drag so the dot
         // snaps to the new space rather than lingering on the old balance.
         .onChange(of: controller.features[0xDC]?.current) { _, _ in
             whiteOverride = nil
@@ -1197,7 +1197,7 @@ private struct KVMMachinesCard: View {
                         .frame(width: 14, alignment: .trailing)
                     // Source-code parity at a glance: green = the deployed agent
                     // matches what this app ships, amber = running but a redeploy
-                    // would change it, grey = not running (or, with a grey name,
+                    // would change it, gray = not running (or, with a gray name,
                     // the box is unreachable).
                     let health = controller.machineHealth[machine.host] ?? .unknown
                     Circle()

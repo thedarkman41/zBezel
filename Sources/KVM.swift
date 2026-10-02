@@ -469,16 +469,16 @@ final class KVMController {
     private var stashedChoice: (point: CGPoint, doorway: CGRect, index: Int, wasDrag: Bool)?
     /// Set by the outbound dissolve across the handover: the panel is still showing
     /// the Mac (a black curtain) while it renegotiates, so parking the cursor at
-    /// the panel's centre now would leave it sitting visibly on the black. While
+    /// the panel's center now would leave it sitting visibly on the black. While
     /// this is set the handover leaves the cursor where it is; the controller
-    /// reparks it to the centre with reparkAtPanelCentre once the panel is on the
-    /// PC and the centre is behind it, out of sight.
+    /// reparks it to the center with reparkAtPanelCentre once the panel is on the
+    /// PC and the center is behind it, out of sight.
     var deferCenterPark = false
 
     /// Whether the panel stays on this machine when the pointer goes home.
     ///
     /// Shown as a padlock ON the far machine, because that is the screen the user
-    /// is looking at. Clicking it is recognised here rather than there: the Mac
+    /// is looking at. Clicking it is recognized here rather than there: the Mac
     /// is the one placing the pointer, so it knows when a click lands on the
     /// badge, and the badge itself is click-through and never steals one meant
     /// for the application underneath.
@@ -529,7 +529,7 @@ final class KVMController {
     /// every twenty-five seconds costs nothing and removes the whole failure.
     private var heartbeat: Timer?
 
-    /// Stamped on events this class posts to the Mac, so the tap can recognise
+    /// Stamped on events this class posts to the Mac, so the tap can recognize
     /// its own work and let it through. Without it they would be captured and
     /// forwarded to the far machine like any other input — the tap has no other
     /// way to tell them from the user's.
@@ -935,7 +935,7 @@ final class KVMController {
                 // doorway is its far side; while it shows another machine the
                 // desktop stops at the built-in screen, so leaving THAT is the
                 // crossing — the pointer should arrive on the machine already
-                // visible rather than travelling across a panel it cannot see.
+                // visible rather than traveling across a panel it cannot see.
                 // A locked panel is showing that machine, so the Mac's desktop
                 // effectively ends at the built-in screen even though the panel
                 // is still in its display list.
@@ -1151,7 +1151,7 @@ final class KVMController {
 
     // MARK: Crossings
 
-    /// Move the pointer from one machine in the chain to its neighbour.
+    /// Move the pointer from one machine in the chain to its neighbor.
     ///
     /// The vertical position is carried across as a FRACTION of each desktop, so
     /// the pointer stays at the same height on the glass even though the machines
@@ -1319,9 +1319,9 @@ final class KVMController {
         // where a stationary pointer is at least out of the way.
         //
         // During the outbound dissolve the panel is NOT yet showing the PC — it is
-        // still the Mac's black curtain — so parking at the centre now would draw
+        // still the Mac's black curtain — so parking at the center now would draw
         // the cursor onto the black. Hold it where it already is; the controller
-        // reparks it to the centre once the panel has switched (reparkAtPanelCentre).
+        // reparks it to the center once the panel has switched (reparkAtPanelCentre).
         if deferCenterPark {
             parkingSpot = CGEvent(source: nil)?.location ?? point
         } else {
@@ -1552,7 +1552,7 @@ final class KVMController {
         // for a box first reached at its sign-in screen is a default guess rather
         // than the truth — the ordinary channel that normally reports the real size
         // via its `cursor` reply is refused at the secure desktop, so it never
-        // corrects. The injector on the far side normalises absolute coordinates
+        // corrects. The injector on the far side normalizes absolute coordinates
         // against the whole virtual desktop (SM_C*VIRTUALSCREEN), so fetch exactly
         // that with a one-off `client cursor` over the reachable address — the
         // .local name when the tailnet is wedged — and adopt it, keeping absolute
@@ -1654,10 +1654,10 @@ final class KVMController {
     /// calls this once the Mac has been revealed.
     func resumeEdge() { suspendCrossing = false }
 
-    /// Park the held cursor at the panel's centre now that the panel is showing
+    /// Park the held cursor at the panel's center now that the panel is showing
     /// the PC, so it is hidden behind that input. The outbound dissolve calls this
     /// after the switch, having set deferCenterPark so the handover left the cursor
-    /// alone until the centre was safe to hide it in. A no-op if control has since
+    /// alone until the center was safe to hide it in. A no-op if control has since
     /// gone home.
     func reparkAtPanelCentre() {
         guard side == .there else { return }
@@ -1738,7 +1738,7 @@ final class KVMController {
     /// leftMouseDragged, which means the hardware button state is intact; so
     /// while carrying, watch that state at 60 Hz and treat the first "up" as the
     /// release. Armed only after it has first read "down": if it never does,
-    /// the state is not to be trusted and the behaviour is exactly today's
+    /// the state is not to be trusted and the behavior is exactly today's
     /// rather than a MARK at the arrival point.
     private var releaseWatch: Timer?
     private var releaseArmed = false
@@ -1979,7 +1979,7 @@ final class KVMController {
             // `panelShowsMac = false` the PC branch below sets. Without it the
             // crossing keeps `panelIsMine` false (its doorway stays `mainBounds`,
             // the built-in↔panel boundary), so moving between the two screens
-            // re-opens the chooser and greys the panel every time. The input poll
+            // re-opens the chooser and grays the panel every time. The input poll
             // would normally fix this, but set() has just resynced the watcher to
             // this input, so it sees no change and never does — leaving it wrong
             // for minutes until some unrelated event reconciles it.
@@ -2164,7 +2164,7 @@ final class KVMController {
     /// monitor/menu switch, an amber-blink recovery toggle, an Auto-Switch bounce
     /// — so no cross-back ran. The pointer is left decoupled and hidden,
     /// forwarding to a machine no longer on screen: every click reparks it "home"
-    /// and re-crossing the edge pops the chooser over a greyed panel. That is the
+    /// and re-crossing the edge pops the chooser over a grayed panel. That is the
     /// recurring "tiles on the wrong edge / pointer bounces back" wedge, and it
     /// kept coming back because the input poll reconciled panelShowsMac and the
     /// lock but never `side`.

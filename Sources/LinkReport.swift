@@ -74,7 +74,7 @@ struct LinkReport {
 
     var mstEnabled: Bool { mstCtrl & 0x01 != 0 }
 
-    /// A recognised name for the chip terminating the AUX channel, when we have one.
+    /// A recognized name for the chip terminating the AUX channel, when we have one.
     var branchVendorName: String? {
         guard branchPresent else { return nil }
         // Only names we can corroborate from the device-ID string the chip reports.
