@@ -201,6 +201,8 @@ final class MonitorController: ObservableObject {
         osdTransparency = Transparency(
             rawValue: defaults.object(forKey: "osdTransparency") as? Int ?? -1)
         pipSideBySide = defaults.bool(forKey: "pipSideBySide")
+        pipPrimaryInput   = UInt16(defaults.object(forKey: "pipPrimaryInput") as? Int ?? 0x0F)
+        pipSecondaryInput = UInt16(defaults.object(forKey: "pipSecondaryInput") as? Int ?? 0x11)
 
 
         // The tap runs on the main run loop, but the callback reaches us from a
@@ -282,6 +284,28 @@ final class MonitorController: ObservableObject {
         didSet { UserDefaults.standard.set(pipSideBySide, forKey: "pipSideBySide") }
     }
 
+    /// Which input feeds the main image and which feeds the PiP inset. HP keeps
+    /// these behind 0xE1 sub 0x17 (primary) and 0x18 (secondary) and does not
+    /// report them back, so they are asserted and remembered like the other PiP
+    /// settings. Stored as the ordinary MCCS input code (0x0F DisplayPort, 0x11
+    /// HDMI, 0x13 USB-C); the secondary selector takes its own offset codes,
+    /// mapped at write time.
+    @Published var pipPrimaryInput: UInt16 {
+        didSet { UserDefaults.standard.set(Int(pipPrimaryInput), forKey: "pipPrimaryInput") }
+    }
+    @Published var pipSecondaryInput: UInt16 {
+        didSet { UserDefaults.standard.set(Int(pipSecondaryInput), forKey: "pipSecondaryInput") }
+    }
+
+    /// The 0x18 (secondary) selector wants its own value for each input, not the
+    /// MCCS code the primary selector uses — from HP's own tables.
+    private static let pipSecondaryCode: [UInt16: Int] = [
+        0x0F: 0x2F, 0x10: 0x30,   // DisplayPort 1 / 2
+        0x11: 0x21, 0x12: 0x22,   // HDMI 1 / 2
+        0x13: 0x3D, 0x14: 0x3E,   // USB-C 1 / 2
+        0x15: 0x3F, 0x16: 0x40,   // USB-C 1 / 2 (Thunderbolt 4)
+    ]
+
     /// A bare write, with no read-back of anything else.
     ///
     /// The generic set() re-reads every volatile code after each write, which
@@ -322,6 +346,40 @@ final class MonitorController: ObservableObject {
         // Size too, once this app has ever set one. It is a setting like the
         // other two, so asserting it is what keeps diagram and panel in step.
         if let size = pipSize { await writeSub(0x13, size.rawValue) }
+        // Assert the chosen sources too, so the inset shows what the user picked.
+        // Primary first, then secondary, so the secondary is the one that sticks.
+        await writeSub(0x17, Int(pipPrimaryInput))
+        await writeSub(0x18, Self.pipSecondaryCode[pipSecondaryInput] ?? 0x2F)
+    }
+
+    /// Set the main (background) input and remember it. If PiP is live, the panel
+    /// moves the previous main image into the inset when the main changes, so
+    /// re-assert the chosen inset afterward to keep it constant.
+    func applyPiPPrimaryInput(_ input: UInt16) async {
+        pipBusyControl = "primary"
+        defer { pipBusyControl = nil }
+        pipPrimaryInput = input
+        await writeSub(0x17, Int(input))
+        if pipOn {
+            await writeSub(0x18, Self.pipSecondaryCode[pipSecondaryInput] ?? 0x2F)
+        }
+    }
+
+    /// Set the input shown in the PiP inset and remember it.
+    func applyPiPSecondaryInput(_ input: UInt16) async {
+        pipBusyControl = "secondary"
+        defer { pipBusyControl = nil }
+        pipSecondaryInput = input
+        await writeSub(0x18, Self.pipSecondaryCode[input] ?? 0x2F)
+    }
+
+    /// Swap which input is the main image and which is in the inset — HP's own
+    /// toggle (0xE1 sub 0x18 = 0x03).
+    func swapPiPInputs() async {
+        pipBusyControl = "swap"
+        defer { pipBusyControl = nil }
+        swap(&pipPrimaryInput, &pipSecondaryInput)
+        await writeSub(0x18, 0x03)
     }
 
     func applyPiPSideBySide(_ side: Bool) async {

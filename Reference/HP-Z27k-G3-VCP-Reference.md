@@ -84,6 +84,21 @@ before writing.
 | Auto-Sleep OFF | `set 0 E1 0x0F00` (3840) |
 | Auto-Sleep ON | `set 0 E1 0x0F01` (3841) |
 
+### Picture-in-Picture input sources — master `0xE1`
+The PiP main (background) image and the inset (the small window) each have their
+own input selector. ✅ Reflected from HP Display Center 2026-10-02.
+
+| Setting | code | value encoding |
+|---------|------|----------------|
+| Main (primary) input | `0xE1` sub `0x17` | the ordinary MCCS input code — DisplayPort `0x0F`, HDMI `0x11`, USB-C1 `0x13` (same as `0x60`) |
+| PiP (secondary) input | `0xE1` sub `0x18` | HP's own offset codes — DisplayPort `0x2F`, HDMI `0x21`, USB-C1 `0x3D` |
+| Swap main ⇄ PiP | `0xE1` sub `0x18` = `0x03` | `TogglePIPPrimarySecondaryInputs` (write `0x1803`) |
+
+Write as `(sub << 8) | value` — main=HDMI → `set 0 E1 5905` (0x1711), PiP=HDMI →
+`set 0 E1 6177` (0x1821). The panel moves the old main into the inset when the
+main input changes, so re-assert the inset afterward to keep it constant.
+(PiP on/off is sub `0x11`, mode `0x12`, size `0x13`, placement `0x14`.)
+
 ## See also
 - Memory `hp-z27k-vendor-vcp-codes` — the PiP/Menu/Color vendor maps + the
   sampling history this method supersedes.

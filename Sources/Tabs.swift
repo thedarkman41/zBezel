@@ -1084,6 +1084,13 @@ struct MultiScreenTab: View {
             .task { await controller.syncPiPFromPanel() }
     }
 
+    /// The inputs offered for the two PiP sources, labeled.
+    private var pipInputOptions: [(value: UInt16, label: String)] {
+        [(value: 0x0F, label: HPProfile.inputLabel(0x0F)),
+         (value: 0x11, label: HPProfile.inputLabel(0x11)),
+         (value: 0x13, label: HPProfile.inputLabel(0x13))]
+    }
+
     private var grid: some View {
         CardGrid {
             Card(title: "Picture in Picture", systemImage: "rectangle.inset.topright.filled",
@@ -1135,6 +1142,37 @@ struct MultiScreenTab: View {
                             },
                             mac: controller.macSnapshot,
                             pc: controller.pcSnapshot)
+                    }
+                }
+
+                if controller.pipOn {
+                    Divider().overlay(Theme.rule).padding(.vertical, 2)
+                    ControlRow(label: "Main input") {
+                        StyledPicker(options: pipInputOptions,
+                                     selection: Binding(
+                                        get: { controller.pipPrimaryInput },
+                                        set: { v in Task<Void, Never> { await controller.applyPiPPrimaryInput(v) } }),
+                                     enabled: controller.pipOn, width: 170)
+                    }
+                    ControlRow(label: "PiP input") {
+                        StyledPicker(options: pipInputOptions,
+                                     selection: Binding(
+                                        get: { controller.pipSecondaryInput },
+                                        set: { v in Task<Void, Never> { await controller.applyPiPSecondaryInput(v) } }),
+                                     enabled: controller.pipOn, width: 170)
+                    }
+                    HStack {
+                        Text("Changing the main input keeps the PiP input constant.")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(Theme.textDim)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 8)
+                        Button("Swap ⇄") {
+                            Task<Void, Never> { await controller.swapPiPInputs() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
                     }
                 }
 

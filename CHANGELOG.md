@@ -2,6 +2,23 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.10 — 2026-10-02
+
+**PiP: main + inset input source pickers (0xE1 sub 0x17/0x18) with swap**
+
+PiP: choose the main and PiP-inset input sources.
+
+HP exposes the PiP source selectors behind 0xE1 — sub 0x17 for the main image
+(ordinary MCCS input codes) and sub 0x18 for the inset (its own offset codes),
+reflected from HP Display Center. Add a "Main input" and "PiP input" picker to
+the Picture-in-Picture card, plus a Swap button (sub 0x18 = 0x03, HP's own
+toggle).
+
+Like the rest of PiP these cannot be read back, so the choices are remembered
+and asserted: enabling PiP re-pushes both sources, and — because the panel moves
+the old main image into the inset when the main changes — changing the main
+input re-asserts the chosen inset so it stays constant.
+
 ## 1.3.9 — 2026-10-02
 
 **UI: hold-to-open/release-to-close display pull-down**
