@@ -2,6 +2,17 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.11 — 2026-10-02
+
+**Fix display pull-down position (drop below the label, screen coords)**
+
+Fix the display pull-down landing in the wrong place.
+
+popUp(..., in: self) positioned the menu in the view's own (unflipped)
+coordinates, so it opened above the label. Convert the label's bottom-left
+corner to screen coordinates and pop up there (in: nil), so it drops just under
+the label regardless of view flipping.
+
 ## 1.3.10 — 2026-10-02
 
 **PiP: main + inset input source pickers (0xE1 sub 0x17/0x18) with swap**

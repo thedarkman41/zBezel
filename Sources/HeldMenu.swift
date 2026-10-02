@@ -50,8 +50,17 @@ private struct Popper: NSViewRepresentable {
                 entry.isEnabled = item.isEnabled
                 menu.addItem(entry)
             }
-            // Drop it just below the label, like a pull-down.
-            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 4), in: self)
+            // Drop it just below the label. Convert the label's bottom-left corner
+            // to screen coordinates and pop up there (in: nil treats the point as
+            // screen), so it lands under the label regardless of how the hosting
+            // view is flipped — popping up "in: self" put it in the wrong place.
+            let corner = NSPoint(x: bounds.minX, y: isFlipped ? bounds.maxY : bounds.minY)
+            if let window = self.window {
+                let onScreen = window.convertPoint(toScreen: convert(corner, to: nil))
+                menu.popUp(positioning: nil, at: onScreen, in: nil)
+            } else {
+                menu.popUp(positioning: nil, at: NSPoint(x: 0, y: bounds.height + 4), in: self)
+            }
         }
 
         @objc private func choose(_ sender: NSMenuItem) {
