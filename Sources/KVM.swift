@@ -1975,6 +1975,15 @@ final class KVMController {
     func followManualInput(_ input: UInt16) {
         if input == macInput {
             clearLock()
+            // The Mac is now on the panel, so say so — the mirror of the
+            // `panelShowsMac = false` the PC branch below sets. Without it the
+            // crossing keeps `panelIsMine` false (its doorway stays `mainBounds`,
+            // the built-in↔panel boundary), so moving between the two screens
+            // re-opens the chooser and greys the panel every time. The input poll
+            // would normally fix this, but set() has just resynced the watcher to
+            // this input, so it sees no change and never does — leaving it wrong
+            // for minutes until some unrelated event reconciles it.
+            panelShowsMac = true
             // Choosing the Mac by hand does not cross the pointer back, so if it
             // was out on a machine (side == .there) it would be left trapped
             // forwarding to a panel no longer showing that machine. Bring it home

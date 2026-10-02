@@ -2,6 +2,23 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.6 — 2026-10-01
+
+**KVM: set panelShowsMac=true when the Mac is chosen by hand (fixes stuck crossing)**
+
+KVM: mark panelShowsMac true when the Mac is chosen by hand.
+
+followManualInput's PC branch sets panelShowsMac=false, but the Mac branch
+never set it back to true — so choosing the Mac from the menu-bar icon (or the
+Input tab) cleared the lock and brought the pointer home yet left panelShowsMac
+stuck false. That collapses the crossing doorway onto mainBounds (the built-in
+↔ panel boundary), so moving between the two screens re-opens the chooser and
+greys the panel on every attempt, and clicking reparks the pointer to the
+primary display. The input poll would normally correct panelShowsMac, but set()
+resyncs the watcher to the just-chosen input, so observe() sees no change and
+never fires — leaving it wrong for minutes until an unrelated event reconciles
+it. One line: set panelShowsMac=true in the Mac branch, mirroring the PC branch.
+
 ## 1.3.5 — 2026-09-25
 
 **Power tab: Wake Now paired with Sleep Now (app-state, DDC can't sense sleep)**
