@@ -322,7 +322,11 @@ struct DisplayTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        CardGrid {
+        // Two balanced columns rather than a 2-up grid: the tall Image card on
+        // the left, the two shorter cards stacked on the right to match its
+        // height, so neither column trails a long run of empty space.
+        HStack(alignment: .top, spacing: 16) {
+            VStack(spacing: 16) {
             // The three image sliders in one card, and Panel promoted beside
             // them. Split across two cards, Sharpness was a single slider in a
             // card the height of two, and Power — three words and a row of
@@ -363,6 +367,10 @@ struct DisplayTab: View {
                 }
             }
 
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(spacing: 16) {
             Card(title: "Panel", systemImage: "info.circle",
                  help: "Read-only facts the monitor reports about itself.") {
                 if let edid = controller.selected?.edid {
@@ -416,8 +424,8 @@ struct DisplayTab: View {
                     MonitorSideUnavailable(controller: controller)
                 }
             }
-
-
+            }
+            .frame(maxWidth: .infinity)
         }
     }
 }

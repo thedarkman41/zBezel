@@ -2,6 +2,18 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.8 — 2026-10-02
+
+**UI: balance Display tab into two even columns (less blank space)**
+
+UI: balance the Display tab into two even columns.
+
+The 2-up CardGrid left the Panel card alone in the right column with a tall run
+of empty space beneath it, while Image + Power stacked up the left. Lay the tab
+out as an explicit HStack of two columns instead — Image on the left, Panel and
+Power stacked on the right — so the columns end at roughly the same height and
+the cards square off with far less blank space.
+
 ## 1.3.7 — 2026-10-02
 
 **UI: live Connection value + American spellings throughout**
