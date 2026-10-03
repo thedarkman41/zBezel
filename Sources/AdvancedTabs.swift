@@ -252,22 +252,30 @@ struct LinkTab: View {
     @State private var showInstaller = false
 
     var body: some View {
-        // Two by two. The verdict used to run full width above a grid of three,
-        // which left half of the second row empty; now that it is a title and
-        // five rows it sits alongside the others instead of dwarfing them.
-        VStack(alignment: .leading, spacing: 16) {
-            CardGrid {
+        // Two balanced columns rather than a row-major grid: the grid paired a
+        // tall card with a short one and stranded the bottom-right cell empty.
+        // The lower card in each column stretches so the two columns end level,
+        // with fixedSize keeping that from running to the window's full height.
+        HStack(alignment: .top, spacing: 16) {
+            VStack(spacing: 16) {
                 verdictCard
-                proxyCard
-                // Next to the proxy card on purpose: this is what to reach for
-                // when that host has rebooted and nobody has signed in, so the
-                // agent never started and the KVM cannot get past the login
-                // screen to fix it.
+                // Reach for this when a host has rebooted and nobody has signed
+                // in, so the agent never started and the KVM cannot get past the
+                // login screen to fix it.
                 WakeConsoleCard(controller: controller)
+                    .frame(maxHeight: .infinity)
+            }
+            .frame(maxWidth: .infinity, alignment: .top)
+
+            VStack(spacing: 16) {
+                proxyCard
                 busCard
                 dpcdCard
+                    .frame(maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, alignment: .top)
         }
+        .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showInstaller) {
             InstallerView(controller: controller)
         }
@@ -365,20 +373,6 @@ struct LinkTab: View {
                 }
             }
 
-            if !controller.remoteMonitors.isEmpty {
-                Text("Visible monitors on Proxy")
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(Theme.textSecond)
-                    .padding(.top, 2)
-                // Named first, numbered second: the name is what identifies a
-                // display to a person, and the index only matters as the handle
-                // the agent uses. Every monitor the proxy can see is listed, so a
-                // machine driving several shows all of them.
-                ForEach(controller.remoteMonitors) { monitor in
-                    InfoRow(monitor.description + (monitor.pnpID.map { " (\($0))" } ?? ""),
-                            "Monitor #\(monitor.index)")
-                }
-            }
         }
     }
 

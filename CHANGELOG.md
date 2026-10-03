@@ -2,6 +2,20 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.12 — 2026-10-02
+
+**Link tab: two balanced columns + drop redundant proxy monitor list**
+
+Link tab: balance the columns and drop the redundant proxy monitor list.
+
+The row-major CardGrid paired a tall card with a short one and left the
+bottom-right cell empty (DisplayPort Link stranded bottom-left under a huge grey
+gap). Lay it out as two explicit columns instead — Monitor Control + Wake
+Console on the left, Control Proxy + Devices + DisplayPort Link on the right —
+with the lower card in each column stretching so the two columns end level.
+Also remove "Visible monitors on Proxy", which just restated the monitor already
+named in the window title and the Devices card.
+
 ## 1.3.11 — 2026-10-02
 
 **Fix display pull-down position (drop below the label, screen coords)**
