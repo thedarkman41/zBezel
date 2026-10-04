@@ -60,25 +60,31 @@ struct PowerTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        // Two equal columns, matching the other tabs' layout.
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) { SleepPowerCard(controller: controller) }
-                .frame(maxWidth: .infinity)
-            VStack(spacing: 16) { PanelClockCard(controller: controller) }
-                .frame(maxWidth: .infinity)
+        // Sleep & Power on the left; the clock and the monitor's power mode stacked
+        // on the right. BalancedColumns measures and pins both columns to the
+        // taller one's height, and the `fill: true` card in the shorter column
+        // grows its own background to match — tops and bottoms level, 16-pt gaps
+        // in both directions, no grey above a card or in an uneven gap.
+        BalancedColumns {
+            SleepPowerCard(controller: controller, fill: true)
+        } right: {
+            PanelClockCard(controller: controller)
+            PowerModeCard(controller: controller, fill: true)
         }
     }
 }
 
 private struct SleepPowerCard: View {
     @ObservedObject var controller: MonitorController
+    var fill = false
 
     var body: some View {
         Card(title: "Sleep & Power", systemImage: "powersleep",
              help: "The panel's own sleep behavior, held in the monitor rather than "
                  + "in macOS. These are HP manufacturer codes (0xE8 / 0xE1); the panel "
                  + "does not report them back, so each row shows what this app last set "
-                 + "it to.") {
+                 + "it to.",
+             fill: fill) {
             if controller.controlsLive {
                 toggle(.sleepTimer)
                 Text("The daily amber-blink was this timer firing on a wrong clock. "
@@ -146,6 +152,7 @@ private struct SleepPowerCard: View {
 
 private struct PanelClockCard: View {
     @ObservedObject var controller: MonitorController
+    var fill = false
 
     @State private var hour12 = 12
     @State private var minute = 0
@@ -166,7 +173,8 @@ private struct PanelClockCard: View {
              help: "The monitor keeps its own real-time clock, which the Sleep Timer "
                  + "runs on. When it drifts, the timer fires at the wrong hour. This "
                  + "sets it (HP code 0xE8, 24-hour internally); the panel cannot report "
-                 + "the time back, so this shows what was last set, not the live clock.") {
+                 + "the time back, so this shows what was last set, not the live clock.",
+             fill: fill) {
             if controller.controlsLive {
                 ControlRow(label: "Mac clock") {
                     TimelineView(.periodic(from: Date(), by: 20)) { context in
@@ -175,44 +183,45 @@ private struct PanelClockCard: View {
                             .foregroundStyle(Theme.textSecond)
                     }
                 }
-                Button("Sync panel clock to Mac") {
-                    let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-                    let hh = c.hour ?? 0, mm = c.minute ?? 0
-                    isPM = hh >= 12
-                    hour12 = (hh % 12 == 0) ? 12 : hh % 12
-                    minute = mm
-                    Task<Void, Never> { await controller.syncPanelClockToMac() }
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(Theme.accent)
-
                 Divider().overlay(Theme.rule).padding(.vertical, 2)
 
                 FieldLabel(text: "Set manually")
                 ControlRow(label: "Time") {
-                    HStack(spacing: 6) {
-                        StyledPicker(options: hourOptions,
-                                     selection: Binding(get: { hour12 },
-                                                        set: { hour12 = $0; writeHour() }),
-                                     enabled: controller.controlsLive, width: 62)
-                        Text(":").font(.system(size: 13)).foregroundStyle(Theme.textSecond)
-                        StyledPicker(options: minuteOptions,
-                                     selection: Binding(get: { minute },
-                                                        set: { minute = $0; writeMinute() }),
-                                     enabled: controller.controlsLive, width: 62)
-                        StyledPicker(options: [(value: false, label: "AM"),
-                                               (value: true, label: "PM")],
-                                     selection: Binding(get: { isPM },
-                                                        set: { isPM = $0; writeHour() }),
-                                     enabled: controller.controlsLive, width: 62)
+                    HStack(spacing: 12) {
+                        // Sync sits with the pickers it drives, to their left: one
+                        // tap sets every field to the Mac's time at once (the panel
+                        // keeps a 24-hour clock; the AM/PM is converted on write).
+                        Button("Sync Clocks") {
+                            let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
+                            let hh = c.hour ?? 0, mm = c.minute ?? 0
+                            isPM = hh >= 12
+                            hour12 = (hh % 12 == 0) ? 12 : hh % 12
+                            minute = mm
+                            Task<Void, Never> { await controller.syncPanelClockToMac() }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                        .disabled(!controller.controlsLive)
+
+                        HStack(spacing: 6) {
+                            StyledPicker(options: hourOptions,
+                                         selection: Binding(get: { hour12 },
+                                                            set: { hour12 = $0; writeHour() }),
+                                         enabled: controller.controlsLive, width: 62)
+                            Text(":").font(.system(size: 13)).foregroundStyle(Theme.textSecond)
+                            StyledPicker(options: minuteOptions,
+                                         selection: Binding(get: { minute },
+                                                            set: { minute = $0; writeMinute() }),
+                                         enabled: controller.controlsLive, width: 62)
+                            StyledPicker(options: [(value: false, label: "AM"),
+                                                   (value: true, label: "PM")],
+                                         selection: Binding(get: { isPM },
+                                                            set: { isPM = $0; writeHour() }),
+                                         enabled: controller.controlsLive, width: 62)
+                        }
                     }
                 }
-                Text("Writes as you change each field. The panel uses a 24-hour clock; "
-                     + "the AM/PM here is converted for you.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textDim)
-                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 FieldLabel(text: "Set current time")
                 UnavailableNote(text: "Needs a working control channel to the monitor.")
@@ -236,5 +245,48 @@ private struct PanelClockCard: View {
     }
     private func writeMinute() {
         Task<Void, Never> { await controller.applyHP(.currentTimeMM, value: minute) }
+    }
+}
+
+/// The monitor's MCCS power mode (0xD6). Lived on the Display tab until the Power
+/// tab existed to hold it. The code reports the last value written rather than
+/// the live state, so it is presented as commands, not a readable setting.
+private struct PowerModeCard: View {
+    @ObservedObject var controller: MonitorController
+    var fill = false
+
+    var body: some View {
+        Card(title: "Power", systemImage: "powerplug",
+             help: """
+             MCCS power mode (0xD6). On this panel the code reports the last value \
+             written to it rather than the monitor's live state, so it is presented as \
+             commands rather than as a setting you can read back.
+             """,
+             fill: fill) {
+            if let state = controller.features[0xD6], state.readable {
+                FieldLabel(text: "Power Mode")
+                HStack(spacing: 8) {
+                    ForEach(state.choices.filter { $0.value <= 4 }, id: \.value) { choice in
+                        Button(choice.label) {
+                            Task<Void, Never> { await controller.set(code: 0xD6, value: choice.value) }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.accent)
+                    }
+                }
+                Text("Monitor reports: \(state.labelFor(value: state.current))")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textSecond)
+                if state.current != 1 {
+                    UnavailableNote(text: "The panel keeps reporting this after it has woken by "
+                        + "other means — switching input powers it back on without clearing the "
+                        + "value. Press On to bring the reading back in line.")
+                }
+            } else {
+                FieldLabel(text: "Power Mode")
+                MonitorSideUnavailable(controller: controller)
+            }
+        }
     }
 }

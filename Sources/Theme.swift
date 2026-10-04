@@ -28,6 +28,12 @@ struct Card<Content: View>: View {
     let title: String
     var systemImage: String
     var help: String? = nil
+    /// When true the card's own background grows to whatever height it is offered,
+    /// its content pinned to the top so the slack lands inside the tile's bottom.
+    /// `BalancedColumns` uses this to make a shorter column's card end level with
+    /// a taller one. It is `maxHeight`, not a Spacer, so the card's *ideal* height
+    /// stays its content height and the window still sizes to the tab.
+    var fill: Bool = false
     @ViewBuilder var content: Content
 
     @State private var showHelp = false
@@ -80,7 +86,9 @@ struct Card<Content: View>: View {
             // the window, and the window had no reason to shrink. A tab of six
             // short cards rendered as six tall ones separated by black.
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity,
+               maxHeight: fill ? .infinity : nil,
+               alignment: .topLeading)
         .background(
             RoundedRectangle(cornerRadius: Theme.cardRadius)
                 .fill(Theme.card)

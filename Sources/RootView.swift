@@ -164,17 +164,44 @@ struct RootView: View {
     }
 }
 
-/// Two equal columns, matching the HP panel's layout.
-struct CardGrid<Content: View>: View {
-    @ViewBuilder var content: Content
+/// Two side-by-side columns that end level — even when a column holds a single
+/// card. `.fixedSize(vertical)` makes the row hug the taller column's *natural*
+/// height, and a `Card(fill: true)` in the shorter column grows its own
+/// background to that height so both columns end on the same line, the slack
+/// inside the shorter tile's own bottom.
+///
+/// The natural-height ideal is the point: the window's `.contentSize`
+/// resizability sizes itself to the content's ideal, so hugging the natural
+/// height lets the window shrink and grow to fit each tab with no black space
+/// below the tiles. An earlier version measured the taller column with a
+/// GeometryReader and pinned both to it — but a `fill:` card first expands into
+/// whatever height the window currently offers, so the reader read *that* back
+/// and the window stayed as tall as the previous tab. fixedSize proposes nil
+/// height regardless of the window, so the measurement is the content's own size.
+///
+/// Pass each column's content directly; mark the card to stretch `fill: true`
+/// (the single card, or the last of a multi-card column). The trailing
+/// zero-height child keeps a single-card column a two-child stack, so its VStack
+/// distributes the row height onto the fill card instead of hugging it.
+struct BalancedColumns<L: View, R: View>: View {
+    @ViewBuilder var left: () -> L
+    @ViewBuilder var right: () -> R
+
     var body: some View {
-        LazyVGrid(
-            columns: [GridItem(.flexible(), spacing: 16, alignment: .top),
-                      GridItem(.flexible(), spacing: 16, alignment: .top)],
-            spacing: 16
-        ) {
-            content
+        HStack(alignment: .top, spacing: 16) {
+            column { left() }
+            column { right() }
         }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder
+    private func column<C: View>(@ViewBuilder _ content: () -> C) -> some View {
+        VStack(spacing: 16) {
+            content()
+            Color.clear.frame(height: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .top)
     }
 }
 

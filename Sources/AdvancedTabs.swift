@@ -12,27 +12,19 @@ struct AdvancedTab: View {
         // black. Each column now holds cards that add up to a similar height, and
         // the capabilities string — the one thing here that can usefully take
         // whatever space is left — is the one that stretches.
-        VStack(alignment: .trailing, spacing: 10) {
-            // The lower card in each column stretches, so the two columns end
-            // level however unequal their upper cards are. fixedSize keeps that
-            // from running away: without it both children ask for infinite height
-            // and the whole tab grows to the window.
-            HStack(alignment: .top, spacing: 16) {
-                VStack(spacing: 16) {
-                    VendorMapperCard(controller: controller)
-                    capabilitiesCard
-                        .frame(maxHeight: .infinity)
-                }
-                .frame(maxWidth: .infinity, alignment: .top)
-
-                VStack(spacing: 16) {
-                    monitorIdentityCard
-                    vendorCodeCard
-                        .frame(maxHeight: .infinity)
-                }
-                .frame(maxWidth: .infinity, alignment: .top)
+        VStack(alignment: .trailing, spacing: 16) {
+            // BalancedColumns measures and pins both columns to the taller one's
+            // height; the `fill: true` card in the shorter column (capabilities on
+            // the left, the vendor-code map on the right — the two that can
+            // usefully take leftover space) grows its own background to match, so
+            // the columns end level with no grey trapped below the shorter one.
+            BalancedColumns {
+                VendorMapperCard(controller: controller)
+                capabilitiesCard
+            } right: {
+                monitorIdentityCard
+                vendorCodeCard
             }
-            .fixedSize(horizontal: false, vertical: true)
 
             // Three commands that were a whole card with nothing else in it. As a
             // row of links they are still one click away and stop claiming a
@@ -82,7 +74,8 @@ struct AdvancedTab: View {
              USB-C configuration and PiP controls live here. No public standard documents them, so \
              the only way to find them is to read the codes this monitor declares and observe how \
              each one changes.
-             """) {
+             """,
+             fill: true) {
             if let caps = controller.capabilities, !caps.manufacturerCodes.isEmpty {
                 Text("This monitor declares \(caps.manufacturerCodes.count) manufacturer codes. "
                      + "Hover one for what it accepts.")
@@ -109,7 +102,8 @@ struct AdvancedTab: View {
 
     private var capabilitiesCard: some View {
         Card(title: "Capabilities String", systemImage: "doc.plaintext",
-             help: "The raw VCP 0xF3 response — the monitor's own statement of what it supports.") {
+             help: "The raw VCP 0xF3 response — the monitor's own statement of what it supports.",
+             fill: true) {
             if let caps = controller.capabilities {
                 ScrollView {
                     Text(caps.raw)
@@ -252,30 +246,21 @@ struct LinkTab: View {
     @State private var showInstaller = false
 
     var body: some View {
-        // Two balanced columns rather than a row-major grid: the grid paired a
-        // tall card with a short one and stranded the bottom-right cell empty.
-        // The lower card in each column stretches so the two columns end level,
-        // with fixedSize keeping that from running to the window's full height.
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) {
-                verdictCard
-                // Reach for this when a host has rebooted and nobody has signed
-                // in, so the agent never started and the KVM cannot get past the
-                // login screen to fix it.
-                WakeConsoleCard(controller: controller)
-                    .frame(maxHeight: .infinity)
-            }
-            .frame(maxWidth: .infinity, alignment: .top)
-
-            VStack(spacing: 16) {
-                proxyCard
-                busCard
-                dpcdCard
-                    .frame(maxHeight: .infinity)
-            }
-            .frame(maxWidth: .infinity, alignment: .top)
+        // Monitor Control and Wake Console on the left; Control Proxy, the device
+        // bus and the DisplayPort link stacked on the right. BalancedColumns
+        // measures and pins both columns to the taller one's height, and the
+        // shorter column's `fill: true` card grows its own background to match —
+        // tops and bottoms level, no grey above a card or in an uneven gap.
+        BalancedColumns {
+            verdictCard
+            // Reach for this when a host has rebooted and nobody has signed in, so
+            // the agent never started and the KVM cannot get past the login screen.
+            WakeConsoleCard(controller: controller, fill: true)
+        } right: {
+            proxyCard
+            busCard
+            dpcdCard
         }
-        .fixedSize(horizontal: false, vertical: true)
         .sheet(isPresented: $showInstaller) {
             InstallerView(controller: controller)
         }
@@ -473,7 +458,8 @@ struct LinkTab: View {
     private var dpcdCard: some View {
         let report = controller.link
         return Card(title: "DisplayPort Link", systemImage: "waveform.path",
-                    help: "Raw DPCD values read over the native AUX channel.") {
+                    help: "Raw DPCD values read over the native AUX channel.",
+                    fill: true) {
             InfoRow("DPCD revision", String(format: "%d.%d", report.dpcdRev >> 4, report.dpcdRev & 0x0F))
             InfoRow("Max link rate", linkRateName(report.maxLinkRate))
             InfoRow("Max lane count", "\(report.maxLaneCount & 0x1F)")

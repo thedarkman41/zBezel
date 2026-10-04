@@ -88,7 +88,7 @@ private struct FeaturePicker: View {
 }
 
 /// Shown in place of a card's contents when the monitor side is unreachable.
-private struct MonitorSideUnavailable: View {
+struct MonitorSideUnavailable: View {
     @ObservedObject var controller: MonitorController
     var body: some View {
         // While a probe is in flight nothing is known yet, and saying the monitor
@@ -112,26 +112,19 @@ struct InputTab: View {
     @State private var resolution: String = ""
     @State private var modeID: Int32 = 0
     var body: some View {
-        // Two explicit columns rather than a flowing grid, so KVM Machines can
-        // sit in the right column under the two smaller cards. Each column packs
-        // its cards tight, top down; the HStack aligns the two along their BOTTOM
-        // edges. No maxHeight stretch — that filled a window taller than this tab
-        // and left both last cards floating over a gap. The columns are balanced
-        // closely enough that bottom-aligning them leaves only a little stagger
-        // at the very top rather than any gap in the middle.
-        HStack(alignment: .bottom, spacing: 16) {
-            VStack(spacing: 16) {
-                inputSourceCard
-                displayPortCard
-            }
-            .frame(maxWidth: .infinity)
-
-            VStack(spacing: 16) {
-                imageOptimizationCard
-                usbCCard
-                KVMMachinesCard(controller: controller)
-            }
-            .frame(maxWidth: .infinity)
+        // Input Source and DisplayPort on the left; Image Optimization, USB-C and
+        // KVM Machines on the right. BalancedColumns measures and pins both columns
+        // to the taller one's height, and the shorter column's `fill: true` card
+        // (DisplayPort on the left, KVM Machines on the right) grows its own
+        // background to match — tops and bottoms level, 16-pt gaps throughout, no
+        // grey above a card or in an uneven gap between tiles.
+        BalancedColumns {
+            inputSourceCard
+            displayPortCard
+        } right: {
+            imageOptimizationCard
+            usbCCard
+            KVMMachinesCard(controller: controller, fill: true)
         }
         .onAppear(perform: syncFromCurrent)
         .onChange(of: controller.currentMode?.id) { _, _ in syncFromCurrent() }
@@ -224,8 +217,7 @@ struct InputTab: View {
         Card(title: "Image Optimization", systemImage: "sparkles.rectangle.stack",
              help: """
              Resolution and refresh rate are set by macOS, not by the monitor, so these \
-             work over any connection — including one where DDC/CI is unavailable. \
-             “Preferred Resolution” selects the native timing the panel advertises in its EDID.
+             work over any connection — including one where DDC/CI is unavailable.
              """) {
             if !controller.hasLocalDisplay {
                 UnavailableNote(text: "Resolution and refresh rate are macOS settings for a display "
@@ -246,23 +238,7 @@ struct InputTab: View {
                     }),
                 enabled: controller.hasLocalDisplay && !controller.modeGroups.isEmpty && !controller.isProbing,
                 width: 300)
-
-            HStack(spacing: 12) {
-                Text("Preferred Resolution")
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.textPrimary)
-                Spacer(minLength: 8)
-                Button("Apply") { controller.applyPreferredTiming() }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Theme.accent)
-                    .disabled(controller.preferredTimingLabel == nil)
-            }
-            if let preferred = controller.preferredTimingLabel {
-                Text("Panel reports \(preferred) as its native timing.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textDim)
-            }
+            .padding(.leading, 14)
 
             FieldLabel(text: "Refresh Rate")
             StyledPicker(
@@ -279,18 +255,14 @@ struct InputTab: View {
                     }),
                 enabled: controller.hasLocalDisplay && !modes(for: resolution).isEmpty && !controller.isProbing,
                 width: 200)
-
-            if let current = controller.currentMode {
-                Text("Currently \(current.detailLabel) at \(current.refreshLabel).")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(Theme.textDim)
-            }
+            .padding(.leading, 14)
         }
     }
 
     private var displayPortCard: some View {
         Card(title: "DisplayPort", systemImage: "cable.connector",
-             help: "Selects the DisplayPort protocol version the monitor negotiates. Not a standard MCCS feature.") {
+             help: "Selects the DisplayPort protocol version the monitor negotiates. Not a standard MCCS feature.",
+             fill: true) {
             VendorGroup(controls: [.displayPortVersion], controller: controller)
         }
     }
@@ -322,18 +294,16 @@ struct DisplayTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        // Two balanced columns rather than a 2-up grid: the tall Image card on
-        // the left, the two shorter cards stacked on the right to match its
-        // height, so neither column trails a long run of empty space.
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) {
-            // The three image sliders in one card, and Panel promoted beside
-            // them. Split across two cards, Sharpness was a single slider in a
-            // card the height of two, and Power — three words and a row of
-            // buttons — sat next to the tallest card on the tab. Grouping what
-            // is adjusted together leaves the tall card paired with the tall one.
+        // Image sliders on the left, the read-only Panel facts on the right.
+        // (The monitor's power mode lives on the Power tab.) Both are single-card
+        // columns, which the .fixedSize idiom cannot stretch to match, so this tab
+        // measures (BalancedColumns): both adopt the taller one's height and the
+        // shorter column's `fill: true` card grows its own background to match —
+        // tops and bottoms level, no grey above a card or in a gap between tiles.
+        BalancedColumns {
             Card(title: "Image", systemImage: "sun.max",
-                 help: "MCCS luminance (0x10), contrast (0x12) and sharpness (0x87).") {
+                 help: "MCCS luminance (0x10), contrast (0x12) and sharpness (0x87).",
+                 fill: true) {
                 if controller.features[0x10]?.readable == true ||
                    controller.features[0x12]?.readable == true {
                     FeatureSlider(code: 0x10, label: "Brightness", controller: controller)
@@ -366,13 +336,10 @@ struct DisplayTab: View {
                     }
                 }
             }
-
-            }
-            .frame(maxWidth: .infinity)
-
-            VStack(spacing: 16) {
+        } right: {
             Card(title: "Panel", systemImage: "info.circle",
-                 help: "Read-only facts the monitor reports about itself.") {
+                 help: "Read-only facts the monitor reports about itself.",
+                 fill: true) {
                 if let edid = controller.selected?.edid {
                     InfoRow("Model", edid.displayName)
                     InfoRow("Manufacturer", edid.manufacturerID)
@@ -392,40 +359,6 @@ struct DisplayTab: View {
                         .font(.system(size: 12)).foregroundStyle(Theme.textDim)
                 }
             }
-
-            Card(title: "Power", systemImage: "powerplug",
-                 help: """
-                 MCCS power mode (0xD6). On this panel the code reports the last value \
-                 written to it rather than the monitor's live state, so it is presented as \
-                 commands rather than as a setting you can read back.
-                 """) {
-                if let state = controller.features[0xD6], state.readable {
-                    FieldLabel(text: "Power Mode")
-                    HStack(spacing: 8) {
-                        ForEach(state.choices.filter { $0.value <= 4 }, id: \.value) { choice in
-                            Button(choice.label) {
-                                Task<Void, Never> { await controller.set(code: 0xD6, value: choice.value) }
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(Theme.accent)
-                        }
-                    }
-                    Text("Monitor reports: \(state.labelFor(value: state.current))")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(Theme.textSecond)
-                    if state.current != 1 {
-                        UnavailableNote(text: "The panel keeps reporting this after it has woken by "
-                            + "other means — switching input powers it back on without clearing the "
-                            + "value. Press On to bring the reading back in line.")
-                    }
-                } else {
-                    FieldLabel(text: "Power Mode")
-                    MonitorSideUnavailable(controller: controller)
-                }
-            }
-            }
-            .frame(maxWidth: .infinity)
         }
     }
 }
@@ -868,23 +801,16 @@ struct ViewTab: View {
     @ObservedObject var controller: MonitorController
 
     var body: some View {
-        // Two explicit columns rather than a flowing grid. Monitor Menu is much
-        // taller than the other two cards (it carries the OSD preview and its
-        // sliders), so a 2-column auto-grid stretched the first row, left a gap
-        // under Pivot, and stranded the bottom-right cell empty. Stacking the two
-        // short cards on the left against Monitor Menu on the right balances the
-        // heights and fills the tab — the same idiom InputTab uses.
-        HStack(alignment: .top, spacing: 16) {
-            VStack(spacing: 16) {
-                pivotCard
-                onScreenDisplayCard
-            }
-            .frame(maxWidth: .infinity)
-
-            VStack(spacing: 16) {
-                monitorMenuCard
-            }
-            .frame(maxWidth: .infinity)
+        // Pivot and On-Screen Display stacked on the left, Monitor Menu (tall: it
+        // carries the OSD preview and its sliders) on the right. BalancedColumns
+        // measures and pins both columns to the taller one's height; the shorter
+        // column's `fill: true` card grows its own background to match — tops and
+        // bottoms level, no grey above a card or in an uneven gap between tiles.
+        BalancedColumns {
+            pivotCard
+            onScreenDisplayCard
+        } right: {
+            monitorMenuCard
         }
     }
 
@@ -918,24 +844,17 @@ struct ViewTab: View {
             }
             .toggleStyle(StatusToggleStyle())
 
-            Text(pivotFollowCaption)
-                .font(.system(size: 11.5))
-                .foregroundStyle(Theme.textDim)
-                .fixedSize(horizontal: false, vertical: true)
+            // The idle "what this does" description is dropped for compactness;
+            // only the live loop status shows, and only while auto-follow is on.
+            if controller.pivotAutoFollow {
+                Text(controller.pivotFollowStatus.isEmpty ? "Reading the panel…"
+                                                          : controller.pivotFollowStatus)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(Theme.textDim)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .onAppear { controller.refreshPivot() }
-    }
-
-    /// The line under the Auto-follow toggle: the live loop status when armed, or
-    /// what it will do — with the not-yet-calibrated caveat — when idle.
-    private var pivotFollowCaption: String {
-        if controller.pivotAutoFollow {
-            return controller.pivotFollowStatus.isEmpty ? "Reading the panel…"
-                                                        : controller.pivotFollowStatus
-        }
-        let via = controller.proxyHost.isEmpty ? "the PC" : controller.proxyHost
-        return "Rotates whatever's on the panel — the Mac, or the PC on USB-C — as you "
-            + "physically pivot it, sensed by the phone on the panel back (read via \(via))."
     }
 
     // Three settings HP's Menu screen owns, reachable only as 0xE1 sub-selectors
@@ -946,7 +865,8 @@ struct ViewTab: View {
         Card(title: "Monitor Menu", systemImage: "menubar.rectangle",
              help: "Where the monitor's own menu appears, how long it stays up, "
                  + "and how transparent it is. Vendor sub-selectors 0x3B, 0x3C, "
-                 + "0x3E and 0x56 — set only, never reported back.") {
+                 + "0x3E and 0x56 — set only, never reported back.",
+             fill: true) {
             if controller.controlsLive {
                 OSDMenuPreview(
                     horizontal: controller.osdMenuH,
@@ -978,20 +898,34 @@ struct ViewTab: View {
 
     private var onScreenDisplayCard: some View {
         Card(title: "On-Screen Display", systemImage: "character.bubble",
-             help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).") {
-            FieldLabel(text: "Language")
-            if controller.features[0xCC]?.readable == true {
-                FeaturePicker(code: 0xCC, controller: controller)
-            } else {
-                StyledPicker(options: [(value: UInt16(2), label: "English")],
-                             selection: .constant(UInt16(2)), enabled: false, width: 220)
+             help: "MCCS OSD language (0xCC) and OSD/button lock (0xCA).",
+             fill: true) {
+            // Language and Controls share one row — a label above each dropdown,
+            // side by side — so the card stays as short as its two controls.
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    FieldLabel(text: "Language")
+                    if controller.features[0xCC]?.readable == true {
+                        FeaturePicker(code: 0xCC, controller: controller)
+                    } else {
+                        StyledPicker(options: [(value: UInt16(2), label: "English")],
+                                     selection: .constant(UInt16(2)), enabled: false)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    FieldLabel(text: "Controls")
+                    if controller.features[0xCA]?.readable == true {
+                        FeaturePicker(code: 0xCA, controller: controller)
+                    } else {
+                        StyledPicker(options: [(value: UInt16(2), label: "OSD enabled")],
+                                     selection: .constant(UInt16(2)), enabled: false)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            FieldLabel(text: "Controls")
-            if controller.features[0xCA]?.readable == true {
-                FeaturePicker(code: 0xCA, controller: controller)
-            } else {
-                StyledPicker(options: [(value: UInt16(2), label: "OSD enabled")],
-                             selection: .constant(UInt16(2)), enabled: false, width: 220)
+            if controller.features[0xCA]?.readable != true {
                 MonitorSideUnavailable(controller: controller)
             }
         }
@@ -1092,14 +1026,20 @@ struct MultiScreenTab: View {
     }
 
     private var grid: some View {
-        CardGrid {
+        // Picture in Picture on the left, the short Displays list on the right.
+        // Both are single-card columns, which the .fixedSize idiom cannot
+        // stretch, so this tab measures (BalancedColumns): both adopt the taller
+        // one's height and the Displays tile absorbs the slack inside its own
+        // bottom, never as grey at the window top or a gap between the tiles.
+        BalancedColumns {
             Card(title: "Picture in Picture", systemImage: "rectangle.inset.topright.filled",
                  help: """
                  None of this is in the public MCCS tables. HP puts all four settings behind \
                  0xE1's sub-addressing — 0x11 on/off, 0x12 mode, 0x13 size, 0x14 placement — \
                  found by experiment. The panel obeys these writes but will not report them \
                  back, so what is shown here is what was last sent, not a reading.
-                 """) {
+                 """,
+                 fill: true) {
                 Toggle(isOn: Binding(
                     get: { controller.pipOn },
                     set: { on in Task<Void, Never> { await controller.applyPiPOn(on) } })) {
@@ -1145,6 +1085,17 @@ struct MultiScreenTab: View {
                     }
                 }
 
+                // Why Placement and Size go dead: in side-by-side the two sources
+                // split the panel evenly, so there is no inset to move or resize.
+                if controller.pipOn && controller.pipSideBySide {
+                    Text("Side by side splits the panel evenly — Placement and Size "
+                         + "apply to the inset only, so they're off here. Tap Side by "
+                         + "side again to go back to an inset and resize it.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(Theme.textDim)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
                 if controller.pipOn {
                     Divider().overlay(Theme.rule).padding(.vertical, 2)
                     ControlRow(label: "Main input") {
@@ -1186,12 +1137,40 @@ struct MultiScreenTab: View {
                     .help("macOS only applies this after zBezel is relaunched.")
                 }
             }
-
+        } right: {
             Card(title: "Displays macOS Can See", systemImage: "rectangle.on.rectangle",
-                 help: "Arrangement and mirroring are macOS-side and unaffected by DDC/CI.") {
+                 help: "Arrangement and mirroring are macOS-side and unaffected by DDC/CI.",
+                 fill: true) {
                 ForEach(controller.displays) { display in
-                    InfoRow(display.isBuiltIn ? "Built-in" : "External",
-                            "\(display.name) — \(DisplayModes.current(for: display.id)?.detailLabel ?? "—")")
+                    let mode = DisplayModes.current(for: display.id)
+                    HStack(alignment: .top) {
+                        Text(display.isBuiltIn ? "Built-in" : "External")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.textSecond)
+                            .frame(width: 130, alignment: .leading)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("\(display.name) — \(mode?.resolutionLabel ?? "—")")
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.textPrimary)
+                            if let mode, mode.isHiDPI {
+                                // Build as a String so SwiftUI does not apply
+                                // locale digit grouping ("5,120") the way it does
+                                // to an Int interpolated into a Text literal.
+                                Text(verbatim: "HiDPI \(mode.pixelWidth) × \(mode.pixelHeight)")
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(Theme.textDim)
+                                    .padding(.leading, 14)
+                            }
+                            if let w = display.edid?.nativeWhitePoint {
+                                Text("White point \(w.label)"
+                                     + (display.edid?.whitePointCCT.map { " · \($0) K" } ?? ""))
+                                    .font(.system(size: 11.5))
+                                    .foregroundStyle(Theme.textDim)
+                                    .padding(.leading, 14)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                    }
                 }
                 Button("Open Displays settings") {
                     if let url = URL(string: "x-apple.systempreferences:com.apple.Displays-Settings.extension") {
@@ -1215,6 +1194,7 @@ struct MultiScreenTab: View {
 /// the panel is switched to when the pointer arrives.
 private struct KVMMachinesCard: View {
     @ObservedObject var controller: MonitorController
+    var fill = false
     @State private var newHost = ""
     @State private var newInput: UInt16 = 0x11      // HDMI: the usual spare
 
@@ -1227,7 +1207,8 @@ private struct KVMMachinesCard: View {
              help: "The pointer leaves the Mac at the panel's right edge and "
                  + "enters the first machine. Pushing past that machine's right "
                  + "edge enters the next. Each machine's input is what the "
-                 + "monitor is switched to when the pointer arrives there.") {
+                 + "monitor is switched to when the pointer arrives there.",
+             fill: fill) {
             if controller.kvmMachines.isEmpty {
                 Text("No machines on the network yet. One running the agent will "
                    + "appear here on its own.")

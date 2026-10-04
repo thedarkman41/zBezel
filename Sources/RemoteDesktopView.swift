@@ -13,6 +13,7 @@ import SwiftUI
 /// offered, not just the proxy.
 struct WakeConsoleCard: View {
     @ObservedObject var controller: MonitorController
+    var fill = false
     @StateObject private var desktop = RemoteDesktop()
 
     /// Which machine to wake. Remembered across launches.
@@ -46,7 +47,8 @@ struct WakeConsoleCard: View {
              machine to move that session onto the physical console, where the agent \
              can see the real monitors again. The password comes from Beacon, under \
              the name zBezel-rdp-<host>.
-             """) {
+             """,
+             fill: fill) {
 
             if hosts.count > 1 {
                 HStack(spacing: 8) {
@@ -79,6 +81,25 @@ struct WakeConsoleCard: View {
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(canWake ? Theme.accent : Theme.textDim)
                 .disabled(!canWake)
+
+                // Wake pushes a session to the console and disconnects; it cannot
+                // answer anything that needs a cursor — a UAC prompt, the sign-in
+                // screen, netplwiz. Control opens the same RDP but keeps the pixels
+                // in a window you drive. It is the only interactive way into a box
+                // whose agent is down, so it belongs here and not only on the KVM
+                // rows (which vanish with the agent). Same account and Beacon
+                // password as Wake; connecting redirects the machine's session
+                // here, so its physical panel goes dark until you disconnect.
+                Button(action: { controlSession() }) {
+                    Text("Control")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(canControl ? Theme.accent : Theme.textDim)
+                .disabled(!canControl)
+                .help("Open an interactive RDP window to \(host) you can click and "
+                    + "type into — the one way to answer a UAC prompt or the sign-in "
+                    + "screen. Its physical panel goes dark until you disconnect.")
             }
 
             // A Microsoft Account does not sign in under the short local name
@@ -197,6 +218,21 @@ struct WakeConsoleCard: View {
     }
 
     private var canWake: Bool { !host.isEmpty && !user.isEmpty && !isBusy }
+
+    /// Control is independent of the Wake step machine — it opens its own window
+    /// and runs its own session — so it only needs a host and an account, not an
+    /// idle wake.
+    private var canControl: Bool { !host.isEmpty && !user.isEmpty }
+
+    /// Open an interactive RDP window to the selected host. The window reads the
+    /// same per-host account this card persists and the same Beacon password Wake
+    /// uses, so `save()` first to make sure what is typed here has been written
+    /// through before the window reads it back.
+    private func controlSession() {
+        save()
+        RDPControl.shared.open(host: host, name: host,
+                               size: CGSize(width: 1920, height: 1080))
+    }
 
     @ViewBuilder
     private var statusLine: some View {
