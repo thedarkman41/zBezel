@@ -61,16 +61,26 @@ static BOOL zb_save_session_info(rdpContext *context, UINT32 type, void *data)
         case INFO_TYPE_LOGON_EXTENDED_INF:
         {
             const logon_info_ex *ex = (const logon_info_ex *)data;
-            if (ex && ex->haveErrorInfo)
+            if (ex && ex->haveErrorInfo
+                && ex->ErrorNotificationType != LOGON_MSG_DISCONNECT_REFUSED
+                && ex->ErrorNotificationData != LOGON_WARNING)
             {
                 snprintf(ctx->logon_error, sizeof ctx->logon_error, "LOGON_ERROR_%08X_%08X",
                          (unsigned)ex->ErrorNotificationType, (unsigned)ex->ErrorNotificationData);
                 ctx->logon_failed = 1;
             }
-            else if (ex && ex->haveCookie)
+            else if (ex && (ex->haveErrorInfo || ex->haveCookie))
             {
-                /* The auto-reconnect cookie is only issued once the user is
-                   logged on, so it is as good as a logon notice. */
+                /* Either an auto-reconnect cookie (only issued once the user is
+                   logged on, so as good as a logon notice), OR a
+                   DISCONNECT_REFUSED / LOGON_WARNING — which is NOT a refusal:
+                   the credentials were accepted and a session now exists, it
+                   just could not seize the console (the login screen's own
+                   session held it) and was left Disconnected. That Disconnected
+                   session is exactly what Wake Console goes on to tscon, so it
+                   counts as a logon. FreeRDP fills ErrorNotificationType with the
+                   LOGON_MSG_* and ErrorNotificationData with the severity — the
+                   reverse of their names. */
                 ctx->logon_seen = 1;
             }
             break;
@@ -90,6 +100,17 @@ static int zb_logon_error_info(freerdp *instance, UINT32 data, UINT32 type)
 {
     zbContext *ctx = (zbContext *)instance->context;
     if (type == LOGON_MSG_SESSION_CONTINUE) return 1;
+
+    /* DISCONNECT_REFUSED, or any warning, is not a refusal: a session was logged
+       on, it just stayed off the console because the login screen's session held
+       it. That Disconnected session is what Wake Console tscons, so record a
+       logon rather than a failure. Here `type` carries the LOGON_MSG_* and `data`
+       the severity. */
+    if (type == LOGON_MSG_DISCONNECT_REFUSED || data == LOGON_WARNING)
+    {
+        ctx->logon_seen = 1;
+        return 1;
+    }
 
     const char *why;
     switch (data)

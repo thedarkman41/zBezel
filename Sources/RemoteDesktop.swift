@@ -73,6 +73,14 @@ final class RemoteDesktop: ObservableObject {
         }
         note("credential obtained")
 
+        // Clear any disconnected session this user already has on the box before
+        // connecting. One left behind by an earlier wake that never reached the
+        // console makes the new logon fail outright — single-session Windows will
+        // not bump it — and they otherwise pile up, one per attempt. Best-effort
+        // over SSH on the same path the reclaim uses; if the box is unreachable
+        // the touch reports that more usefully than this could.
+        await Self.clearStaleSessions(sshTarget: sshTarget ?? host, user: user)
+
         // 1 — make a session exist.
         step = .connecting
         let pinned = pinnedFingerprints[host.lowercased()]
@@ -160,6 +168,23 @@ final class RemoteDesktop: ObservableObject {
             step = .failed("The session exists but \(target) could not be reached over SSH "
                          + "to move it to the console: \(output)")
         }
+    }
+
+    /// Logs off any *disconnected* session already open for `user` on the box, so
+    /// the touch's new logon is not refused by a leftover (single-session Windows
+    /// cannot bump a stale session, and a failed wake otherwise adds one each
+    /// time). Matches the bare account name qwinsta prints and only the Disc
+    /// state, so the live console and anyone else's session are left alone.
+    /// Best-effort and silent: a box that cannot be reached here will surface it
+    /// at the touch.
+    private nonisolated static func clearStaleSessions(sshTarget host: String, user: String) async {
+        let script = "$u = '\(user)'; "
+            + "(query session 2>$null) | ForEach-Object { "
+            + "if ($_ -match ('\\s' + [regex]::Escape($u) + '\\s+(\\d+)\\s+Disc')) "
+            + "{ logoff $Matches[1] 2>$null } }"
+        _ = await ConsoleReclaim.run("/usr/bin/ssh",
+                                     ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+                                      host, script])
     }
 
     // MARK: - The C call
