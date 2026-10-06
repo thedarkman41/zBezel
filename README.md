@@ -4,6 +4,8 @@ A macOS menu bar app for the HP Z27k G3, modelled on HP's Windows
 "HP Display Center". It adjusts the monitor itself over VESA DDC/CI (MCCS), and
 the host-side display settings over CoreGraphics.
 
+![zBezel — DDC/CI input switching, image optimization, and a networked KVM machine list](docs/screenshot.png)
+
 Lives in the menu bar as **zBezel**:
 
 - **Left-click** cycles the monitor's input. The new input's name appears beside
