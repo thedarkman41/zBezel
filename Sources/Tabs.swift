@@ -1234,6 +1234,24 @@ private struct KVMMachinesCard: View {
                     Text(machine.host)
                         .font(.system(size: 13))
                         .foregroundStyle(health == .unreachable ? Theme.textDim : Theme.textPrimary)
+                    // Discovery is unauthenticated, so a machine receives keyboard
+                    // and mouse only once approved. Until then it shows here but
+                    // stays out of the input chain.
+                    if !controller.isKVMTrusted(machine.host) {
+                        Button {
+                            controller.trustKVMHost(machine.host)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "lock.fill").font(.system(size: 9.5))
+                                Text("Allow input").font(.system(size: 10.5, weight: .medium))
+                            }
+                            .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Discovered on the network but NOT yet approved to receive "
+                            + "keyboard and mouse. Discovery is unauthenticated, so a machine "
+                            + "joins the KVM input chain only after you allow it here.")
+                    }
                     Spacer(minLength: 8)
                     // A fixed, left-aligned column so the resolutions line up
                     // down the card whatever the host names measure. Reserved

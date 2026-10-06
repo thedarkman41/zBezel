@@ -172,6 +172,18 @@ final class MonitorController: ObservableObject {
     @Published private(set) var kvmStatus = "off"
     @Published var kvmError: String?
 
+    /// Hosts the user has approved to RECEIVE KVM keyboard/mouse input.
+    ///
+    /// Discovery is presence-only and unauthenticated — a machine that merely
+    /// broadcasts a `bezelkvm` announcement on the LAN is shown, but it does NOT
+    /// join the input chain until it is approved here. Without this, anyone on the
+    /// network could spoof an announcement with a matching panel product code and
+    /// have the pointer — and whatever is typed while it is there — stream to them.
+    /// A hand-pinned host and the proxy are trusted implicitly (the user named
+    /// them); a discovered host is approved once. Persisted, and seeded on first
+    /// run from the machines already in use so upgrading changes nothing for them.
+    @Published private(set) var trustedKVMHosts: Set<String> = []
+
     init() {
         let defaults = UserDefaults.standard
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
@@ -218,6 +230,22 @@ final class MonitorController: ObservableObject {
         kvm.onScreenshot = { [weak self] data in
             guard let image = NSImage(data: data) else { return }
             self?.pcSnapshot = image
+        }
+
+        // KVM input trust (seeded last, once all state is in place). On the first
+        // run after this shipped there is no stored set, so seed it from whatever
+        // was already in use — current machines, pins, and the proxy — and the
+        // upgrade is invisible. Thereafter a newly discovered machine stays out of
+        // the input chain until it is explicitly approved.
+        let td = UserDefaults.standard
+        if let stored = td.array(forKey: "trustedKVMHosts") as? [String] {
+            trustedKVMHosts = Set(stored.map { $0.lowercased() })
+        } else {
+            var seed = Set(kvmMachines.map { $0.host.lowercased() }
+                        + manualPins.map { $0.host.lowercased() })
+            if !proxyHost.isEmpty { seed.insert(proxyHost.lowercased()) }
+            trustedKVMHosts = seed
+            td.set(Array(seed), forKey: "trustedKVMHosts")
         }
     }
 
@@ -1492,6 +1520,41 @@ final class MonitorController: ObservableObject {
         applyDiscovery()      // in case packets already landed before we wired up
     }
 
+    /// Whether a host may receive KVM keyboard/mouse input. Hand-pinned hosts and
+    /// the proxy are trusted implicitly (the user named them); a discovered host
+    /// must be approved via `trustKVMHost`. See `trustedKVMHosts`.
+    func isKVMTrusted(_ host: String) -> Bool {
+        let key = host.lowercased()
+        if trustedKVMHosts.contains(key) { return true }
+        if manualPins.contains(where: { $0.host.lowercased() == key }) { return true }
+        if !proxyHost.isEmpty, proxyHost.lowercased() == key { return true }
+        return false
+    }
+
+    /// The subset of a machine list allowed to receive input — what actually goes
+    /// into the live chain, as opposed to what is merely shown in the list.
+    private func trustedChain(_ all: [KVMController.Machine]) -> [KVMController.Machine] {
+        all.filter { isKVMTrusted($0.host) }
+    }
+
+    /// Approve a discovered machine to receive input and fold it into the live
+    /// chain now. It was already visible; this is what lets the pointer cross to it.
+    func trustKVMHost(_ host: String) {
+        let key = host.lowercased()
+        guard !trustedKVMHosts.contains(key) else { return }
+        trustedKVMHosts.insert(key)
+        UserDefaults.standard.set(Array(trustedKVMHosts), forKey: "trustedKVMHosts")
+        kvm.updateChain(trustedChain(kvmMachines))
+    }
+
+    /// Revoke input trust for a host and drop it from the live chain. The machine
+    /// stays visible; it just stops receiving input.
+    func untrustKVMHost(_ host: String) {
+        trustedKVMHosts.remove(host.lowercased())
+        UserDefaults.standard.set(Array(trustedKVMHosts), forKey: "trustedKVMHosts")
+        kvm.updateChain(trustedChain(kvmMachines))
+    }
+
     /// Rebuild the machine set from what the network shows right now, plus any
     /// hand-pinned hosts, and push it into the live chain. Discovered machines
     /// arrive already knowing their input (from the product code the agent
@@ -1534,7 +1597,8 @@ final class MonitorController: ObservableObject {
         guard !unchanged else { return }
 
         kvmMachines = next
-        kvm.updateChain(next)
+        // Show every discovered machine, but only stream input to approved ones.
+        kvm.updateChain(trustedChain(next))
     }
 
     /// Pin a host by hand, for a machine discovery will not see on its own.
@@ -1604,7 +1668,9 @@ final class MonitorController: ObservableObject {
             // the pointer reach an edge early or late, which is annoying, while
             // refusing to start makes the whole feature unavailable.
             let exe = #"$HOME\bezel\BezelAgent.exe"#
-            var chain = kvmMachines
+            // Only hosts approved for input are sized and connected; an unapproved
+            // discovered machine is shown in the list but never SSHed to for KVM.
+            var chain = trustedChain(kvmMachines)
             var unreachable: [String] = []
             for i in chain.indices {
                 // A hand-pinned size is authoritative — never overwrite it with a
@@ -1622,7 +1688,15 @@ final class MonitorController: ObservableObject {
                     unreachable.append(chain[i].name)
                 }
             }
-            kvmMachines = chain
+            // Reflect learned sizes back into the display list without dropping
+            // the unapproved rows the trusted filter left out of `chain`.
+            for m in chain {
+                if let idx = kvmMachines.firstIndex(where: {
+                    $0.host.lowercased() == m.host.lowercased() }) {
+                    kvmMachines[idx].width = m.width
+                    kvmMachines[idx].height = m.height
+                }
+            }
             kvm.machines = chain
             if !unreachable.isEmpty {
                 kvmError = "Could not read the screen size of "
