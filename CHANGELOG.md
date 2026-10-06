@@ -169,7 +169,7 @@ and from followManualInput when the Mac input is chosen by hand.
 
 **KVM: fast .local fallback, hold pointer on bring-up, live secure size**
 
-Three fixes for controlling bellatrix at its Windows sign-in screen,
+Three fixes for controlling the second Windows box at its Windows sign-in screen,
 surfaced when its Tailscale wedged and the box was only reachable over
 LAN mDNS.
 
@@ -184,7 +184,7 @@ B. engageSecure now fetches the live virtual-desktop size via a one-off
    coordinates against SM_C*VIRTUALSCREEN, and the ordinary channel that
    normally reports that size is refused at the secure desktop, so a box
    first reached at its sign-in screen kept a default guess (right for
-   bellatrix only by luck).
+   the second Windows box only by luck).
 
 C. The left-edge cross-back is suppressed while the control channel is
    still coming up: with nothing forwarded yet and the far desktop black,
@@ -319,7 +319,7 @@ Now:
   and a move that lands a different user's session is treated as a failure.
   A candidate inside a live RDP session is skipped outright: it enumerates
   the virtual display, and DDC to that "succeeds" without touching the panel.
-  Measured on rigel: SM_REMOTESESSION stays set on a session after its RDP
+  Measured on the Windows proxy: SM_REMOTESESSION stays set on a session after its RDP
   client disconnects, so "remote" only counts while the session is not known
   to be disconnected — otherwise the very state the reclaim exists for would
   be mistaken for a session in use.
@@ -335,9 +335,9 @@ Now:
   go. A machine the panel already shows still takes the pointer, since that
   needs no DDC.
 
-Verified end to end: with rigel left Disconnected by a Control session, the
+Verified end to end: with the Windows proxy left Disconnected by a Control session, the
 relaunched app found the agent detached, ran the reclaim (moved:true, from:1
-in rigel's reclaim.log at launch time), listed the panel, and adopted rigel
+in the Windows proxy's reclaim.log at launch time), listed the panel, and adopted the Windows proxy
 without anyone touching it.
 
 ## 0.1.53 — 2026-09-02
@@ -383,7 +383,7 @@ frame delivery downstream is unchanged whether a region arrived as H.264 or
 RemoteFX.
 
 Builds and links clean (every gfx/openh264 symbol resolved). The live render
-against rigel is pending a moment when the Mac's desktop is free to drive.
+against the Windows proxy is pending a moment when the Mac's desktop is free to drive.
 
 ## 0.1.51 — 2026-09-02
 
@@ -403,7 +403,7 @@ occasional SSH probe (every three minutes, and when the card appears):
 in this app — the exact bytes the installer would send. The probe is one
 PowerShell line (the far shell is PowerShell), and ssh's own exit 255 is what
 distinguishes "the box is off" from "reachable but no agent". Verified against
-rigel and bellatrix, both of which return a matching hash today.
+the Windows proxy and the second Windows box, both of which return a matching hash today.
 
 Scoped to Sources/AgentParity.swift, the KVM Machines card, and the parity
 methods in the controller; another session's in-flight Vendor work in the same
@@ -416,7 +416,7 @@ controller file was deliberately left unstaged.
 The KVM row's second button opens a live RDP session with pixels. Unlike the
 View stream, this one CAN see and answer the secure desktop — a UAC prompt or
 the sign-in screen — because Windows renders that into the RDP session while
-forbidding a local process from scraping it. Proven against rigel: the window
+forbidding a local process from scraping it. Proven against the Windows proxy: the window
 came up showing a real "Do you want to allow this app to make changes"
 elevation prompt that the screen-scrape returns black for.
 
@@ -476,7 +476,7 @@ so a script gets the truth. WebKit is now linked for the viewer window.
 
 WAKE CONSOLE NOW LOGS ON. The RDP touch authenticated (NLA passed, the
 Security log showed 4624 type 3) and then disconnected the instant the
-connection sequence finished, which left rigel with a ConnectQuery session
+connection sequence finished, which left the Windows proxy with a ConnectQuery session
 that had nobody in it and a console that never moved -- Windows simply tore
 the placeholder down. Two things were missing in rdp.c: the client never
 asked for AutoLogon, so the server accepted the credentials for the
@@ -487,7 +487,7 @@ sequence (a reconnect to an existing desktop can report its logon while the
 sequence is still running), and pumps the connection until the server names
 the session it logged us into or LogonErrorInfo refuses it, up to 30 s.
 Failures come back named: LOGON_TIMEOUT, LOGON_FAILED_*, the LOGON_MSG_*
-verdicts, DROPPED_BEFORE_LOGON. Measured on rigel with the user already at
+verdicts, DROPPED_BEFORE_LOGON. Measured on the Windows proxy with the user already at
 the console: NLA, then a type-10 logon that reconnected session 1 to RDP,
 our disconnect, an empty console placeholder, and tscon putting session 1
 back -- the card ends on "the console is showing the desktop".
@@ -519,7 +519,7 @@ Neither can see the secure desktop; that is what Wake Console is for.
 **Refuse to call a deploy done when the old agent binary survived**
 
 deploy-agent.sh stopped the agent, compiled, and checked only that an
-executable existed afterwards. On Bellatrix the compile failed with "cannot
+executable existed afterwards. On the second Windows box the compile failed with "cannot
 access the file because it is being used by another process" -- zBezel on
 the Mac keeps a `BezelAgent kvm` channel open over SSH and respawns it
 within a second of it dying, and the respawn arrived inside the script's
@@ -741,7 +741,7 @@ report. The old spinner and status text appeared beside the pill and shoved the
 toolbar sideways mid-refresh.
 
 THE LINK TAB no longer reads as a fault when everything works. It says "Monitor
-Control (via rigel)" or "(direct)", and the two DDC/CI rows go green whenever
+Control (via the Windows proxy)" or "(direct)", and the two DDC/CI rows go green whenever
 control genuinely works, naming where it was verified — through USB-C on the
 proxy, or through this Mac's own connector from the EDID. Those rows previously
 reported only this Mac's path, so a monitor being driven perfectly well showed
@@ -1850,7 +1850,7 @@ up.
 
 **KVM works end to end: pointer and keyboard cross to the PC**
 
-Verified on rigel. The pointer leaves the right edge of the Mac, control lands
+Verified on the Windows proxy. The pointer leaves the right edge of the Mac, control lands
 on the Windows machine and tracks continuously, and pushing back past its left
 edge returns it. Positions match exactly: the Mac sends "A 113 597" and the
 agent places the cursor at 113,597, at about 16ms per event on both sides with
@@ -1988,7 +1988,7 @@ the far machine believes it is held forever.
 
 VERIFIED, AND NOT
 
-The wire protocol is verified against rigel: absolute positioning lands within
+The wire protocol is verified against the Windows proxy: absolute positioning lands within
 3px, Caps Lock toggles, buttons and wheel are accepted. The Mac half compiles
 clean and the codesign identifier is stable across rebuilds, so the Accessibility
 grant it needs will survive them.
@@ -2064,7 +2064,7 @@ Made the agent DPI-aware. It had been reporting the desktop as 2560x1440 while
 it is 3840x2160 at 150%, so absolute coordinates would have landed two thirds of
 the way to where they were aimed, on scaled displays only.
 
-VERIFIED ON RIGEL
+VERIFIED ON THE WINDOWS PROXY
 
 Absolute positioning lands within 3px, exact at the origin; keyboard toggles
 Caps Lock; buttons and wheel are accepted. Residual x error is bounded and does

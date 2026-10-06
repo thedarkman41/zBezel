@@ -122,7 +122,7 @@ Build with `./Scripts/build-app.sh`.
   DisplayPort, `36D3` on USB-C, `36D5` on HDMI — so no two hosts agree on its
   product ID. Anything keyed on product code must therefore treat these as one
   monitor; the codes are not a stable identity. The HDMI value was confirmed on
-  Bellatrix, whose agent reports
+  the second Windows box, whose agent reports
   `\\?\DISPLAY#HPN36D5#...` while `0x60` reads `0x11`.
 - The monitor can be reached through the proxy with no local connection at all —
   it does not train the DisplayPort link while displaying another input, so macOS
