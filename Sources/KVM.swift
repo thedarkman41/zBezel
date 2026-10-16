@@ -77,6 +77,69 @@ enum KVMLog {
 /// RemoteAgent tears that master down with `ssh -O exit` whenever the host
 /// setting changes, which would take the clipboard with it as a side effect of
 /// an unrelated action.
+
+/// Frames newline-delimited replies out of one connection's byte stream.
+///
+/// Per-connection: created in `KVMTransport.connect()` and captured by that
+/// connection's read handler, so a reconnect gets a fresh framer. The old
+/// handler — which libdispatch may still be running when `connect()` returns —
+/// keeps mutating its OWN framer, so `connect()` never reaches across a thread
+/// to reset shared framing state, and a dead connection's half-line can never
+/// prefix the next connection's first reply.
+private final class LineFramer {
+    private var buffer = Data()
+    /// How far `buffer` has already been searched for a newline. A `Process` pipe
+    /// hands back only ~4 KB per read and a clipboard payload is ONE base64 line
+    /// up to ~43 MB, so re-scanning the whole buffer on every chunk is quadratic
+    /// (minutes for a big image). This keeps each byte scanned exactly once.
+    private var scanned = 0
+    private var discarding = false
+    private let label: String
+
+    /// A clipboard payload is one base64 line; both ends agree a 32 MB raw limit
+    /// (~43 MB base64), so the buffer must hold a whole one — 48 MB gives headroom.
+    /// (The earlier 8 MB cap silently dropped any clipboard image over ~6 MB raw,
+    /// e.g. a 4K screenshot.) A line past this cannot be framed, so it is drained
+    /// through its own newline rather than wiping the buffer and desyncing the next.
+    private static let cap = 48 * 1_048_576
+
+    init(label: String) { self.label = label }
+
+    /// Append a chunk and deliver each complete line, trailing newline stripped.
+    func ingest(_ chunk: Data, onLine: (String) -> Void) {
+        buffer.append(chunk)
+        while true {
+            if discarding || buffer.count > LineFramer.cap {
+                if !discarding {
+                    KVMLog.write("transport[\(label)]: discarding an oversized reply (> 48 MB)")
+                    discarding = true
+                }
+                guard let nl = nextNewline() else {
+                    buffer.removeAll(keepingCapacity: false); scanned = 0; return
+                }
+                buffer.removeSubrange(buffer.startIndex...nl); scanned = 0
+                discarding = false
+                continue
+            }
+            guard let nl = nextNewline() else { return }
+            let raw = buffer[buffer.startIndex..<nl]
+            buffer.removeSubrange(buffer.startIndex...nl); scanned = 0
+            let line = String(decoding: raw, as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !line.isEmpty { onLine(line) }
+        }
+    }
+
+    /// The next newline at or after `scanned`, advancing the cursor so a growing
+    /// unterminated line is searched incrementally rather than from the start.
+    private func nextNewline() -> Data.Index? {
+        let from = buffer.index(buffer.startIndex, offsetBy: scanned)
+        if let nl = buffer[from...].firstIndex(of: 0x0A) { return nl }
+        scanned = buffer.count
+        return nil
+    }
+}
+
 final class KVMTransport {
     /// How to get back if the channel dies. Set on every connect.
     private var lastHost: String?
@@ -182,6 +245,11 @@ final class KVMTransport {
         self.stdoutReader = stdoutReader
         self.stderrReader = stderrReader
 
+        // Framing state for THIS connection only, captured by the handler below.
+        // A reconnect makes a fresh framer, so the old handler — which libdispatch
+        // may still be running when connect() returns — keeps mutating its own
+        // buffer, and connect() never reaches across a thread to reset it.
+        let framer = LineFramer(label: command)
         stdoutReader.readabilityHandler = { [weak self] handle in
             guard let self else { return }
             let chunk = handle.availableData
@@ -199,31 +267,15 @@ final class KVMTransport {
                 return
             }
 
-            // Split on BYTES, not Characters.
-            //
-            // The far side is Console.WriteLine on Windows, so lines end "\r\n"
-            // — and in Swift "\r\n" is a single Character, so searching a String
-            // for "\n" never matches it. Every line silently failed to parse:
-            // the ready handshake stopped being seen and clipboard payloads were
-            // dropped, while the channel itself was working perfectly.
-            //
-            // Only this handler touches the buffer.
-            self.stdoutBuffer.append(chunk)
-            if self.stdoutBuffer.count > 8 * 1_048_576 {
-                KVMLog.write("transport: discarding an oversized unterminated reply")
-                self.stdoutBuffer.removeAll(keepingCapacity: false)
-                return
-            }
-            while let newline = self.stdoutBuffer.firstIndex(of: 0x0A) {
-                let raw = self.stdoutBuffer[self.stdoutBuffer.startIndex..<newline]
-                self.stdoutBuffer.removeSubrange(self.stdoutBuffer.startIndex...newline)
-                let line = String(decoding: raw, as: UTF8.self)
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            // The far side is Console.WriteLine (CRLF-terminated). The framer splits
+            // on the LF byte and trims, so a line never arrives with its terminator,
+            // and each byte is scanned once even while a big payload accumulates.
+            framer.ingest(chunk) { line in
                 if line.contains("\"ready\"") {
                     self.readyLock.lock()
                     self.readyFlag = true
                     self.readyLock.unlock()
-                } else if !line.isEmpty {
+                } else {
                     self.onLine?(line)
                 }
             }
@@ -257,7 +309,6 @@ final class KVMTransport {
     }
 
     private var sentCount = 0
-    private var stdoutBuffer = Data()
 
     /// A complete line received from the far side, other than the handshake.
     var onLine: ((String) -> Void)?
