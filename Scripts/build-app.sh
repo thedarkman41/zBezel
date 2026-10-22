@@ -84,6 +84,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>NSHighResolutionCapable</key><true/>
     <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
     <key>LSUIElement</key><true/>
+    <key>NSLocalNetworkUsageDescription</key><string>zBezel reaches KVM and display agents on your local network to switch monitor inputs and share the clipboard. This is also required so it keeps local-network access when Beacon Keep Alive restarts it under launchd.</string>
 </dict>
 PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
@@ -137,6 +138,29 @@ SIGN_ID="zBezel Code Signing"
 INSTALL="/Applications/zBezel.app"
 rm -rf "$INSTALL"
 /usr/bin/ditto --norsrc --noextattr "$APP" "$INSTALL"
+
+# Beacon Keep-Alive (BeaconKeepAlive.swift) is offered only when our broadcast
+# frameworkVersion EQUALS Beacon's current one. That version travels as a
+# "<executable>.beaconfw" sidecar the app reads at runtime and sends on every
+# heartbeat — Beacon's single source of truth is BeaconVersion.swift, grepped
+# here so shell and app agree (the same recipe as Beacon/Scripts/sign-for-beacon.sh).
+# Written BEFORE signing so codesign seals it into the bundle and the strict
+# verify below still passes; skipped silently if the Beacon repo isn't a sibling
+# (the checkbox then just stays greyed, which is correct).
+BEACON_FW_FILE="$REPO/../Beacon/Sources/BeaconCore/BeaconVersion.swift"
+if [[ -f "$BEACON_FW_FILE" ]]; then
+    # head -n1 guards against two literals; `|| true` keeps a no-match grep (exit
+    # 1) from aborting the whole script under `set -euo pipefail` AFTER the app is
+    # already copied into /Applications but BEFORE it is signed.
+    FW_VERSION="$(grep -oE 'framework = "[^"]*"' "$BEACON_FW_FILE" 2>/dev/null | head -n1 | sed -E 's/.*"([^"]*)".*/\1/' || true)"
+    if [[ -n "$FW_VERSION" ]]; then
+        # Resources/, NOT MacOS/: codesign treats any non-code file beside the
+        # executable as an unsigned nested component and fails --strict, so a
+        # bundled .app keeps the sidecar among its sealed resources.
+        printf '%s' "$FW_VERSION" > "$INSTALL/Contents/Resources/zBezel.beaconfw"
+        echo "Beacon framework sidecar: $FW_VERSION"
+    fi
+fi
 
 if security find-certificate -c "$SIGN_ID" >/dev/null 2>&1; then
     codesign --force --sign "$SIGN_ID" --identifier zBezel "$INSTALL"

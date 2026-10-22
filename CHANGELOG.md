@@ -2,6 +2,38 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.13 — 2026-10-22
+
+**Enroll zBezel in Beacon Keep-Alive so it auto-restarts**
+
+zBezel had no auto-restart path: a quit, crash, or reboot left the
+menu-bar app down with nothing to bring it back (how it stayed down on
+2026-10-20). It used only Beacon's secret broker, not the Keep-Alive
+heartbeat, so it never appeared as a kept-alive row.
+
+Add BeaconKeepAlive: a 30s loopback heartbeat (name, port, version,
+frameworkVersion, relaunch), a synchronous /api/remove on graceful quit,
+and a fixed loopback TCP liveness listener on 48223. zBezel runs no TCP
+server of its own, and Beacon decides liveness/Quit/Restart by lsof on
+the reported TCP port, so this listener gives Beacon a truthful port:
+its sweep sees us, Quit/Restart reach us, and it never bootstraps a
+duplicate. The listener is also the single-instance guard (binds without
+SO_REUSEPORT; a second copy fails to bind and exits), with SO_REUSEADDR
+so a quick relaunch can rebind over a TIME_WAIT.
+
+The relaunch command targets the inner binary in nohup form so launchd
+can supervise it and restart it on a crash (LaunchAgentManager strips the
+nohup/& to a foreground command). NSLocalNetworkUsageDescription is added
+so the launchd-run binary keeps Local Network access. A SIGTERM ->
+NSApp.terminate bridge routes Beacon's Quit (now that it can reach zBezel
+by its liveness PID) through the normal clean shutdown instead of an
+abrupt kill.
+
+build-app.sh writes the frameworkVersion sidecar (zBezel.beaconfw) into
+Contents/Resources so codesign seals it and --strict still passes, and
+hardens the version grep so a no-match under pipefail can't abort the
+build after the app is already installed but before it is signed.
+
 ## 1.3.12 — 2026-10-02
 
 **Link tab: two balanced columns + drop redundant proxy monitor list**

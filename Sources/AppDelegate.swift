@@ -17,8 +17,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     private var switching = false
     private var observation: AnyCancellable?
     private var refreshTimer: Timer?
+    private var sigtermSource: DispatchSourceSignal?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // FIRST, before any UI or side effects: enrol in Beacon Keep Alive and
+        // bring up the liveness listener. launchd then starts zBezel at login and
+        // restarts it on a crash, and Beacon revives it after a reboot — the
+        // enrolment that was missing when zBezel silently stayed down after the
+        // disappearance on 2026-10-20. This call also owns the single-instance
+        // guard: if another zBezel already holds the liveness port, start() exits
+        // this process cleanly, so running it first avoids flashing a second
+        // menu-bar icon. Best-effort; never blocks launch. See BeaconKeepAlive.swift.
+        BeaconKeepAlive.shared.start()
+
+        // Now that Beacon can reach zBezel by its liveness port, its right-click
+        // Quit (and pkill, and the ship scripts) send SIGTERM — which AppKit does
+        // NOT route through applicationWillTerminate. Without this the process
+        // would die without handing the pointer back or stopping the clipboard
+        // (the decoupled-mouse state applicationWillTerminate guards against) and
+        // without POSTing /api/remove. Route SIGTERM through the normal terminate
+        // path. (Mirrors Kelvin's Diagnostics.swift.)
+        signal(SIGTERM, SIG_IGN)
+        let term = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        term.setEventHandler { NSApp.terminate(nil) }
+        term.resume()
+        sigtermSource = term
+
         // Arm the amber-blink instrumentation: macOS display-reconfiguration and
         // sleep/wake go to linkwatch.log with no DDC cost, so the next mid-work
         // link drop leaves a timestamped trail. See LinkWatch.swift.
@@ -94,6 +118,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     /// nothing and no obvious cause.
     func applicationWillTerminate(_ notification: Notification) {
         controller.shutdownKVM()
+        // Tell Beacon we meant to go: /api/remove blanks our relaunch command and
+        // pulls the LaunchAgent, so a deliberate quit is NOT resurrected (it
+        // re-arms when we gracefully return). Synchronous with a short cap,
+        // because the process is about to exit. See BeaconKeepAlive.swift.
+        BeaconKeepAlive.shared.stop()
     }
 
     // MARK: Clicks
