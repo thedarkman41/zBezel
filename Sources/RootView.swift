@@ -77,15 +77,27 @@ struct RootView: View {
                     Image(systemName: "display")
                         .font(.system(size: 17))
                         .foregroundStyle(Theme.textPrimary)
+                    // Truncate rather than push: the window is a fixed width, so a
+                    // long monitor name has to yield here instead of shoving the
+                    // tabs and the transport pill off the right edge. The icon and
+                    // chevron stay whole; only the name gives, and only as much as
+                    // the row actually runs short.
                     Text(controller.targetName)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.textSecond)
                 }
+                // A floor so the name never collapses to a sliver; above this it
+                // truncates, below it the row would rather clip (it never gets
+                // that tight at 980pt).
+                .frame(minWidth: 80, alignment: .leading)
             }
-            .fixedSize()
+            .layoutPriority(0)
             .padding(.leading, 22)
 
             Rectangle()
@@ -98,10 +110,12 @@ struct RootView: View {
                     tabButton(item)
                 }
             }
+            .layoutPriority(1)
 
             Spacer(minLength: 12)
 
             TransportPill(controller: controller)
+                .layoutPriority(1)
         }
         .padding(.trailing, 22)
         .frame(height: 60)
@@ -289,6 +303,9 @@ private struct TransportPill: View {
                     .font(.system(size: 11, weight: .semibold))
                 Text(label)
                     .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .frame(maxWidth: 240)
                 refreshGlyph
             }
             .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.warning)

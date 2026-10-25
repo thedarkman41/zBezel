@@ -79,15 +79,16 @@ struct MenuPanel: View {
 
     private var inputRow: some View {
         let state = controller.features[VCP.inputSelect.code]
+        let choices = controller.menuInputChoices
         return Group {
-            if let state, state.readable, !state.choices.isEmpty {
+            if let state, state.readable, !choices.isEmpty {
                 HStack(spacing: 8) {
                     Text("Input")
                         .font(.system(size: 13))
                         .foregroundStyle(Theme.textPrimary)
                     Spacer(minLength: 6)
                     StyledPicker(
-                        options: state.choices.map { (value: $0.value, label: $0.label) },
+                        options: choices.map { (value: $0.value, label: $0.label) },
                         selection: Binding(
                             get: { state.current },
                             set: { value in

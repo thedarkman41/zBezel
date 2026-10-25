@@ -1503,8 +1503,73 @@ final class MonitorController: ObservableObject {
                        self.transport == .none || carriesTheLink {
                         self.reprobeSoon()
                     }
+
+                    // Reachable over SSH but no agent running there: the box is
+                    // signed in (the probe got a shell), the connection is open,
+                    // and the agent is simply gone — exactly the case a heal
+                    // fixes. Push the agent and start it, throttled so a machine
+                    // that cannot run it is not hammered. `.unreachable` is left
+                    // alone (nothing to push over), and `.mismatch` is a running
+                    // agent on different source, healed only when asked.
+                    if health == .notRunning {
+                        self.healAgent(host: host)
+                    }
                 }
             }
+        }
+    }
+
+    // MARK: - Agent self-heal
+
+    /// A dedicated installer used only for background healing, kept apart from
+    /// the one the Set Up sheet drives so a heal's steps and log never collide
+    /// with an install the user is watching.
+    let healer = AgentInstaller()
+
+    /// Hosts a heal is running for right now — one at a time, since the installer
+    /// serialises, and the UI shows a spinner for whatever is in here.
+    @Published private(set) var healingHosts: Set<String> = []
+
+    /// What the last heal of a host had to say, success or failure, for the row's
+    /// tooltip. Cleared once the agent comes back healthy.
+    @Published private(set) var healReport: [String: String] = [:]
+
+    private var lastHealAttempt: [String: Date] = [:]
+
+    /// A heal copies the agent and recompiles it on the far machine, so it is
+    /// thrown far more sparingly than the parity probe that triggers it. Long
+    /// enough that a box with nobody signed in (which cannot run the agent at
+    /// all, and so can never be healed) is not retried in a tight loop.
+    private let healCooldown: TimeInterval = 300
+
+    /// Push the agent to a machine that is reachable but not running it, and
+    /// start it.
+    ///
+    /// Key auth only, and that is the whole point: the trigger is a parity probe
+    /// that already reached the box over SSH without a password, so re-establishing
+    /// the agent needs no new credentials — just the open connection. A heal never
+    /// touches Smart App Control and never installs a key; it only restores what
+    /// Set Up already put there, so it makes no new one-way change on its own.
+    func healAgent(host: String, force: Bool = false) {
+        let key = host.lowercased()
+        guard !host.isEmpty, !healingHosts.contains(key), !healer.running else { return }
+        if !force, let last = lastHealAttempt[key],
+           Date().timeIntervalSince(last) < healCooldown { return }
+        lastHealAttempt[key] = Date()
+        healingHosts.insert(key)
+        let target = AgentInstaller.Target(host: host, installKey: false)
+        Task { @MainActor in
+            await healer.install(target: target, auth: .key)
+            healingHosts.remove(key)
+            if healer.succeeded {
+                healReport[key] = nil
+            } else {
+                let message = healer.lastMessage
+                healReport[key] = message.isEmpty ? "The agent could not be re-established." : message
+            }
+            // Re-probe regardless: a successful heal lets the dot go green and the
+            // link come straight back up rather than waiting for the next sweep.
+            checkParity()
         }
     }
 
@@ -2043,6 +2108,18 @@ final class MonitorController: ObservableObject {
         return active.isEmpty ? known : active
     }
 
+    /// Inputs offered in the compact menu-bar switcher. Same set click-to-cycle
+    /// visits — an unticked input is not a destination here either — plus
+    /// whatever the panel is sitting on now, so the picker's selection stays
+    /// valid even when the current input has been unticked.
+    var menuInputChoices: [(value: UInt16, label: String)] {
+        var values = Set(cyclableInputs)
+        if let current = currentInput, HPProfile.isIdentifiedInput(current) {
+            values.insert(current)
+        }
+        return values.sorted().map { ($0, HPProfile.inputLabel($0)) }
+    }
+
     /// Which inputs click-to-cycle will visit.
     ///
     /// Deliberately dull. An earlier version tried to learn liveness by switching
@@ -2333,6 +2410,12 @@ final class MonitorController: ObservableObject {
     var targetName: String {
         selected?.name ?? remoteTarget?.description ?? "No display"
     }
+
+    /// The panel's EDID for the read-only Panel card: this Mac's own read when it
+    /// has a local connection, otherwise the copy the proxy agent read from the
+    /// far machine's registry. So a monitor attached only through the dock still
+    /// shows its real identity instead of "EDID unavailable".
+    var panelEDID: EDID? { selected?.edid ?? remoteTarget?.edid }
 
     @Published private(set) var remoteTarget: RemoteMonitor?
 

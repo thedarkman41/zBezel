@@ -2,6 +2,49 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.14 — 2026-10-25
+
+**Input filtering, agent self-heal, header fit, and EDID over the proxy**
+
+Four changes to how zBezel presents inputs, keeps agents alive, lays out
+its toolbar, and reads the panel's identity.
+
+Input lists honour the click-to-cycle ticks everywhere. The menu-bar
+dropdown now offers only the ticked inputs (via a new menuInputChoices),
+plus whatever the panel is currently on so the picker's selection stays
+valid; it no longer lists an unticked port like DisplayPort. The Input
+tab's Input Source radios for an unticked input are now dimmed and
+disabled to match, with the one exception of the input the panel is
+actually on, which stays selectable so a live-but-unticked port is never
+a dead end. Click-to-cycle already skipped unticked inputs.
+
+Agents self-heal over the open SSH connection. When the parity sweep
+finds a machine reachable over SSH but with no agent running
+(notRunning), zBezel now pushes the bundled agent and restarts it using
+the already-working key auth — no password, no Smart App Control change,
+no key install. It is throttled (5-minute cooldown per host) so a box
+with nobody signed in is not hammered. The KVM row shows an "updating
+agent…" spinner while a heal runs and a Redeploy button for a mismatch
+or an immediate retry. A dedicated AgentInstaller instance runs the
+heal so it never collides with the Set Up sheet.
+
+The toolbar fits a fixed-width window. A long monitor name used to shove
+the tab row and the transport pill off both edges. The display name now
+truncates (tail) at the lowest layout priority with an 80pt floor; the
+tabs and the pill hold priority so the name yields first; and the pill's
+own label is capped at 240pt and middle-truncates, so a long "via
+<host>" can never push the tabs off either.
+
+The Panel card shows the EDID even with no local connection. Through the
+HP dock the monitor is attached only to the proxy machine, so the Mac
+has no display to read and the card said "EDID unavailable". The agent
+now reads the panel's full EDID from the Windows registry
+(Enum\DISPLAY\<pnp>\<instance>\Device Parameters\EDID — the face that
+machine drives) and returns it in `list`; the Mac parses it and the card
+falls back to it, with a "Read via <host>" row so a proxied read is not
+mistaken for a local one. Proven end to end on bellatrix (HDMI, 36D5)
+and rigel (USB-C1, 36D3), both returning a valid "HP Z27k G3" EDID.
+
 ## 1.3.13 — 2026-10-22
 
 **Enroll zBezel in Beacon Keep-Alive so it auto-restarts**

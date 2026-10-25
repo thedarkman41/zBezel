@@ -25,6 +25,11 @@ struct RemoteMonitor: Identifiable, Hashable {
     let description: String
     let device: String
     let deviceID: String
+    /// The panel's EDID, when the agent could read it from the Windows registry.
+    /// Lets the Panel card show the monitor's real identity even though this Mac
+    /// has no local connection to read it over — the whole point of the proxy
+    /// path. `nil` against an older agent, or when the registry had no copy.
+    let edid: EDID?
     var id: Int { index }
 
     /// EDID-ish identity Windows embeds in the device path, e.g. HPN36D3.
@@ -33,6 +38,28 @@ struct RemoteMonitor: Identifiable, Hashable {
                                          options: .regularExpression) else { return nil }
         return String(deviceID[range]).replacingOccurrences(of: "DISPLAY#", with: "")
     }
+
+    // Identity is the device, not its EDID bytes (EDID is not Hashable, and two
+    // reads of the same monitor are the same monitor).
+    static func == (a: RemoteMonitor, b: RemoteMonitor) -> Bool {
+        a.index == b.index && a.deviceID == b.deviceID
+    }
+    func hash(into h: inout Hasher) { h.combine(index); h.combine(deviceID) }
+}
+
+/// Decode an uppercase/lowercase hex string (the agent's EDID encoding) to bytes.
+/// Returns nil for an odd length or a non-hex character.
+func hexToBytes(_ hex: String) -> [UInt8]? {
+    let chars = Array(hex)
+    guard chars.count % 2 == 0 else { return nil }
+    var bytes = [UInt8](); bytes.reserveCapacity(chars.count / 2)
+    var i = 0
+    while i < chars.count {
+        guard let hi = chars[i].hexDigitValue, let lo = chars[i + 1].hexDigitValue else { return nil }
+        bytes.append(UInt8(hi << 4 | lo))
+        i += 2
+    }
+    return bytes
 }
 
 struct RemoteReading {
@@ -401,11 +428,17 @@ actor RemoteAgent {
     func list() throws -> AgentListing {
         let json = try run(["list"])
         let raw = (json["monitors"] as? [[String: Any]]) ?? []
-        let monitors = raw.map {
-            RemoteMonitor(index: ($0["index"] as? Int) ?? 0,
-                          description: ($0["description"] as? String) ?? "",
-                          device: ($0["device"] as? String) ?? "",
-                          deviceID: ($0["deviceId"] as? String) ?? "")
+        let monitors = raw.map { entry -> RemoteMonitor in
+            var edid: EDID?
+            if let hex = entry["edid"] as? String, !hex.isEmpty,
+               let bytes = hexToBytes(hex), bytes.count >= 128 {
+                edid = EDID(bytes)
+            }
+            return RemoteMonitor(index: (entry["index"] as? Int) ?? 0,
+                                 description: (entry["description"] as? String) ?? "",
+                                 device: (entry["device"] as? String) ?? "",
+                                 deviceID: (entry["deviceId"] as? String) ?? "",
+                                 edid: edid)
         }
         return AgentListing(monitors: monitors, session: AgentSession.parse(json["session"]))
     }

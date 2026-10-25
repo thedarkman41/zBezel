@@ -122,6 +122,15 @@ final class AgentInstaller: ObservableObject {
 
     struct InstallError: Error { let message: String }
 
+    /// The last meaningful line of the log — what a background heal reports back
+    /// to the KVM row when it finishes, success or failure, without the caller
+    /// having to parse the whole transcript.
+    var lastMessage: String {
+        log.split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .last { !$0.isEmpty } ?? ""
+    }
+
     private func run(target: Target, auth: Auth, hostKeyApproved: Bool) async throws {
         guard !target.host.isEmpty else {
             throw InstallError(message: "Enter the machine's hostname or IP address.")

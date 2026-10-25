@@ -581,6 +581,44 @@ internal static class BezelAgent
         return deviceId.Substring(start, end - start);
     }
 
+    /// The monitor's full EDID, as an uppercase hex string, read from the
+    /// registry copy Windows caches for the device.
+    ///
+    /// The Mac often cannot read the panel's EDID itself: through the HP dock it
+    /// is attached only to this machine, so there is no local display to query
+    /// and the Panel card reads "EDID unavailable". Windows keeps the EDID it
+    /// negotiated at
+    ///   HKLM\SYSTEM\CurrentControlSet\Enum\DISPLAY\<pnp>\<instance>\Device Parameters\EDID
+    /// and the device interface path we already have names the exact <pnp> and
+    /// <instance> — so this is the EDID for the face this machine is driving (the
+    /// HDMI leg, say), which is precisely the one zBezel wants to show. Returns ""
+    /// when the path does not parse or the value is absent; the caller treats
+    /// that as "no EDID from here" and carries on.
+    private static string ReadEdidHex(string deviceId)
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(deviceId)) return "";
+            int i = deviceId.IndexOf("DISPLAY#", StringComparison.OrdinalIgnoreCase);
+            if (i < 0) return "";
+            // HPN36D5#5&12ab...&0&UID4352#{guid}  ->  ["HPN36D5","5&...&UID4352","{guid}"]
+            string[] parts = deviceId.Substring(i + "DISPLAY#".Length).Split('#');
+            if (parts.Length < 2 || parts[0].Length == 0 || parts[1].Length == 0) return "";
+            string keyPath = @"SYSTEM\CurrentControlSet\Enum\DISPLAY\"
+                           + parts[0] + "\\" + parts[1] + @"\Device Parameters";
+            using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(keyPath))
+            {
+                if (key == null) return "";
+                var edid = key.GetValue("EDID") as byte[];
+                if (edid == null || edid.Length < 128) return "";
+                var sb = new StringBuilder(edid.Length * 2);
+                foreach (byte b in edid) sb.Append(b.ToString("X2"));
+                return sb.ToString();
+            }
+        }
+        catch (Exception) { return ""; }
+    }
+
     // ---- Commands ----------------------------------------------------------
 
     [DllImport("user32.dll")]
@@ -673,6 +711,7 @@ internal static class BezelAgent
               .Append(",\"description\":\"").Append(Esc(t.Description))
               .Append("\",\"device\":\"").Append(Esc(t.Device))
               .Append("\",\"deviceId\":\"").Append(Esc(t.DeviceID))
+              .Append("\",\"edid\":\"").Append(ReadEdidHex(t.DeviceID))
               .Append("\"}");
         }
         // An empty array means "no monitor here"; the session says whether that

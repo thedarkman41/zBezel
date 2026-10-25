@@ -139,7 +139,15 @@ struct InputTab: View {
                                     GridItem(.flexible(), alignment: .leading)],
                           alignment: .leading, spacing: 10) {
                     ForEach(state.choices, id: \.value) { choice in
-                        RadioRow(label: choice.label, isOn: state.current == choice.value) {
+                        // An input whose click-to-cycle checkbox is off is not a
+                        // destination — dim and disable it here too, so the two
+                        // lists agree. The input the panel is actually on stays
+                        // selectable regardless, so an unticked-but-live port is
+                        // never a dead end you cannot re-pick.
+                        let selectable = controller.activeInputs.contains(choice.value)
+                            || state.current == choice.value
+                        RadioRow(label: choice.label, isOn: state.current == choice.value,
+                                 enabled: selectable) {
                             Task<Void, Never> { await controller.set(code: VCP.inputSelect.code, value: choice.value) }
                         }
                     }
@@ -340,7 +348,7 @@ struct DisplayTab: View {
             Card(title: "Panel", systemImage: "info.circle",
                  help: "Read-only facts the monitor reports about itself.",
                  fill: true) {
-                if let edid = controller.selected?.edid {
+                if let edid = controller.panelEDID {
                     InfoRow("Model", edid.displayName)
                     InfoRow("Manufacturer", edid.manufacturerID)
                     InfoRow("Serial", edid.serialString ?? "—")
@@ -353,6 +361,11 @@ struct DisplayTab: View {
                     }
                     if let hours = controller.features[0xC0], hours.readable {
                         InfoRow("Backlight hours", String(hours.current))
+                    }
+                    // Say where the EDID came from when it is not this Mac's own
+                    // read, so the facts are not mistaken for a local connection.
+                    if controller.selected?.edid == nil, case .proxy(let host, _, _) = controller.transport {
+                        InfoRow("Read via", host)
                     }
                 } else {
                     Text("EDID unavailable.")
@@ -1234,6 +1247,33 @@ private struct KVMMachinesCard: View {
                     Text(machine.host)
                         .font(.system(size: 13))
                         .foregroundStyle(health == .unreachable ? Theme.textDim : Theme.textPrimary)
+                    // Re-establishing the agent. notRunning heals itself on the
+                    // next parity sweep; this is the live state of that, plus a
+                    // manual push for a mismatch or an immediate retry that does
+                    // not wait out the heal cooldown.
+                    if controller.healingHosts.contains(machine.host.lowercased()) {
+                        HStack(spacing: 4) {
+                            ProgressView().controlSize(.small).scaleEffect(0.7)
+                            Text("updating agent…")
+                                .font(.system(size: 10.5))
+                                .foregroundStyle(Theme.textDim)
+                        }
+                    } else if health == .notRunning || health == .mismatch {
+                        Button {
+                            controller.healAgent(host: machine.host, force: true)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down.circle").font(.system(size: 9.5))
+                                Text("Redeploy").font(.system(size: 10.5, weight: .medium))
+                            }
+                            .foregroundStyle(Theme.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .help(controller.healReport[machine.host.lowercased()]
+                              ?? (health == .mismatch
+                                  ? "Push this app's agent and restart it so the source matches."
+                                  : "Push the agent over SSH and start it."))
+                    }
                     // Discovery is unauthenticated, so a machine receives keyboard
                     // and mouse only once approved. Until then it shows here but
                     // stays out of the input chain.
