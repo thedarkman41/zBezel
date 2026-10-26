@@ -72,52 +72,49 @@ struct RootView: View {
 
     private var navigationBar: some View {
         HStack(spacing: 0) {
+            // The display name is shown in full, never truncated — the toolbar is
+            // sized to fit it (and the tabs, and the pill) inside the window
+            // instead. The space that buys comes from tighter tab padding, a
+            // slimmer divider, and a smaller transport pill, not from hiding the
+            // name behind an ellipsis.
             HeldMenu(items: displayMenuItems) {
-                HStack(spacing: 9) {
+                HStack(spacing: 8) {
                     Image(systemName: "display")
-                        .font(.system(size: 17))
+                        .font(.system(size: 16))
                         .foregroundStyle(Theme.textPrimary)
-                    // Truncate rather than push: the window is a fixed width, so a
-                    // long monitor name has to yield here instead of shoving the
-                    // tabs and the transport pill off the right edge. The icon and
-                    // chevron stay whole; only the name gives, and only as much as
-                    // the row actually runs short.
                     Text(controller.targetName)
                         .font(.system(size: 15, weight: .medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.textSecond)
                 }
-                // A floor so the name never collapses to a sliver; above this it
-                // truncates, below it the row would rather clip (it never gets
-                // that tight at 980pt).
-                .frame(minWidth: 80, alignment: .leading)
             }
-            .layoutPriority(0)
-            .padding(.leading, 22)
+            .fixedSize()
+            .padding(.leading, 16)
 
             Rectangle()
                 .fill(Theme.rule)
                 .frame(width: 1, height: 26)
-                .padding(.horizontal, 20)
+                .padding(.horizontal, 12)
 
-            HStack(spacing: 4) {
+            HStack(spacing: 2) {
                 ForEach(PanelTab.allCases) { item in
                     tabButton(item)
                 }
             }
-            .layoutPriority(1)
+            .fixedSize()
 
+            // Keeps the pill off the right edge: the Spacer takes the leftover
+            // width, and the trailing padding below is the gap between the pill
+            // and the window border.
             Spacer(minLength: 12)
 
             TransportPill(controller: controller)
-                .layoutPriority(1)
+                .fixedSize()
         }
-        .padding(.trailing, 22)
+        .padding(.trailing, 20)
         .frame(height: 60)
         .background(Theme.canvas)
     }
@@ -137,7 +134,7 @@ struct RootView: View {
                     .fill(active ? Theme.accent : .clear)
                     .frame(height: 2)
             }
-            .padding(.horizontal, 11)
+            .padding(.horizontal, 6)
             .padding(.top, 12)
             .contentShape(Rectangle())
         }
@@ -298,19 +295,17 @@ private struct TransportPill: View {
         Button {
             Task<Void, Never> { await controller.probe() }
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: symbol)
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
                 Text(label)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                    .frame(maxWidth: 240)
                 refreshGlyph
             }
             .foregroundStyle(controller.monitorControlAvailable ? Theme.accent : Theme.warning)
-            .padding(.horizontal, 13)
-            .padding(.vertical, 7)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
             .background(background)
             .clipShape(Capsule())
             .overlay(Capsule().strokeBorder(
@@ -329,12 +324,12 @@ private struct TransportPill: View {
                     let t = context.date.timeIntervalSinceReferenceDate
                     let phase = t.truncatingRemainder(dividingBy: spinPeriod) / spinPeriod
                     Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.system(size: 10, weight: .semibold))
                         .rotationEffect(.degrees(phase * 360))
                 }
             } else {
                 Image(systemName: "arrow.clockwise")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 10, weight: .semibold))
             }
         }
     }

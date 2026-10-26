@@ -2,6 +2,24 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.15 — 2026-10-25
+
+**Toolbar fits the window: full display name, smaller pill, right margin**
+
+The navigation bar overflowed the fixed-width window on a long monitor
+name: the name truncated to an ellipsis on the left and the transport
+pill clipped against the right edge.
+
+Now the full display name is always shown — no ellipsis — and the pill
+sits inside a margin from the window's right border. The ~123pt the row
+was over by is reclaimed by tightening the tab padding (11→6), the
+divider (20→12) and the leading inset (22→16), and by shrinking the pill
+(font 12→11, icons 11→10, less padding, and no width cap or middle
+truncation, so it never shows an ellipsis either). The name menu, the
+tabs and the pill are each fixedSize and a Spacer takes up the slack, so
+at the measured ~970pt the whole row fits inside the 980pt window with
+the trailing margin intact.
+
 ## 1.3.14 — 2026-10-25
 
 **Input filtering, agent self-heal, header fit, and EDID over the proxy**
