@@ -23,11 +23,16 @@ struct WakeConsoleCard: View {
     @State private var user = ""
     @State private var domain = ""
     @State private var showDetail = false
+    @State private var newRDPHost = ""
+    @State private var showInstaller = false
 
-    /// The proxy host and every KVM machine, once each, proxy first.
+    /// The proxy host, every KVM machine, and every RDP-only host, once each,
+    /// proxy first. The RDP-only hosts (a tailnet box that is not discovered,
+    /// say) are reachable for Wake and Control but drive no panel face, so they
+    /// are not in the KVM input chain.
     private var hosts: [String] {
         var out: [String] = []
-        for h in [controller.proxyHost] + controller.kvmMachines.map(\.host)
+        for h in [controller.proxyHost] + controller.kvmMachines.map(\.host) + controller.rdpHosts
         where !h.isEmpty && !out.contains(h) {
             out.append(h)
         }
@@ -157,6 +162,61 @@ struct WakeConsoleCard: View {
                     .help("Recorded on first connection. A change means the machine was "
                         + "rebuilt — or that this is not the same machine.")
             }
+
+            Divider().overlay(Theme.rule).padding(.vertical, 2)
+
+            // Add a host that is reachable only for RDP — a tailnet machine that
+            // discovery never sees, say. It is NOT a KVM panel source: the
+            // pointer never crosses to it and the monitor is never switched to
+            // it; it only shows up here for Wake and Control.
+            HStack(spacing: 8) {
+                TextField("rdp-only host (e.g. orion)", text: $newRDPHost)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(width: 150)
+                    .onSubmit { addRDPHost() }
+                Button("Add host") { addRDPHost() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(newRDPHost.trimmingCharacters(in: .whitespaces).isEmpty
+                                     ? Theme.textDim : Theme.accent)
+                    .disabled(newRDPHost.trimmingCharacters(in: .whitespaces).isEmpty)
+                Spacer(minLength: 0)
+                if controller.isRDPHost(host) {
+                    Button { showInstaller = true } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.down.circle").font(.system(size: 10))
+                            Text("Install agent…").font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(Theme.accent)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Install the agent on \(host) so a Control session can return its "
+                        + "desktop to the console afterward. Does not make it the proxy.")
+                    Button {
+                        let gone = host
+                        controller.removeRDPHost(gone)
+                        pick(hosts.first ?? "")
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "minus.circle").font(.system(size: 10))
+                            Text("Remove").font(.system(size: 11))
+                        }
+                        .foregroundStyle(Theme.textDim)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Forget this RDP-only host.")
+                }
+            }
+            Text("An RDP-only host is reachable for Wake and Control but is not a KVM "
+               + "panel source, so the pointer never crosses to it. Set its account "
+               + "above and store its password in Beacon as zBezel-rdp-\(host.isEmpty ? "<host>" : host.lowercased()).")
+                .font(.system(size: 10.5))
+                .foregroundStyle(Theme.textDim)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .sheet(isPresented: $showInstaller) {
+            InstallerView(controller: controller, mode: .rdpHost, prefillHost: host)
         }
         .onAppear { load() }
         .onChange(of: desktop.step) { _, now in
@@ -174,6 +234,16 @@ struct WakeConsoleCard: View {
     private func pick(_ h: String) {
         chosenHost = h
         load()
+    }
+
+    /// Register what was typed as an RDP-only host and select it, so the account
+    /// fields below immediately apply to it.
+    private func addRDPHost() {
+        let h = newRDPHost.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty else { return }
+        controller.addRDPHost(h)
+        newRDPHost = ""
+        if controller.isRDPHost(h) { pick(h) }
     }
 
     /// Bindings that write through to the per-host store on every edit, so

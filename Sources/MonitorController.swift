@@ -184,6 +184,39 @@ final class MonitorController: ObservableObject {
     /// run from the machines already in use so upgrading changes nothing for them.
     @Published private(set) var trustedKVMHosts: Set<String> = []
 
+    /// Hosts reachable by RDP that are NOT KVM panel sources. They drive no face
+    /// of the HP monitor, so they stay out of the input chain entirely — the
+    /// pointer never crosses to them and the panel is never switched to them.
+    /// They exist only so Wake Console can sign in to them and open a Control
+    /// window, for a machine like one on the tailnet that is not discovered.
+    @Published private(set) var rdpHosts: [String] = []
+
+    /// Register a host as an RDP-only target. Order preserved, case-insensitive
+    /// dedup, and never one that is already a KVM machine or the proxy (those are
+    /// reachable through their own rows and should not be duplicated here).
+    func addRDPHost(_ host: String) {
+        let h = host.trimmingCharacters(in: .whitespaces)
+        guard !h.isEmpty else { return }
+        let lower = h.lowercased()
+        if rdpHosts.contains(where: { $0.lowercased() == lower }) { return }
+        if kvmMachines.contains(where: { $0.host.lowercased() == lower }) { return }
+        if !proxyHost.isEmpty, proxyHost.lowercased() == lower { return }
+        rdpHosts.append(h)
+        UserDefaults.standard.set(rdpHosts, forKey: "rdpHosts")
+    }
+
+    func removeRDPHost(_ host: String) {
+        let lower = host.lowercased()
+        guard rdpHosts.contains(where: { $0.lowercased() == lower }) else { return }
+        rdpHosts.removeAll { $0.lowercased() == lower }
+        UserDefaults.standard.set(rdpHosts, forKey: "rdpHosts")
+    }
+
+    func isRDPHost(_ host: String) -> Bool {
+        let lower = host.lowercased()
+        return rdpHosts.contains { $0.lowercased() == lower }
+    }
+
     init() {
         let defaults = UserDefaults.standard
         proxyEnabled = defaults.object(forKey: "proxyEnabled") as? Bool ?? true
@@ -215,6 +248,7 @@ final class MonitorController: ObservableObject {
         pipSideBySide = defaults.bool(forKey: "pipSideBySide")
         pipPrimaryInput   = UInt16(defaults.object(forKey: "pipPrimaryInput") as? Int ?? 0x0F)
         pipSecondaryInput = UInt16(defaults.object(forKey: "pipSecondaryInput") as? Int ?? 0x11)
+        rdpHosts = (defaults.array(forKey: "rdpHosts") as? [String]) ?? []
 
 
         // The tap runs on the main run loop, but the callback reaches us from a

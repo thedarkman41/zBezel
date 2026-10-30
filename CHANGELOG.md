@@ -2,6 +2,29 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.16 — 2026-10-30
+
+**Control an RDP-only host that is not a KVM panel source**
+
+zBezel could only RDP into the proxy and the KVM machines — hosts that
+drive the HP panel. A machine you just want eyes and a cursor on, like a
+tailnet box that discovery never sees, had nowhere to live.
+
+Add RDP-only hosts. The Wake Console card takes an "Add host" entry;
+the host it registers gets Wake and Control like any other, but it is
+NOT a KVM panel source — it stays out of the input chain, so the pointer
+never crosses to it and the monitor is never switched to it. The list
+persists under "rdpHosts" and is kept distinct from the proxy and the
+KVM machines.
+
+The installer grows an RDP-host mode so the agent can be deployed to
+such a host without hijacking the proxy: on success it registers the
+host for RDP instead of setting controller.proxyHost. The Wake Console
+card exposes it as an "Install agent…" action for the selected RDP host,
+needed so a Control session can hand that machine's desktop back to its
+console afterward. RDP Control itself pins its own host key and needs no
+agent to connect; only the post-session reclaim does.
+
 ## 1.3.15 — 2026-10-25
 
 **Toolbar fits the window: full display name, smaller pill, right margin**

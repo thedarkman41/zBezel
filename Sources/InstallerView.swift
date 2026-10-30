@@ -1,8 +1,15 @@
 import SwiftUI
 
-/// Sets up a Windows machine as a control proxy, from nothing.
+/// Sets up a Windows machine as a control proxy, from nothing — or, in
+/// `.rdpHost` mode, installs the same agent on a machine you only reach by RDP
+/// without adopting it as the proxy.
 struct InstallerView: View {
+    enum Mode { case proxy, rdpHost }
+
     @ObservedObject var controller: MonitorController
+    var mode: Mode = .proxy
+    /// Preselect this host (an RDP host being set up); otherwise the proxy.
+    var prefillHost: String? = nil
     @StateObject private var installer = AgentInstaller()
     @Environment(\.dismiss) private var dismiss
 
@@ -34,7 +41,7 @@ struct InstallerView: View {
         .frame(width: 560, height: 560)
         .background(Theme.canvas)
         .onAppear {
-            if target.host.isEmpty { target.host = controller.proxyHost }
+            if target.host.isEmpty { target.host = prefillHost ?? controller.proxyHost }
         }
     }
 
@@ -46,10 +53,13 @@ struct InstallerView: View {
                 .font(.system(size: 18))
                 .foregroundStyle(Theme.accent)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Set Up a Control Proxy")
+                Text(mode == .rdpHost ? "Install Agent on an RDP Host" : "Set Up a Control Proxy")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(Theme.textPrimary)
-                Text("Installs the agent on a Windows machine that can reach the monitor directly.")
+                Text(mode == .rdpHost
+                     ? "Installs the agent on a Windows machine you reach by RDP, so a Control "
+                       + "session can hand its desktop back to the console. Does not make it the proxy."
+                     : "Installs the agent on a Windows machine that can reach the monitor directly.")
                     .font(.system(size: 11.5))
                     .foregroundStyle(Theme.textSecond)
             }
@@ -282,10 +292,14 @@ struct InstallerView: View {
                 .keyboardShortcut(.defaultAction)
             }
             if installer.finished && installer.succeeded {
-                Button("Use This Host") {
-                    controller.proxyHost = target.host
-                    controller.proxyEnabled = true
-                    Task<Void, Never> { await controller.reconnectProxy() }
+                Button(mode == .rdpHost ? "Add as RDP Host" : "Use This Host") {
+                    if mode == .rdpHost {
+                        controller.addRDPHost(target.host)
+                    } else {
+                        controller.proxyHost = target.host
+                        controller.proxyEnabled = true
+                        Task<Void, Never> { await controller.reconnectProxy() }
+                    }
                     dismiss()
                 }
                 .keyboardShortcut(.defaultAction)
