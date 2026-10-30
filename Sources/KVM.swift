@@ -784,6 +784,19 @@ final class KVMController {
     /// on it would stall every input event on the Mac behind it.
     var setMonitorInput: ((UInt16) -> Void)?
 
+    /// Whether the Mac actually drives the panel on `macInput`, so that returning
+    /// the pointer home should also hand the PANEL back to the Mac.
+    ///
+    /// False where the Mac is not a source on that input — proxy-only with no
+    /// local cable, or the user has switched `macInput` (DisplayPort) off in the
+    /// Input tab. In that case there is no Mac view to return the panel to, and
+    /// writing `macInput` would switch the panel to a dead or disabled input (the
+    /// bug this guards: after an idle period the far transport drops, the pointer
+    /// comes home through handBack, and the panel was being flipped to a
+    /// DisplayPort the Mac is not even plugged into). Nil means assume it does, so
+    /// the ordinary Mac-on-DisplayPort setup is unchanged.
+    var macDrivesPanel: (() -> Bool)?
+
     /// Whether crossing should switch the monitor's input as well as the
     /// pointer. Off means the KVM behaves as it did before: control moves, the
     /// panel does not.
@@ -2177,6 +2190,22 @@ final class KVMController {
         CGWarpMouseCursorPosition(CGPoint(x: landing.maxX - 2, y: y))
 
         side = .here
+        KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
+
+        // Only hand the PANEL back to the Mac when the Mac actually drives it on
+        // macInput. Where it does not — proxy-only, or DisplayPort switched off in
+        // the Input tab — there is no Mac view to return to, and writing macInput
+        // would flip the panel to a dead or disabled input (a DisplayPort the Mac
+        // is not plugged into). The pointer still comes home; the panel is left on
+        // whatever it is showing, and the input poll keeps panelShowsMac honest.
+        guard macDrivesPanel?() ?? true else {
+            KVMLog.write("return: Mac is not a panel source on "
+                       + "0x\(String(macInput, radix: 16)); pointer home, panel left as-is")
+            status = "armed — the panel's right edge crosses to \(host)"
+            onChange?()
+            return
+        }
+
         // Adopt the Mac as the live input NOW, before the async switch and the
         // input poll catch up. The panel is on its way home; leaving the tracked
         // input reading the machine we just left means a quick cross-back-and-
@@ -2186,7 +2215,6 @@ final class KVMController {
         // within its interval either way.
         currentInput = macInput
         panelShowsMac = true
-        KVMLog.write("crossed BACK to \(Int(landing.maxX - 2)),\(Int(y))")
         // The return gets the same dissolve as a pick, run by the controller: it
         // fades the machine out, switches, and reveals the Mac. Hold the edge
         // until it is done (resumeEdge, from the controller) so a stray move does

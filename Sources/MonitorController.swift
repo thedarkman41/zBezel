@@ -1053,6 +1053,15 @@ final class MonitorController: ObservableObject {
         kvm.setMonitorInput = { [weak self] value in
             Task { @MainActor in self?.requestMonitorInput(value, byHand: false) }
         }
+        // The panel returns to the Mac only when the Mac is actually a source on
+        // its input: that input is active — proven driven by this Mac, or ticked —
+        // and not switched off. With DisplayPort unticked, or no local cable at
+        // all, the Mac is not a panel source, so a return home must not flip the
+        // panel to that input. Read live on the main thread from the event tap.
+        kvm.macDrivesPanel = { [weak self] in
+            guard let self else { return false }
+            return self.activeInputs.contains(self.kvm.macInput)
+        }
         // Put the question on the panel the pointer just reached, which is the
         // screen the user is looking at when they ask it.
         kvm.presentChooser = { [weak self] exit in

@@ -2,6 +2,32 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.17 — 2026-10-30
+
+**KVM: don't flip the panel to a DisplayPort the Mac doesn't drive**
+
+After the system had sat idle, moving the cursor at the main screen's
+edge could switch the external panel to DisplayPort — an input the Mac
+is not plugged into and that was switched off in the Input tab — instead
+of showing the machine-selection tiles.
+
+Cause: handBack() ("return to the Mac") always wrote macInput
+(DisplayPort). While the pointer is marked out on a machine
+(side == .there), an idle period drops that machine's SSH transport, and
+the next pointer move hits the event tap's "transport gone -> handBack"
+escape hatch, which ran the full return-to-Mac and flipped the panel to
+DisplayPort. Fresh crossings never take that path, which is why the tiles
+appeared normally the rest of the time.
+
+Fix: handBack now hands the PANEL back to the Mac only when the Mac
+actually drives it on macInput — gated by a new macDrivesPanel check,
+true only when macInput is active (proven driven by this Mac, or ticked)
+and not switched off. Where the Mac is not a panel source (proxy-only, or
+DisplayPort unticked) the pointer still comes home but the panel is left
+on whatever it is showing, with no write to a dead or disabled input. A
+Mac genuinely on DisplayPort is unchanged — that input stays active, so
+the panel returns home as before.
+
 ## 1.3.16 — 2026-10-30
 
 **Control an RDP-only host that is not a KVM panel source**
