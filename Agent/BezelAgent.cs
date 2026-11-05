@@ -347,6 +347,9 @@ internal static class BezelAgent
             case "screenshot": CmdScreenshot(args);  return true;
             case "stream":     CmdStream(args);      return true;
             case "rotate":     CmdRotate(args);      return true;
+            case "click":      CmdClick(args);       return true;
+            case "move":       CmdMove(args);        return true;
+            case "hold":       CmdHold(args);        return true;
             default:       return false;
         }
     }
@@ -1846,6 +1849,92 @@ internal static class BezelAgent
     /// inline as base64 (so it comes back over the relay channel the Mac
     /// already holds open, no second SSH round trip) and is also written to
     /// `file` (default C:\Temp\bezel-screen.jpg) for anyone who wants to open it.
+    /// `click x y [button]` — move the console pointer to the absolute screen pixel (x, y) and click.
+    /// button 1 = left (default), 2 = right, 3 = middle. Runs in the interactive session like the KVM
+    /// input verbs, so SetCursorPos + SendInput land on the real console desktop. Headless control for an
+    /// agent that captured the screen with `screenshot` and now wants to act on it.
+    private static int CmdClick(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine("{\"ok\":false,\"error\":\"usage: click x y [button]\"}");
+            return 1;
+        }
+        int x = Num(args[1]);
+        int y = Num(args[2]);
+        int button = args.Length > 3 ? Num(args[3]) : 1;
+        uint down, up;
+        switch (button)
+        {
+            case 2:  down = MouseRightDown;  up = MouseRightUp;  break;
+            case 3:  down = MouseMiddleDown; up = MouseMiddleUp; break;
+            default: down = MouseLeftDown;   up = MouseLeftUp;   button = 1; break;
+        }
+        bool moved = SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(20);
+        Send(MouseEvent(down, 0, 0, 0));
+        System.Threading.Thread.Sleep(20);
+        Send(MouseEvent(up, 0, 0, 0));
+        Console.WriteLine("{\"ok\":true,\"clicked\":[" + x + "," + y + "],\"button\":" + button
+                          + ",\"moved\":" + (moved ? "true" : "false") + "}");
+        return 0;
+    }
+
+    /// `move x y` — move the console pointer to the absolute screen pixel (x, y) without clicking.
+    private static int CmdMove(string[] args)
+    {
+        if (args.Length < 3)
+        {
+            Console.WriteLine("{\"ok\":false,\"error\":\"usage: move x y\"}");
+            return 1;
+        }
+        int x = Num(args[1]);
+        int y = Num(args[2]);
+        bool moved = SetCursorPos(x, y);
+        Console.WriteLine("{\"ok\":true,\"moved\":" + (moved ? "true" : "false")
+                          + ",\"at\":[" + x + "," + y + "]}");
+        return 0;
+    }
+
+    /// `hold x y seconds [button]` — move the console pointer to the absolute screen pixel (x, y), press
+    /// the mouse button DOWN, keep it held for `seconds` (fractional allowed, e.g. 1.5), then release. This
+    /// is the press-and-hold that `click` cannot do: `click` presses and releases atomically, so a UI that
+    /// wants a sustained hold (a "Press & Hold" verify button, a drag-arm, a long-press) never sees the
+    /// hold. button 1 = left (default), 2 = right, 3 = middle. Capped at 120s so a bad arg can't wedge us.
+    private static int CmdHold(string[] args)
+    {
+        if (args.Length < 4)
+        {
+            Console.WriteLine("{\"ok\":false,\"error\":\"usage: hold x y seconds [button]\"}");
+            return 1;
+        }
+        int x = Num(args[1]);
+        int y = Num(args[2]);
+        double seconds;
+        if (!double.TryParse(args[3], System.Globalization.NumberStyles.Float,
+                             System.Globalization.CultureInfo.InvariantCulture, out seconds))
+            seconds = 0;
+        if (seconds < 0) seconds = 0;
+        if (seconds > 120) seconds = 120;          // safety cap — never wedge on a fat-fingered duration
+        int button = args.Length > 4 ? Num(args[4]) : 1;
+        uint down, up;
+        switch (button)
+        {
+            case 2:  down = MouseRightDown;  up = MouseRightUp;  break;
+            case 3:  down = MouseMiddleDown; up = MouseMiddleUp; break;
+            default: down = MouseLeftDown;   up = MouseLeftUp;   button = 1; break;
+        }
+        bool moved = SetCursorPos(x, y);
+        System.Threading.Thread.Sleep(20);
+        Send(MouseEvent(down, 0, 0, 0));
+        System.Threading.Thread.Sleep((int)(seconds * 1000));
+        Send(MouseEvent(up, 0, 0, 0));
+        Console.WriteLine("{\"ok\":true,\"held\":[" + x + "," + y + "],\"button\":" + button
+                          + ",\"seconds\":" + seconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                          + ",\"moved\":" + (moved ? "true" : "false") + "}");
+        return 0;
+    }
+
     private static int CmdScreenshot(string[] args)
     {
         int maxWidth = 1600; long quality = 70;
