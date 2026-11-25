@@ -2,6 +2,43 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.19 — 2026-11-25
+
+**KVM transport: back off a failing reconnect and log why it failed**
+
+A channel that could not connect was retried every second for ever, with no
+reason logged. When ssh cannot connect at all it exits in about 20 ms, so four
+channels (input and clipboard, two machines) each respawned it once a second
+for as long as the app ran: a few hundred log lines a minute, enough to rotate
+kvm.log past its own beginning, and nothing said what was wrong.
+
+WHAT ACTUALLY HAPPENED (correcting the 1.3.18 entry)
+
+The 1.3.18 notes said the loop starts when an agent restarts under a running
+app. That was wrong. The loop began two seconds after a relaunch, before any
+agent was touched. For that one launch every ssh the app spawned to a LAN
+address exited with "No route to host" while the same command from a shell
+connected. The likeliest cause is macOS refusing the freshly re-signed app
+Local Network access for that launch; that is not confirmed, and the next two
+relaunches connected normally. This change does not fix that refusal. It stops
+the retry storm and makes the reason visible.
+
+THE CHANGE (Sources/KVM.swift, KVMTransport)
+
+  * Backoff. Channel ends in a row that never reached "ready" wait 1, 2, 4, 8,
+    16, then 30 seconds. The count returns to zero the moment the far side
+    answers, so a channel that was working still retries after one second. A
+    deliberate connect() (arming, a crossing) is not delayed.
+  * The reason. Each failed attempt logs ssh's last stderr line when the retry
+    fires (stderr arrives a moment after stdout closes).
+  * A hint. On the third "No route to host" in a row the log points at Local
+    Network access for zBezel, or a relaunch.
+
+Verified in a standalone harness built from the real transport class against an
+unresolvable host: attempts at 1, 2, 4, 8, 16 and 30 seconds, each with ssh's
+reason. Ruled out along the way: a double close() of an already-closed pipe
+handle (harmless, tested), and connection sharing in the ssh config (none).
+
 ## 1.3.18 — 2026-11-25
 
 **KVM: never capture input for a machine whose channel is not ready**

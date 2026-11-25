@@ -187,6 +187,27 @@ final class KVMTransport {
         return readyFlag
     }
 
+    /// Channel ends in a row that never reached "ready". Drives the reconnect
+    /// backoff; back to zero the moment the far side answers. Under readyLock,
+    /// because the read handler, the send queue and the main thread all touch it.
+    private var failedAttempts = 0
+    private static let maxReconnectDelay: TimeInterval = 30
+
+    private func markReady() {
+        readyLock.lock()
+        readyFlag = true
+        failedAttempts = 0
+        readyLock.unlock()
+    }
+
+    /// How long to wait before the next attempt: 1, 2, 4, 8, 16, then 30 seconds.
+    private func nextReconnectDelay() -> (delay: TimeInterval, attempt: Int) {
+        readyLock.lock(); defer { readyLock.unlock() }
+        failedAttempts += 1
+        let delay = min(Self.maxReconnectDelay, pow(2, Double(min(failedAttempts - 1, 6))))
+        return (delay, failedAttempts)
+    }
+
     /// Writing to a pipe whose reader has gone raises SIGPIPE, and the default
     /// disposition for that is to kill the process — the whole app, not the
     /// write. The KVM is the one part of zBezel that writes continuously to a
@@ -272,9 +293,7 @@ final class KVMTransport {
             // and each byte is scanned once even while a big payload accumulates.
             framer.ingest(chunk) { line in
                 if line.contains("\"ready\"") {
-                    self.readyLock.lock()
-                    self.readyFlag = true
-                    self.readyLock.unlock()
+                    self.markReady()
                 } else {
                     self.onLine?(line)
                 }
@@ -343,16 +362,36 @@ final class KVMTransport {
     /// Throttled, because a burst of pointer events against a dead pipe would
     /// otherwise queue a reconnect per event. The first failure is the one that
     /// matters; the rest are the same failure arriving repeatedly.
+    ///
+    /// And backed off, because the retry used to be a flat second for ever. When
+    /// ssh cannot connect at all it exits in about 20 ms ("No route to host",
+    /// an unresolvable name), so four channels each respawned it every second for
+    /// as long as the app ran: a few hundred log lines a minute, the log rotated
+    /// away its own beginning, and nothing ever said why. A channel that was
+    /// working retries after a second as before; one that keeps failing without
+    /// once reaching "ready" doubles its wait up to thirty seconds, and says what
+    /// ssh said. A deliberate connect() — arming, a crossing — is not delayed.
     private func scheduleReconnect() {
         guard !reconnecting, let host = lastHost else { return }
         reconnecting = true
         let exe = lastExePath
         let fallback = lastFallback
-        KVMLog.write("channel to \(host) died; reconnecting")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        let (delay, attempt) = nextReconnectDelay()
+        // ssh's own last words arrive on stderr a moment after stdout closes, so
+        // the reason is read when the retry fires rather than here.
+        KVMLog.write("channel to \(host) died; reconnecting in \(Int(delay))s (attempt \(attempt))")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self else { return }
             self.reconnecting = false
             guard !self.closed else { return }   // deliberately shut in the meantime
+            if let why = self.lastError, !why.isEmpty {
+                KVMLog.write("transport[\(self.command)]: \(host) attempt \(attempt) failed — \(why.prefix(200))")
+                if attempt == 3, why.contains("No route to host") {
+                    KVMLog.write("transport[\(self.command)]: \"No route to host\" for a machine other tools can "
+                               + "reach usually means macOS is refusing this app Local Network access "
+                               + "(System Settings > Privacy & Security > Local Network), or needs a relaunch")
+                }
+            }
             self.connect(host: host, exePath: exe, fallback: fallback)
         }
     }
