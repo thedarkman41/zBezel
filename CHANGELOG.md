@@ -2,6 +2,57 @@
 
 <!-- shipit.sh inserts new entries directly below this line. Do not remove it. -->
 
+## 1.3.18 — 2026-11-25
+
+**KVM: never capture input for a machine whose channel is not ready**
+
+With rigel's agent not serving, a push at the screen edge handed the pointer
+and keyboard to a machine that could not take them, and there was no way back
+short of the panic chord. Three causes, three fixes.
+
+THE GUARD (Sources/KVM.swift)
+
+handOver only asked whether the panel could be switched (canSwitchPanel). It
+never asked whether the target machine's input channel had answered. ssh still
+connects when the agent is down, so the "far end has gone" hatch (which only
+checks that the local ssh process is alive) never fired, and the left-edge
+return is pinned until the channel is ready, which it never was.
+
+  * An edge crossing is refused, with nothing captured, unless the target's
+    channel is ready. A chooser pick is checked in takeChoice, before its
+    dissolve starts.
+  * A refusal probes the machine's sign-in state. If it is at the Windows
+    sign-in screen the secure channel is engaged, so the next push crosses.
+    This makes the sign-in screen a two-push crossing instead of one.
+  * A watchdog runs while control is handed over: a channel that stays
+    not-ready for 8 seconds brings the pointer and keyboard home (pointer
+    only, no panel switch, no dissolve). Switching between the ordinary and
+    secure channels buys 30 seconds of grace.
+
+THE FALSE HOST-KEY ERROR (Sources/rdp.c)
+
+Any failed connect with a pin on file was reported as HOST_KEY_MISMATCH, so an
+unreachable host (here: the short name resolving to an offline tailnet address)
+told the user to clear a pin that was correct. It is now reported only when a
+certificate was actually presented and differed, the same rule rdp_session.c
+already follows.
+
+THE AGENT STAYS UP (Agent/start-hidden.vbs and the three rebuild paths)
+
+The logon task launched the agent once and exited, so an agent that died stayed
+dead until the next sign-in. The launcher now waits on the agent and starts it
+again five seconds after it exits. Because that would restart the agent in the
+middle of a rebuild and hold the exe open, install-service.ps1, the installer's
+compile script and deploy-agent.sh stop the BezelAgentService task first.
+
+Verified: rdp.c compiles, the Swift builds, the agent was redeployed to rigel
+and bellatrix, and killing it on rigel brought it back under a new pid. The
+guard and the watchdog have not been exercised against a dead machine.
+
+Known and not fixed here: when an agent restarts under a running app, the KVM
+transports can fall into a one-second reconnect loop that only an app relaunch
+clears. That is in KVMTransport's reconnect path, untouched by this change.
+
 ## 1.3.17 — 2026-10-30
 
 **KVM: don't flip the panel to a DisplayPort the Mac doesn't drive**

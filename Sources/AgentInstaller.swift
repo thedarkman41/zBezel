@@ -760,6 +760,7 @@ final class AgentInstaller: ObservableObject {
         return """
         $csc = "\(path)"
         $dir = Join-Path $env:USERPROFILE 'bezel'
+        Stop-ScheduledTask -TaskName BezelAgentService -ErrorAction SilentlyContinue
         Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
         Start-Sleep -Milliseconds 600
         & $csc /nologo /optimize+ /warn:4 /warnaserror /target:exe /out:"$dir\\BezelAgent.exe" "$dir\\BezelAgent.cs" 2>&1 | Out-String

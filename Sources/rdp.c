@@ -28,6 +28,7 @@ typedef struct
     char       *fingerprint_out;
     int         fingerprint_out_len;
     int         fingerprint_matched;
+    int         cert_checked;          /* a certificate was actually presented */
 
     /* What the server said about the logon, from its Save Session Info and
        Logon Error Info PDUs. Written by the callbacks, read by the wait loop
@@ -177,6 +178,7 @@ static DWORD zb_verify_certificate(freerdp *instance, const char *host, UINT16 p
     (void)host; (void)port; (void)common_name; (void)subject; (void)issuer; (void)flags;
 
     zbContext *ctx = (zbContext *)instance->context;
+    ctx->cert_checked = 1;
 
     if (ctx->fingerprint_out && ctx->fingerprint_out_len > 0 && fingerprint)
     {
@@ -266,6 +268,7 @@ int zbezel_rdp_touch(const char *host, uint16_t port,
     zb->fingerprint_out      = fingerprint_out;
     zb->fingerprint_out_len  = fingerprint_out_len;
     zb->fingerprint_matched  = 0;
+    zb->cert_checked         = 0;
     zb->logon_seen           = 0;
     zb->logon_session        = 0;
     zb->logon_failed         = 0;
@@ -314,8 +317,15 @@ int zbezel_rdp_touch(const char *host, uint16_t port,
             snprintf(error_name, (size_t)error_name_len, "%s", name ? name : "UNKNOWN");
         }
         /* A rejected host key surfaces as a generic connect failure; say which
-           it was, because the remedies could not be more different. */
-        if (zb->expected_fingerprint && zb->expected_fingerprint[0] && !zb->fingerprint_matched
+           it was, because the remedies could not be more different.
+
+           Only when a certificate was actually presented. A connection that
+           never reached TLS never calls the verify callback, so
+           fingerprint_matched is still 0, and an unreachable machine (asleep,
+           off the tailnet, wrong name) used to be reported as a changed host
+           key -- sending the user to clear a pin that was correct. Same rule as
+           rdp_session.c. */
+        if (zb->cert_checked && zb->expected_fingerprint && zb->expected_fingerprint[0] && !zb->fingerprint_matched
             && error_name && error_name_len > 0)
             snprintf(error_name, (size_t)error_name_len, "HOST_KEY_MISMATCH");
 

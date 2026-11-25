@@ -1285,6 +1285,107 @@ final class KVMController {
         onChange?()
     }
 
+    // MARK: Channel-ready guard
+    //
+    // The pointer and keyboard may only be captured for a machine whose input
+    // channel has ANSWERED. canSwitchPanel above asks whether the panel can be
+    // switched; nothing used to ask whether the machine could take the input.
+    // With its agent not serving, ssh still connects, the relay finds no pipe and
+    // exits, and the channel reconnects for ever without once saying "ready". A
+    // crossing in that state swallowed every event into nothing, the "far end has
+    // gone" hatch never fired (it only asks whether the local ssh process is
+    // alive, and one always is, mid-retry), and the left-edge return is pinned
+    // until the channel is ready -- which it never was. No pointer, no keyboard.
+
+    /// The channel input for `machineHost` would travel down right now: the
+    /// secure one while it sits at its sign-in screen, the ordinary one otherwise.
+    private func channelReady(for machineHost: String) -> Bool {
+        (secureLocked.contains(machineHost) ? securePipe(for: machineHost)
+                                            : pipe(for: machineHost)).isReady
+    }
+
+    /// Say why a machine was refused, and find out whether it is merely sitting at
+    /// its sign-in screen. There the ordinary channel is refused by design and the
+    /// secure one is the way in, so engage it: the next push at the edge then
+    /// crosses. Captures nothing.
+    private func noteUnready(_ machineHost: String) {
+        let name = nameFor(machineHost)
+        status = "armed, but \(name) is not accepting input — the pointer stays here"
+        KVMLog.write("crossing refused: the input channel to \(machineHost) is not ready")
+        if Date().timeIntervalSince(lastRefusalNotice) > 30 {
+            lastRefusalNotice = Date()
+            onNotice?("\(name) is not accepting keyboard and mouse input (its agent is not "
+                    + "answering), so the pointer stays on the Mac.")
+        }
+        // Give a dead channel a fresh start rather than waiting out its backoff.
+        if !secureLocked.contains(machineHost), !pipe(for: machineHost).isConnected {
+            pipe(for: machineHost).connect(host: machineHost, exePath: exePath,
+                                           fallback: addressForHost?(machineHost))
+        }
+        onChange?()
+        guard !secureLocked.contains(machineHost), !probingSignIn.contains(machineHost) else { return }
+        probingSignIn.insert(machineHost)
+        Task { @MainActor [weak self] in
+            let st = await SecureDesktop.status(host: machineHost)
+            guard let self else { return }
+            self.probingSignIn.remove(machineHost)
+            guard self.isEnabled, st?.locked == true,
+                  !self.secureLocked.contains(machineHost),
+                  self.machines.contains(where: { $0.host == machineHost }) else { return }
+            self.engageSecure(machineHost)
+            self.superviseLockState(machineHost)
+        }
+    }
+    private var probingSignIn: Set<String> = []
+
+    /// An edge crossing refused because the machine it leads to cannot take input.
+    private func refuseUnready(at point: CGPoint, doorway: CGRect) {
+        chosenIndex = nil
+        CGWarpMouseCursorPosition(CGPoint(x: doorway.maxX - 40, y: point.y))
+        noteUnready(host)
+    }
+
+    /// The backstop for a channel that stops answering AFTER the capture. Checked
+    /// once a second while control is handed over; a channel that stays not-ready
+    /// past the limit gives the pointer and keyboard back.
+    private var readyWatch: Timer?
+    private var unreadySince: Date?
+    /// Moving between the ordinary and secure channels takes a while by design
+    /// (the SYSTEM worker has to stand up; after sign-in the agent has to start),
+    /// so each switch buys a grace period before the watch may act.
+    private var readyGraceUntil = Date.distantPast
+    private static let unreadyLimit: TimeInterval = 8
+
+    private func startReadyWatch() {
+        readyWatch?.invalidate()
+        unreadySince = nil
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.checkReady() }
+        RunLoop.main.add(timer, forMode: .common)
+        readyWatch = timer
+    }
+
+    private func stopReadyWatch() {
+        readyWatch?.invalidate()
+        readyWatch = nil
+        unreadySince = nil
+    }
+
+    private func checkReady() {
+        guard isEnabled, side == .there else { stopReadyWatch(); return }
+        if transport.isReady || Date() < readyGraceUntil { unreadySince = nil; return }
+        let since = unreadySince ?? Date()
+        unreadySince = since
+        guard Date().timeIntervalSince(since) > Self.unreadyLimit else { return }
+        let lost = host
+        KVMLog.write("channel to \(lost) not ready for \(Int(Self.unreadyLimit))s while controlling it — returning control")
+        // Pointer home only: no panel switch and no dissolve, both of which would
+        // be asking favours of a machine that has just stopped answering.
+        reconcilePointerHome(reason: "the input channel to \(lost) stopped answering")
+        status = "\(nameFor(lost)) stopped accepting input — control returned"
+        onNotice?("\(nameFor(lost)) stopped accepting keyboard and mouse input, so control came back to the Mac.")
+        onChange?()
+    }
+
     /// The link came or went while armed. Keep the status line truthful without
     /// waiting for the next crossing to rewrite it — and touch only the armed
     /// texts, never a "controlling …" line that describes a live handover.
@@ -1307,7 +1408,12 @@ final class KVMController {
         // input switch, and that needs the DDC channel. Checked here, before
         // anything is captured, for the reason on canSwitchPanel.
         let linkUp = canSwitchPanel?() ?? true
+        // A pick from the chooser was already checked in takeChoice, before its
+        // dissolve began; refusing it here would strand that animation half-run.
+        // Every other way in is checked below, once the target is known.
+        var picked = false
         if let chosen = chosenIndex, machines.indices.contains(chosen) {
+            picked = true
             chosenIndex = nil
             let alreadyShowing = !panelShowsMac && machines[chosen].input == currentInput
             guard linkUp || alreadyShowing else { refuseCrossing(at: point, doorway: doorway); return }
@@ -1343,6 +1449,12 @@ final class KVMController {
             // No chooser UI wired up (should not happen in the app) — fall back to
             // the single deterministic target rather than trapping the pointer.
             activate(first, at: 0)
+        }
+        // Nothing is captured for a machine that cannot take the input. See
+        // "Channel-ready guard".
+        guard picked || channelReady(for: host) else {
+            refuseUnready(at: point, doorway: doorway)
+            return
         }
         // Keep the spot on the glass.
         //
@@ -1395,6 +1507,7 @@ final class KVMController {
         CGWarpMouseCursorPosition(parkingSpot)
 
         side = .there
+        startReadyWatch()
         KVMLog.write("doorway was \(Int(doorway.minX))..\(Int(doorway.maxX)) "
                    + "x \(Int(doorway.minY))..\(Int(doorway.maxY))")
         KVMLog.write("crossed OUT at \(Int(point.x)),\(Int(point.y)) -> remote "
@@ -1590,6 +1703,7 @@ final class KVMController {
     /// stray off the edge.
     private func engageSecure(_ machineHost: String) {
         secureLocked.insert(machineHost)
+        readyGraceUntil = Date().addingTimeInterval(30)
         // Hush the ordinary channels first. At the Windows secure desktop the
         // session-1 `kvm` and `clipboard` workers are refused, so their pipes hit
         // stdout EOF and reconnect every ~30s — pointless thrash against a box
@@ -1641,6 +1755,7 @@ final class KVMController {
     /// pointer-lock if we set it, and make the ordinary channel live again.
     private func disengageSecure(_ machineHost: String) {
         secureLocked.remove(machineHost)
+        readyGraceUntil = Date().addingTimeInterval(30)
         secureTransports[machineHost]?.disconnect()
         secureTransports[machineHost] = nil
         if secureSetPointerLock, lockedIndex == machines.firstIndex(where: { $0.host == machineHost }) {
@@ -1696,6 +1811,13 @@ final class KVMController {
             status = "armed — pointer at the right edge chooses a machine"
             stashedChoice = nil
             onChange?()
+            return false
+        }
+        // The same guard as an edge crossing, applied before the dissolve rather
+        // than after it: a machine that cannot take input is not switched to.
+        guard channelReady(for: machines[index].host) else {
+            stashedChoice = nil
+            noteUnready(machines[index].host)
             return false
         }
         stashedChoice = (crossing.point, crossing.doorway, index, pendingWasDrag)

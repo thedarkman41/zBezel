@@ -31,6 +31,7 @@ echo "==> compiling on $HOST"
 ssh "$HOST" "\$started = Get-Date
 \$exe = \"\$HOME\\bezel\\BezelAgent.exe\"
 \$build = { & '$CSC' /nologo /optimize+ /warn:4 /warnaserror /target:exe /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll' /r:'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll' /out:\"\$exe\" \"\$HOME\\bezel\\BezelAgent.cs\" }
+Stop-ScheduledTask -TaskName BezelAgentService -ErrorAction SilentlyContinue
 foreach (\$attempt in 1, 2) {
     Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 800

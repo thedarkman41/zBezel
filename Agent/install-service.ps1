@@ -40,7 +40,10 @@ $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries `
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings -Force | Out-Null
 
-# Stop any previous instance so the port is free, then start fresh.
+# Stop any previous instance so the port is free, then start fresh. The task
+# first: start-hidden.vbs supervises the agent and would restart the one killed
+# here, and a task that is still running ignores the Start below.
+Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
 Get-Process BezelAgent -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 400
 Start-ScheduledTask -TaskName $name
